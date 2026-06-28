@@ -1,21 +1,60 @@
 {
   "groups": [
     {
-      "id": "example-group-id",
-      "name": "default",
+      "id": "ark-example-group",
+      "name": "Volcengine Ark",
+      "provider_type": "ark",
       "base_url": "https://ark.cn-beijing.volces.com/api/v3",
       "ark_api_key": "sk-xxxx",
-      "route_key": "lr-example-route-key"
+      "api_key": "",
+      "route_key": "lr-example-ark"
+    },
+    {
+      "id": "relay-example-group",
+      "name": "Relay Provider",
+      "provider_type": "relay",
+      "base_url": "https://relay.example.com/v1",
+      "ark_api_key": "",
+      "api_key": "",
+      "route_key": "lr-example-relay"
+    },
+    {
+      "id": "proxy-example-group",
+      "name": "OpenAI Compatible Proxy",
+      "provider_type": "proxy",
+      "base_url": "https://proxy.example.com/v1",
+      "ark_api_key": "",
+      "api_key": "sk-proxy-group-key",
+      "route_key": "lr-example-proxy"
     }
   ],
   "models": [
     {
-      "id": "example-model-id",
-      "name": "DeepSeek",
+      "id": "ark-example-model",
+      "name": "DeepSeek Ark",
       "ep_id": "ep-xxxx",
-      "group_id": "example-group-id",
+      "group_id": "ark-example-group",
+      "api_key": "",
+      "price_group": "",
+      "usable": true
+    },
+    {
+      "id": "relay-example-model",
+      "name": "deepseek-chat",
+      "ep_id": "deepseek-chat",
+      "group_id": "relay-example-group",
+      "api_key": "sk-relay-price-group-key",
+      "price_group": "cheap",
+      "usable": true
+    },
+    {
+      "id": "proxy-example-model",
+      "name": "gpt-4o-mini",
+      "ep_id": "gpt-4o-mini",
+      "group_id": "proxy-example-group",
+      "api_key": "",
+      "price_group": "",
       "usable": true
     }
-  ],
-  "logs": []
+  ]
 }

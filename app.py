@@ -6,6 +6,7 @@ import io
 import json
 import os
 import socket
+import sys
 import threading
 import time
 import uuid
@@ -23,29 +24,94 @@ DEFAULT_CONFIG_FILE = "lin-router-config.json"
 DEFAULT_START_PORT = 18400
 DEFAULT_AUTO_MODEL_NAME = "lin-router-auto"
 DEFAULT_PUBLIC_API_KEY = "lin-router"
+PROVIDER_ARK = "ark"
+PROVIDER_RELAY = "relay"
+PROVIDER_PROXY = "proxy"
 MAX_PORT_SCAN = 1
+
+BLOCKED_FORWARD_HEADERS = {
+    "authorization",
+    "connection",
+    "content-length",
+    "transfer-encoding",
+    "host",
+    "openai-organization",
+    "openai-project",
+    "x-request-id",
+}
+
+
+def resource_path(*parts: str) -> Path:
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        bundled = Path(sys._MEIPASS).joinpath(*parts)
+        if bundled.exists():
+            return bundled
+        return Path(sys.executable).resolve().parent.joinpath(*parts)
+    return Path(__file__).resolve().parent.joinpath(*parts)
+
+
+def render_index_page() -> str:
+    page_path = resource_path("static", "index.html")
+    html = page_path.read_text(encoding="utf-8")
+    return html.replace("__AUTO_MODEL_NAME__", DEFAULT_AUTO_MODEL_NAME)
 
 
 def new_route_key() -> str:
     return f"lr-{uuid.uuid4().hex[:16]}"
 
 
+def mask_secret(value: str) -> str:
+    if not value:
+        return ""
+    if len(value) <= 10:
+        return "***"
+    return f"{value[:4]}...{value[-4:]}"
+
+
+def build_upstream_headers(api_key: str, *, stream: bool) -> Dict[str, str]:
+    return {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "Accept": "text/event-stream" if stream else "application/json",
+        "User-Agent": "Mozilla/5.0",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "Cache-Control": "no-cache",
+    }
+
+
+def can_forward_header(name: str) -> bool:
+    normalized = name.strip().lower()
+    return bool(normalized) and normalized not in BLOCKED_FORWARD_HEADERS and not normalized.startswith("x-stainless-")
+
+
+def parse_bearer_key(auth_header: str) -> str:
+    if not auth_header.lower().startswith("bearer "):
+        return ""
+    return auth_header.split(" ", 1)[1].strip()
+
+
 @dataclass
 class ConnectionGroup:
     id: str
     name: str
+    provider_type: str = PROVIDER_ARK
     base_url: str = DEFAULT_BASE_URL
     ark_api_key: str = ""
+    api_key: str = ""
     route_key: str = ""
+    upstream_models: List[Dict[str, Any]] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "ConnectionGroup":
         return cls(
             id=str(data.get("id") or uuid.uuid4().hex),
             name=data["name"],
+            provider_type=str(data.get("provider_type") or PROVIDER_ARK),
             base_url=data.get("base_url") or DEFAULT_BASE_URL,
             ark_api_key=data.get("ark_api_key") or "",
+            api_key=str(data.get("api_key") or ""),
             route_key=str(data.get("route_key") or ""),
+            upstream_models=[item for item in data.get("upstream_models", []) if isinstance(item, dict)] if isinstance(data.get("upstream_models", []), list) else [],
         )
 
 
@@ -55,6 +121,9 @@ class ModelConfig:
     name: str
     ep_id: str
     group_id: str
+    upstream_model: str = ""
+    api_key: str = ""
+    price_group: str = ""
     usable: bool = True
     last_error: str = ""
     last_success_at: str = ""
@@ -67,6 +136,9 @@ class ModelConfig:
             name=data["name"],
             ep_id=data["ep_id"],
             group_id=str(data.get("group_id") or ""),
+            upstream_model=str(data.get("upstream_model") or ""),
+            api_key=str(data.get("api_key") or ""),
+            price_group=str(data.get("price_group") or ""),
             usable=bool(data.get("usable", True)),
             last_error=str(data.get("last_error", "")),
             last_success_at=str(data.get("last_success_at", "")),
@@ -85,6 +157,27 @@ class RequestLog:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
+
+
+@dataclass
+class UpstreamCandidate:
+    idx: Optional[int]
+    group: ConnectionGroup
+    model: Optional[ModelConfig]
+    label: str
+    target_model: str
+    auth_key: str
+    channel: str = ""
+
+
+@dataclass
+class RouteContext:
+    client_key: str
+    group: ConnectionGroup
+    group_id: str
+    provider_type: str
+    base_url: str
+    display_name: str
 
 
 class ConfigStore:
@@ -126,6 +219,9 @@ class ConfigStore:
             if not group.route_key:
                 group.route_key = new_route_key()
                 changed = True
+            if not group.provider_type:
+                group.provider_type = PROVIDER_ARK
+                changed = True
 
         if not isinstance(models_raw, list):
             if changed:
@@ -148,6 +244,7 @@ class ConfigStore:
                         id=uuid.uuid4().hex,
                         name=f"{base_url} · {len(group_map) + 1}",
                         base_url=base_url,
+                        provider_type=PROVIDER_ARK,
                         ark_api_key=api_key,
                         route_key=new_route_key(),
                     )
@@ -186,6 +283,8 @@ class ConfigStore:
             if not group.route_key:
                 existing = self.find_group(group.id)
                 group.route_key = existing.route_key if existing and existing.route_key else new_route_key()
+            if not group.provider_type:
+                group.provider_type = PROVIDER_ARK
             for idx, item in enumerate(self.groups):
                 if item.id == group.id:
                     self.groups[idx] = group
@@ -218,19 +317,31 @@ class ConfigStore:
             idx = next((i for i, m in enumerate(self.models) if m.id == model_id), -1)
             if idx < 0:
                 return False
-            new_idx = idx - 1 if direction == "up" else idx + 1
-            if new_idx < 0 or new_idx >= len(self.models):
+            group_id = self.models[idx].group_id
+            group_positions = [i for i, model in enumerate(self.models) if model.group_id == group_id]
+            local_idx = next((i for i, pos in enumerate(group_positions) if pos == idx), -1)
+            if local_idx < 0:
                 return False
-            self.models[idx], self.models[new_idx] = self.models[new_idx], self.models[idx]
+            new_local_idx = local_idx - 1 if direction == "up" else local_idx + 1
+            if new_local_idx < 0 or new_local_idx >= len(group_positions):
+                return False
+            group_models = [self.models[pos] for pos in group_positions]
+            group_models[local_idx], group_models[new_local_idx] = group_models[new_local_idx], group_models[local_idx]
+            for pos, model in zip(group_positions, group_models):
+                self.models[pos] = model
             self.save()
             return True
 
     def reset_usable(self) -> None:
         with self._lock:
+            changed = False
             for model in self.models:
-                model.usable = True
-                model.last_error = ""
-            self.save()
+                if not model.usable or model.last_error:
+                    model.usable = True
+                    model.last_error = ""
+                    changed = True
+            if changed:
+                self.save()
 
     def find_group(self, group_id: str) -> Optional[ConnectionGroup]:
         return next((g for g in self.groups if g.id == group_id), None)
@@ -240,6 +351,9 @@ class ConfigStore:
 
     def find_model(self, model_id: str) -> Optional[ModelConfig]:
         return next((m for m in self.models if m.id == model_id), None)
+
+    def find_model_by_group_ep(self, group_id: str, ep_id: str) -> Optional[ModelConfig]:
+        return next((m for m in self.models if m.group_id == group_id and m.ep_id == ep_id), None)
 
 
 class ArkProxyRouter:
@@ -258,6 +372,7 @@ class ArkProxyRouter:
         completion_tokens: int = 0,
         total_tokens: int = 0,
     ) -> None:
+        detail = self._sanitize_detail(detail)
         self.logs.insert(0, RequestLog(
             self._now(),
             path,
@@ -270,6 +385,20 @@ class ArkProxyRouter:
             total_tokens,
         ))
         del self.logs[80:]
+
+    def _sanitize_detail(self, detail: str) -> str:
+        if not detail:
+            return ""
+        safe = str(detail)
+        secrets: List[str] = []
+        for group in self.store.groups:
+            secrets.extend([group.ark_api_key, group.api_key])
+        for model in self.store.models:
+            secrets.append(model.api_key)
+        for secret in secrets:
+            if secret and secret in safe:
+                safe = safe.replace(secret, mask_secret(secret))
+        return safe
 
     def recent_logs(self) -> List[Dict[str, str]]:
         return [asdict(item) for item in self.logs[:30]]
@@ -377,6 +506,71 @@ class ArkProxyRouter:
     def _group_for(self, model: ModelConfig) -> Optional[ConnectionGroup]:
         return self.store.find_group(model.group_id)
 
+    @staticmethod
+    def _mode_for(group: Optional[ConnectionGroup]) -> str:
+        return group.provider_type if group and group.provider_type else PROVIDER_ARK
+
+    def _hit_detail(self, group: ConnectionGroup, model: ModelConfig, requested_label: str, suffix: str) -> str:
+        mode = self._mode_for(group)
+        channel = f"; channel={model.price_group}" if mode == PROVIDER_RELAY and model.price_group else ""
+        return f"mode={mode}; hit={model.ep_id}{channel}; requested={requested_label}; {suffix}"
+
+    def _candidate_hit_detail(self, candidate: UpstreamCandidate, requested_label: str, suffix: str) -> str:
+        mode = self._mode_for(candidate.group)
+        channel = f"; channel={candidate.channel}" if candidate.channel else ""
+        return f"mode={mode}; hit={candidate.target_model}{channel}; requested={requested_label}; {suffix}"
+
+    def _auth_for(self, group: ConnectionGroup, model: Optional[ModelConfig]) -> str:
+        mode = self._mode_for(group)
+        if mode == PROVIDER_RELAY:
+            return model.api_key if model else ""
+        if mode == PROVIDER_PROXY:
+            return group.api_key or group.ark_api_key
+        return group.ark_api_key
+
+    def _candidate_from_model(self, idx: int, model: ModelConfig, group: ConnectionGroup) -> UpstreamCandidate:
+        mode = self._mode_for(group)
+        channel = ""
+        if mode == PROVIDER_RELAY and model.price_group:
+            channel = model.price_group
+        elif mode == PROVIDER_PROXY:
+            channel = "proxy"
+        return UpstreamCandidate(
+            idx=idx,
+            group=group,
+            model=model,
+            label=model.name,
+            target_model=model.ep_id,
+            auth_key=self._auth_for(group, model),
+            channel=channel,
+        )
+
+    def _iter_upstream_candidates(self, requested_model: str | None, group_id: str | None = None) -> Iterator[UpstreamCandidate]:
+        if group_id:
+            group = self.store.find_group(group_id)
+            if not group:
+                return
+            matched = False
+            for idx, model in self._iter_candidates(requested_model, group.id):
+                matched = True
+                yield self._candidate_from_model(idx, model, group)
+            if self._mode_for(group) == PROVIDER_PROXY and not matched and requested_model and not self._is_auto_model(requested_model):
+                yield UpstreamCandidate(
+                    idx=None,
+                    group=group,
+                    model=None,
+                    label=requested_model,
+                    target_model=requested_model,
+                    auth_key=self._auth_for(group, None),
+                    channel="pass-through",
+                )
+            return
+
+        for idx, model in self._iter_candidates(requested_model, None):
+            group = self._group_for(model)
+            if group:
+                yield self._candidate_from_model(idx, model, group)
+
     def _set_unusable(self, idx: int, error: str) -> None:
         model = self.store.models[idx]
         model.usable = False
@@ -391,31 +585,39 @@ class ArkProxyRouter:
         model.last_checked_at = model.last_success_at
         self.store.save()
 
-    def call(self, path: str, payload: Dict[str, Any], group_id: str | None = None) -> Tuple[int, Dict[str, str], bytes]:
+    def _mark_unusable(self, candidate: UpstreamCandidate, error: str) -> None:
+        if candidate.idx is not None:
+            self._set_unusable(candidate.idx, error)
+
+    def _mark_success(self, candidate: UpstreamCandidate) -> None:
+        if candidate.idx is not None:
+            self._set_success(candidate.idx)
+
+    @staticmethod
+    def _route_group_id(route: RouteContext | str | None) -> str | None:
+        if isinstance(route, RouteContext):
+            return route.group_id
+        return route
+
+    def call(self, path: str, payload: Dict[str, Any], route: RouteContext | str | None = None) -> Tuple[int, Dict[str, str], bytes]:
         requested_model = payload.get("model")
         requested_label = str(requested_model) if requested_model else DEFAULT_AUTO_MODEL_NAME
+        group_id = self._route_group_id(route)
         last_error: Optional[Exception] = None
 
-        for idx, model in self._iter_candidates(str(requested_model) if requested_model else None, group_id):
-            group = self._group_for(model)
-            if not group:
-                self.add_log(path, model.name, "skip", f"requested={requested_label}; missing connection group")
-                continue
-            if not group.ark_api_key:
-                self.add_log(path, model.name, "skip", f"requested={requested_label}; missing api key")
-                continue
+        for candidate in self._iter_upstream_candidates(str(requested_model) if requested_model else None, group_id):
+            group = candidate.group
             target_url = self._resolve_url(group.base_url, path)
             outbound_payload = dict(payload)
-            outbound_payload["model"] = model.ep_id
+            if not candidate.auth_key:
+                self.add_log(path, candidate.label, "skip", f"requested={requested_label}; missing upstream api key")
+                continue
+            outbound_payload["model"] = candidate.target_model
             body = json.dumps(outbound_payload, ensure_ascii=False).encode("utf-8")
             request = Request(
                 target_url,
                 data=body,
-                headers={
-                    "Authorization": f"Bearer {group.ark_api_key}",
-                    "Content-Type": "application/json",
-                    "Accept": "application/json",
-                },
+                headers=build_upstream_headers(candidate.auth_key, stream=False),
                 method="POST",
             )
             started_at = time.perf_counter()
@@ -424,12 +626,12 @@ class ArkProxyRouter:
                     data = resp.read()
                     duration_ms = int((time.perf_counter() - started_at) * 1000)
                     prompt_tokens, completion_tokens, total_tokens = self._usage_from_response(data)
-                    self._set_success(idx)
+                    self._mark_success(candidate)
                     self.add_log(
                         path,
-                        model.name,
+                        candidate.label,
                         str(resp.status),
-                        f"hit={model.ep_id}; requested={requested_label}; ok",
+                        self._candidate_hit_detail(candidate, requested_label, "ok"),
                         duration_ms,
                         prompt_tokens,
                         completion_tokens,
@@ -441,8 +643,8 @@ class ArkProxyRouter:
                 raw = err.read().decode("utf-8", "ignore") if hasattr(err, "read") else str(err)
                 last_error = err
                 if self._is_quota_exhausted(err.code, raw):
-                    self._set_unusable(idx, raw)
-                    self.add_log(path, model.name, str(err.code), f"hit={model.ep_id}; requested={requested_label}; quota exhausted, try next", duration_ms)
+                    self._mark_unusable(candidate, raw)
+                    self.add_log(path, candidate.label, str(err.code), self._candidate_hit_detail(candidate, requested_label, "quota exhausted, try next"), duration_ms)
                     continue
                 if self._is_rate_limited(err.code, raw):
                     try:
@@ -451,12 +653,12 @@ class ArkProxyRouter:
                             data = resp.read()
                             retry_duration_ms = int((time.perf_counter() - retry_started_at) * 1000)
                             prompt_tokens, completion_tokens, total_tokens = self._usage_from_response(data)
-                            self._set_success(idx)
+                            self._mark_success(candidate)
                             self.add_log(
                                 path,
-                                model.name,
+                                candidate.label,
                                 str(resp.status),
-                                f"hit={model.ep_id}; requested={requested_label}; retry ok",
+                                self._candidate_hit_detail(candidate, requested_label, "retry ok"),
                                 retry_duration_ms,
                                 prompt_tokens,
                                 completion_tokens,
@@ -466,57 +668,51 @@ class ArkProxyRouter:
                     except Exception as retry_err:
                         last_error = retry_err
                         retry_duration_ms = int((time.perf_counter() - started_at) * 1000)
-                        self.add_log(path, model.name, "retry failed", f"hit={model.ep_id}; requested={requested_label}; {retry_err}", retry_duration_ms)
+                        self.add_log(path, candidate.label, "retry failed", self._candidate_hit_detail(candidate, requested_label, str(retry_err)), retry_duration_ms)
                         continue
                 if self._is_server_error(err.code):
-                    self.add_log(path, model.name, str(err.code), f"hit={model.ep_id}; requested={requested_label}; server error, try next", duration_ms)
+                    self.add_log(path, candidate.label, str(err.code), self._candidate_hit_detail(candidate, requested_label, "server error, try next"), duration_ms)
                     continue
                 headers = dict(getattr(err, "headers", {}) or {})
-                self.add_log(path, model.name, str(err.code), f"hit={model.ep_id}; requested={requested_label}; {raw}", duration_ms)
+                self.add_log(path, candidate.label, str(err.code), self._candidate_hit_detail(candidate, requested_label, raw), duration_ms)
                 return err.code, headers, raw.encode("utf-8")
             except (URLError, TimeoutError, OSError) as err:
                 duration_ms = int((time.perf_counter() - started_at) * 1000)
                 last_error = err
-                self.add_log(path, model.name, "network", f"hit={model.ep_id}; requested={requested_label}; {err}", duration_ms)
+                self.add_log(path, candidate.label, "network", self._candidate_hit_detail(candidate, requested_label, str(err)), duration_ms)
                 continue
 
         if last_error is None:
             raise RuntimeError("No usable models available")
         raise RuntimeError("All available models failed") from last_error
 
-    def stream(self, path: str, payload: Dict[str, Any], group_id: str | None = None) -> Tuple[int, Dict[str, str], Iterable[bytes]]:
+    def stream(self, path: str, payload: Dict[str, Any], route: RouteContext | str | None = None) -> Tuple[int, Dict[str, str], Iterable[bytes]]:
         requested_model = payload.get("model")
         requested_label = str(requested_model) if requested_model else DEFAULT_AUTO_MODEL_NAME
+        group_id = self._route_group_id(route)
         last_error: Optional[Exception] = None
 
-        for idx, model in self._iter_candidates(str(requested_model) if requested_model else None, group_id):
-            group = self._group_for(model)
-            if not group:
-                self.add_log(path, model.name, "skip", f"requested={requested_label}; missing connection group")
-                continue
-            if not group.ark_api_key:
-                self.add_log(path, model.name, "skip", f"requested={requested_label}; missing api key")
-                continue
+        for candidate in self._iter_upstream_candidates(str(requested_model) if requested_model else None, group_id):
+            group = candidate.group
             target_url = self._resolve_url(group.base_url, path)
             outbound_payload = dict(payload)
-            outbound_payload["model"] = model.ep_id
+            if not candidate.auth_key:
+                self.add_log(path, candidate.label, "skip", f"requested={requested_label}; missing upstream api key")
+                continue
+            outbound_payload["model"] = candidate.target_model
             body = json.dumps(outbound_payload, ensure_ascii=False).encode("utf-8")
             request = Request(
                 target_url,
                 data=body,
-                headers={
-                    "Authorization": f"Bearer {group.ark_api_key}",
-                    "Content-Type": "application/json",
-                    "Accept": "text/event-stream",
-                },
+                headers=build_upstream_headers(candidate.auth_key, stream=True),
                 method="POST",
             )
             started_at = time.perf_counter()
             try:
                 resp = urlopen(request, timeout=120)
                 duration_ms = int((time.perf_counter() - started_at) * 1000)
-                self._set_success(idx)
-                self.add_log(path, model.name, "200", f"hit={model.ep_id}; requested={requested_label}; stream ok", duration_ms)
+                self._mark_success(candidate)
+                self.add_log(path, candidate.label, "200", self._candidate_hit_detail(candidate, requested_label, "stream ok"), duration_ms)
 
                 def iterator() -> Iterator[bytes]:
                     try:
@@ -534,22 +730,22 @@ class ArkProxyRouter:
                 raw = err.read().decode("utf-8", "ignore") if hasattr(err, "read") else str(err)
                 last_error = err
                 if self._is_quota_exhausted(err.code, raw):
-                    self._set_unusable(idx, raw)
-                    self.add_log(path, model.name, str(err.code), f"hit={model.ep_id}; requested={requested_label}; quota exhausted, try next", duration_ms)
+                    self._mark_unusable(candidate, raw)
+                    self.add_log(path, candidate.label, str(err.code), self._candidate_hit_detail(candidate, requested_label, "quota exhausted, try next"), duration_ms)
                     continue
                 if self._is_rate_limited(err.code, raw):
-                    self.add_log(path, model.name, str(err.code), f"hit={model.ep_id}; requested={requested_label}; rate limited, try next", duration_ms)
+                    self.add_log(path, candidate.label, str(err.code), self._candidate_hit_detail(candidate, requested_label, "rate limited, try next"), duration_ms)
                     continue
                 if self._is_server_error(err.code):
-                    self.add_log(path, model.name, str(err.code), f"hit={model.ep_id}; requested={requested_label}; server error, try next", duration_ms)
+                    self.add_log(path, candidate.label, str(err.code), self._candidate_hit_detail(candidate, requested_label, "server error, try next"), duration_ms)
                     continue
                 headers = dict(getattr(err, "headers", {}) or {})
-                self.add_log(path, model.name, str(err.code), f"hit={model.ep_id}; requested={requested_label}; {raw}", duration_ms)
+                self.add_log(path, candidate.label, str(err.code), self._candidate_hit_detail(candidate, requested_label, raw), duration_ms)
                 return err.code, headers, [raw.encode("utf-8")]
             except (URLError, TimeoutError, OSError) as err:
                 duration_ms = int((time.perf_counter() - started_at) * 1000)
                 last_error = err
-                self.add_log(path, model.name, "network", f"hit={model.ep_id}; requested={requested_label}; {err}", duration_ms)
+                self.add_log(path, candidate.label, "network", self._candidate_hit_detail(candidate, requested_label, str(err)), duration_ms)
                 continue
 
         if last_error is None:
@@ -557,446 +753,7 @@ class ArkProxyRouter:
         raise RuntimeError("All available models failed") from last_error
 
 
-PAGE_HTML = r"""<!doctype html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Lin Router Hermes</title>
-  <style>
-    :root { color-scheme: light; --bg:#f5f7fb; --panel:#fff; --line:#d6dce8; --text:#18212f; --muted:#5b6575; --accent:#2358ff; --danger:#c62828; --ok:#16794c; --warn:#a15c00; --bad:#b42318; }
-    * { box-sizing: border-box; }
-    body { margin:0; font:14px/1.5 system-ui, -apple-system, Segoe UI, Arial, sans-serif; background:var(--bg); color:var(--text); overflow-x:hidden; }
-    header { height:58px; padding:0 22px; display:flex; align-items:center; justify-content:space-between; background:#fff; border-bottom:1px solid var(--line); }
-    h1 { margin:0; font-size:18px; }
-    h2 { margin:0 0 12px; font-size:15px; }
-    .shell { padding:18px; display:grid; grid-template-columns:minmax(280px, 360px) minmax(0, 1fr); gap:18px; max-width:100vw; min-width:0; }
-    .main { display:grid; gap:18px; min-width:0; }
-    .side { display:grid; gap:18px; align-content:start; min-width:0; }
-    .panel { background:var(--panel); border:1px solid var(--line); border-radius:6px; padding:14px; min-width:0; overflow:hidden; }
-    .hero { grid-column:1 / -1; display:grid; grid-template-columns:1fr auto; gap:16px; align-items:center; }
-    .heroUrl { padding:10px 12px; border:1px solid #c8d2ff; background:#f1f4ff; border-radius:6px; font-family:Consolas, monospace; }
-    label { display:block; margin:10px 0 6px; color:var(--muted); }
-    input, textarea, select, button { font:inherit; }
-    input, textarea, select { width:100%; min-width:0; border:1px solid var(--line); border-radius:6px; padding:9px 10px; background:#fff; color:var(--text); }
-    textarea { min-height:104px; resize:vertical; overflow:auto; overflow-wrap:anywhere; }
-    #proxyBody { font-family:Consolas, monospace; white-space:pre; overflow-wrap:normal; }
-    button { border:1px solid var(--line); background:#fff; color:var(--text); border-radius:6px; padding:7px 9px; cursor:pointer; }
-    button.primary { background:var(--accent); color:#fff; border-color:var(--accent); }
-    button.danger { color:var(--danger); }
-    button:disabled { opacity:.62; cursor:wait; }
-    .row { display:flex; gap:8px; flex-wrap:wrap; }
-    .row > * { flex:1 1 auto; }
-    .muted { color:var(--muted); }
-    .tiny { font-size:12px; }
-    .status { padding:10px 12px; background:#f1f4ff; border:1px solid #cad4ff; border-radius:6px; margin-bottom:12px; }
-    .modelGroups { display:grid; gap:10px; }
-    .modelGroup { border:1px solid var(--line); border-radius:6px; background:#fff; overflow:hidden; }
-    .modelGroup > summary { padding:12px 14px; cursor:pointer; list-style:none; font-weight:700; background:#f8faff; border-bottom:1px solid var(--line); }
-    .modelGroup > summary::-webkit-details-marker { display:none; }
-    .modelGroupSummary { display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; }
-    .modelGroupActions { display:flex; gap:6px; flex-wrap:wrap; font-weight:400; }
-    .modelGroupActions button { padding:5px 8px; font-size:12px; line-height:1.2; }
-    .modelGroupBody { padding:0 14px 12px; overflow:auto; }
-    .codeLine { font-family:Consolas, monospace; background:#f6f8fc; border:1px solid var(--line); border-radius:6px; padding:7px 8px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-    details.panel { padding:0; }
-    details.panel > summary { padding:14px; cursor:pointer; font-weight:700; list-style:none; border-bottom:1px solid var(--line); }
-    details.panel > summary::-webkit-details-marker { display:none; }
-    details.panel > .panelBody { padding:14px; }
-    table { width:100%; border-collapse:collapse; table-layout:fixed; }
-    th, td { padding:8px 8px; border-bottom:1px solid var(--line); text-align:left; vertical-align:middle; overflow-wrap:anywhere; }
-    th { color:var(--muted); font-weight:600; }
-    td.actions { white-space:nowrap; width:280px; }
-    .modelTable th:nth-child(1), .modelTable td:nth-child(1) { width:64px; }
-    .modelTable th:nth-child(2), .modelTable td:nth-child(2) { width:18%; }
-    .modelTable th:nth-child(3), .modelTable td:nth-child(3) { width:20%; }
-    .modelTable th:nth-child(4), .modelTable td:nth-child(4) { width:86px; }
-    .modelTable th:nth-child(5), .modelTable td:nth-child(5) { width:auto; }
-    .modelTable th:nth-child(6), .modelTable td:nth-child(6) { width:280px; }
-    .actionGroup { display:flex; align-items:center; gap:5px; flex-wrap:nowrap; overflow-x:auto; padding-bottom:1px; }
-    .actionGroup button { padding:5px 8px; font-size:12px; line-height:1.2; min-width:42px; }
-    .actionGroup button.danger { min-width:42px; }
-    .pill { display:inline-block; padding:2px 7px; border-radius:999px; background:#edf7f1; color:var(--ok); font-size:12px; line-height:1.3; }
-    .pill.off { background:#fff3e6; color:var(--warn); }
-    .pill.bad { background:#fff0f0; color:var(--bad); }
-    .resultText { max-width:420px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-    .log { white-space:pre-wrap; overflow-wrap:anywhere; word-break:break-word; background:#0f172a; color:#d9e2ff; border-radius:6px; padding:12px; min-height:120px; max-height:260px; overflow:auto; }
-    @media (max-width: 980px) { .shell { grid-template-columns:1fr; } .hero { grid-template-columns:1fr; } }
-  </style>
-</head>
-<body>
-  <header>
-    <h1>Lin Router Hermes</h1>
-    <div class="muted tiny" id="serverInfo"></div>
-  </header>
-  <div class="shell">
-    <section class="panel hero">
-      <div>
-        <h2>Hermes 接入</h2>
-        <div class="heroUrl" id="hermesUrl">加载中...</div>
-        <div class="muted tiny" style="margin-top:8px">Base URL 填这里；API Key 必须填右侧连接组里的 Hermes Key，请求会严格按 Key 限定到对应连接组。</div>
-      </div>
-      <button type="button" id="copyHermesBtn">复制地址</button>
-    </section>
 
-    <aside class="side">
-      <details class="panel" open>
-        <summary>连接组</summary>
-        <div class="panelBody">
-        <form id="groupForm">
-          <input type="hidden" id="groupId">
-          <label>组名</label>
-          <input id="groupName" placeholder="默认组">
-          <label>Base URL</label>
-          <input id="groupBase" placeholder="https://ark.cn-beijing.volces.com/api/v3">
-          <label>Ark API Key</label>
-          <input id="groupKey" type="password" placeholder="sk-xxxx">
-          <div class="row" style="margin-top:12px">
-            <button class="primary" type="submit">保存组</button>
-            <button type="button" id="toggleKeyBtn">显示 Key</button>
-          </div>
-        </form>
-        <div class="muted tiny" style="margin-top:10px">同一个 base/key 只需要建一次。连接组详情和操作已移到右侧模型列表。</div>
-        </div>
-      </details>
-
-      <details class="panel" open>
-        <summary>模型配置</summary>
-        <div class="panelBody">
-        <form id="modelForm">
-          <input type="hidden" id="modelId">
-          <label>名称</label>
-          <input id="name" placeholder="DeepSeek">
-          <label>EP ID</label>
-          <input id="epId" placeholder="ep-xxxx">
-          <label>连接组</label>
-          <select id="groupPick"></select>
-          <div class="row" style="margin-top:12px">
-            <button class="primary" type="submit">保存模型</button>
-            <button type="button" id="resetBtn">全部恢复可用</button>
-          </div>
-        </form>
-        </div>
-      </details>
-
-      <details class="panel">
-        <summary>批量导入</summary>
-        <div class="panelBody">
-        <label>连接组</label>
-        <select id="batchGroupPick"></select>
-        <label>模型列表</label>
-        <textarea id="batchModels" placeholder="模型名称,ep-xxxx&#10;另一个模型,ep-yyyy"></textarea>
-        <div class="row" style="margin-top:12px">
-          <button class="primary" type="button" id="batchImportBtn">批量导入模型</button>
-        </div>
-        </div>
-      </details>
-    </aside>
-
-    <main class="main">
-      <section class="panel">
-        <h2>模型列表</h2>
-        <div class="status" id="summaryBox">加载中...</div>
-        <div class="modelGroups" id="modelGroups"></div>
-      </section>
-
-      <details class="panel" open>
-        <summary>代理测试</summary>
-        <div class="panelBody">
-        <label>测试模板</label>
-        <select id="testTemplate">
-          <option value="auto">自动切换聊天</option>
-          <option value="chat">普通聊天</option>
-          <option value="model">指定模型聊天</option>
-          <option value="stream">流式请求</option>
-        </select>
-        <label>测试模型</label>
-        <select id="testModel"></select>
-        <label>请求路径</label>
-        <input id="proxyPath" value="/v1/chat/completions">
-        <label>请求体</label>
-        <textarea id="proxyBody">{ "messages": [{"role":"user","content":"hello"}], "temperature": 0.2 }</textarea>
-        <div class="row" style="margin-top:12px"><button class="primary" type="button" id="sendTest">发送测试</button></div>
-        </div>
-      </details>
-
-      <details class="panel" open>
-        <summary>返回结果</summary>
-        <div class="panelBody">
-        <div class="log" id="logBox">等待操作。</div>
-        </div>
-      </details>
-
-      <details class="panel" open>
-        <summary>最近请求</summary>
-        <div class="panelBody">
-        <div class="row" style="margin-bottom:10px">
-          <button type="button" id="clearLogsBtn">清空日志</button>
-          <button type="button" id="exportLogsBtn">导出 CSV</button>
-        </div>
-        <table>
-          <thead><tr><th>时间</th><th>模型</th><th>状态</th><th>耗时</th><th>Token</th><th>详情</th></tr></thead>
-          <tbody id="logTbody"></tbody>
-        </table>
-        </div>
-      </details>
-    </main>
-  </div>
-  <script>
-    const $ = (id) => document.getElementById(id);
-    const AUTO_MODEL_NAME = "__AUTO_MODEL_NAME__";
-    let state = { groups: [], models: [], logs: [] };
-    function log(text) { $('logBox').textContent = text; }
-    function esc(text) { return String(text ?? '').replace(/[&<>"']/g, s => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[s])); }
-    function formatResponse(text) {
-      try {
-        return JSON.stringify(JSON.parse(text), null, 2);
-      } catch {
-        return text;
-      }
-    }
-    function statusInfo(m) {
-      if (!m.usable) return { text:'停用', cls:'off', detail:m.last_error ? '额度耗尽或手动停用' : '手动停用' };
-      if (m.last_error) return { text:'异常', cls:'bad', detail:m.last_error };
-      if (m.last_success_at) return { text:'可用', cls:'', detail:`最近成功 ${m.last_success_at}` };
-      return { text:'待测', cls:'off', detail:'尚未成功调用' };
-    }
-    function logStatusClass(status) {
-      const text = String(status || '');
-      if (text === '200' || text.startsWith('2')) return '';
-      if (text === 'network' || text.includes('failed') || text.startsWith('5')) return 'bad';
-      return 'off';
-    }
-    function selectedModelId() {
-      return $('testModel').value || (state.auto_model_name || AUTO_MODEL_NAME);
-    }
-    function selectedRouteKey() {
-      const selected = $('testModel').value;
-      if (selected && selected !== (state.auto_model_name || AUTO_MODEL_NAME)) {
-        const model = state.models.find(m => m.name === selected || m.ep_id === selected || m.id === selected);
-        const group = state.groups.find(g => g.id === model?.group_id);
-        return group?.route_key || '';
-      }
-      const firstUsable = state.models.find(m => m.usable);
-      const group = state.groups.find(g => g.id === firstUsable?.group_id) || state.groups[0];
-      return group?.route_key || '';
-    }
-    function applyTestTemplate() {
-      const model = selectedModelId();
-      const template = $('testTemplate').value;
-      const base = { messages:[{role:'user', content:'hello'}], temperature:0.2 };
-      if (template === 'auto') {
-        $('testModel').value = state.auto_model_name || AUTO_MODEL_NAME;
-        $('proxyBody').value = JSON.stringify(base, null, 2);
-      } else if (template === 'chat') {
-        $('proxyBody').value = JSON.stringify(base, null, 2);
-      } else if (template === 'model') {
-        $('proxyBody').value = JSON.stringify({ ...base, model }, null, 2);
-      } else if (template === 'stream') {
-        $('proxyBody').value = JSON.stringify({ ...base, model, stream:true }, null, 2);
-      }
-      $('proxyPath').value = '/v1/chat/completions';
-    }
-    function fillGroupPick() {
-      const groupOptions = state.groups.map(g => `<option value="${esc(g.id)}">${esc(g.name)}</option>`).join('');
-      $('groupPick').innerHTML = groupOptions;
-      $('batchGroupPick').innerHTML = groupOptions;
-      const autoName = state.auto_model_name || AUTO_MODEL_NAME;
-      $('testModel').innerHTML = [`<option value="${esc(autoName)}">${esc(autoName)} · 智能调度</option>`]
-        .concat(state.models.map(m => `<option value="${esc(m.name)}">${esc(m.name)} · ${esc(m.ep_id)}</option>`))
-        .join('');
-    }
-    function fillGroupForm(g) {
-      $('groupId').value = g?.id || '';
-      $('groupName').value = g?.name || '';
-      $('groupBase').value = g?.base_url || '';
-      $('groupKey').value = g?.ark_api_key || '';
-    }
-    function fillForm(m) {
-      $('modelId').value = m?.id || '';
-      $('name').value = m?.name || '';
-      $('epId').value = m?.ep_id || '';
-      $('groupPick').value = m?.group_id || (state.groups[0]?.id || '');
-    }
-    function groupMeta(groupId) {
-      return (state.group_meta || {})[groupId] || { auto_model_name:AUTO_MODEL_NAME, model_count:0, usable_count:0 };
-    }
-    function bindGroupActions() {
-      document.querySelectorAll('[data-group-edit]').forEach(btn => btn.onclick = (event) => {
-        event.stopPropagation();
-        fillGroupForm(state.groups.find(x => x.id === btn.dataset.groupEdit));
-      });
-      document.querySelectorAll('[data-copy-key]').forEach(btn => btn.onclick = async (event) => {
-        event.stopPropagation();
-        const group = state.groups.find(x => x.id === btn.dataset.copyKey);
-        await navigator.clipboard.writeText(group?.route_key || '');
-        log('连接组 Hermes Key 已复制');
-      });
-      document.querySelectorAll('[data-copy-model]').forEach(btn => btn.onclick = async (event) => {
-        event.stopPropagation();
-        const meta = groupMeta(btn.dataset.copyModel);
-        await navigator.clipboard.writeText(meta.auto_model_name || '');
-        log('连接组自动模型名已复制');
-      });
-      document.querySelectorAll('[data-group-del]').forEach(btn => btn.onclick = (event) => {
-        event.stopPropagation();
-        const group = state.groups.find(x => x.id === btn.dataset.groupDel);
-        if (confirm(`确定删除连接组「${group?.name || btn.dataset.groupDel}」？`)) {
-          mutate(`/api/groups/${btn.dataset.groupDel}`, {}, 'DELETE').catch(err => log(String(err)));
-        }
-      });
-    }
-    function modelRow(m, globalIndex) {
-      const info = statusInfo(m);
-      return `
-        <tr>
-          <td>${globalIndex + 1}</td>
-          <td>${esc(m.name)}</td>
-          <td class="tiny">${esc(m.ep_id)}</td>
-          <td><span class="pill ${info.cls}">${info.text}</span></td>
-          <td class="tiny resultText" title="${esc(info.detail)}">${esc(info.detail)}</td>
-          <td class="actions"><div class="actionGroup">
-            <button type="button" data-edit="${m.id}">编辑</button>
-            <button type="button" data-move-up="${m.id}">上移</button>
-            <button type="button" data-move-down="${m.id}">下移</button>
-            <button type="button" data-toggle="${m.id}">${m.usable ? '停用' : '启用'}</button>
-            <button type="button" data-del="${m.id}" class="danger">删除</button>
-          </div></td>
-        </tr>
-      `;
-    }
-    function bindModelActions() {
-      document.querySelectorAll('[data-edit]').forEach(btn => btn.onclick = () => fillForm(state.models.find(x => x.id === btn.dataset.edit)));
-      document.querySelectorAll('[data-move-up]').forEach(btn => btn.onclick = () => mutate(`/api/models/${btn.dataset.moveUp}/move`, {direction:'up'}));
-      document.querySelectorAll('[data-move-down]').forEach(btn => btn.onclick = () => mutate(`/api/models/${btn.dataset.moveDown}/move`, {direction:'down'}));
-      document.querySelectorAll('[data-toggle]').forEach(btn => btn.onclick = () => mutate(`/api/models/${btn.dataset.toggle}/toggle`, {}));
-      document.querySelectorAll('[data-del]').forEach(btn => btn.onclick = () => {
-        const model = state.models.find(x => x.id === btn.dataset.del);
-        if (confirm(`确定删除模型「${model?.name || btn.dataset.del}」？`)) {
-          mutate(`/api/models/${btn.dataset.del}`, {}, 'DELETE').catch(err => log(String(err)));
-        }
-      });
-    }
-    function renderModels() {
-      const globalIndex = new Map(state.models.map((m, i) => [m.id, i]));
-      $('modelGroups').innerHTML = state.groups.map(group => {
-        const meta = groupMeta(group.id);
-        const models = state.models.filter(m => m.group_id === group.id);
-        const rows = models.map(m => modelRow(m, globalIndex.get(m.id) ?? 0)).join('');
-        return `
-          <details class="modelGroup" open>
-            <summary>
-              <div class="modelGroupSummary">
-                <span>${esc(group.name)} · 模型 ${meta.model_count} · 可用 ${meta.usable_count}</span>
-                <span class="modelGroupActions">
-                  <button type="button" data-group-edit="${group.id}">编辑组</button>
-                  <button type="button" data-copy-key="${group.id}">复制 Key</button>
-                  <button type="button" data-copy-model="${group.id}">复制自动模型</button>
-                  <button type="button" class="danger" data-group-del="${group.id}">删除组</button>
-                </span>
-              </div>
-            </summary>
-            <div class="modelGroupBody">
-              <div class="tiny muted" style="margin:10px 0">自动模型：${esc(meta.auto_model_name)} · Hermes Key：${esc(group.route_key)} · 调度范围由 Key 决定</div>
-              <table class="modelTable">
-                <thead><tr><th>优先级</th><th>名称</th><th>EP</th><th>状态</th><th>最近结果</th><th>操作</th></tr></thead>
-                <tbody>${rows || '<tr><td colspan="6" class="muted">该连接组暂无模型</td></tr>'}</tbody>
-              </table>
-            </div>
-          </details>
-        `;
-      }).join('') || '<div class="muted">暂无连接组</div>';
-      const orphanModels = state.models.filter(m => !state.groups.some(g => g.id === m.group_id));
-      if (orphanModels.length) {
-        $('modelGroups').insertAdjacentHTML('beforeend', `
-          <details class="modelGroup" open>
-            <summary>未分组模型 · ${orphanModels.length}</summary>
-            <div class="modelGroupBody">
-              <table class="modelTable">
-                <thead><tr><th>优先级</th><th>名称</th><th>EP</th><th>状态</th><th>最近结果</th><th>操作</th></tr></thead>
-                <tbody>${orphanModels.map(m => modelRow(m, globalIndex.get(m.id) ?? 0)).join('')}</tbody>
-              </table>
-            </div>
-          </details>
-        `);
-      }
-      bindGroupActions();
-      bindModelActions();
-    }
-    async function refresh() {
-      const resp = await fetch('/api/state');
-      state = await resp.json();
-      $('serverInfo').textContent = `${location.origin} · config: ${state.config_file}`;
-      $('hermesUrl').textContent = `${location.origin}/v1`;
-      $('summaryBox').textContent = `组 ${state.groups.length} · 模型 ${state.models.length} · 可用 ${state.models.filter(m => m.usable).length}`;
-      fillGroupPick();
-      renderModels();
-      $('logTbody').innerHTML = (state.logs || []).map(item => `
-        <tr>
-          <td class="tiny">${esc(item.time)}</td>
-          <td>${esc(item.model)}</td>
-          <td><span class="pill ${logStatusClass(item.status)}">${esc(item.status)}</span></td>
-          <td class="tiny">${Number(item.duration_ms || 0) ? `${Number(item.duration_ms)} ms` : '-'}</td>
-          <td class="tiny">${Number(item.total_tokens || 0) ? `入 ${Number(item.prompt_tokens || 0)} / 出 ${Number(item.completion_tokens || 0)} / 总 ${Number(item.total_tokens || 0)}` : '-'}</td>
-          <td class="tiny resultText" title="${esc(item.detail)}">${esc(item.detail)}</td>
-        </tr>
-      `).join('') || '<tr><td colspan="6" class="muted">暂无请求</td></tr>';
-    }
-    async function mutate(url, body, method='POST') {
-      const resp = await fetch(url, { method, headers:{'Content-Type':'application/json'}, body: method === 'DELETE' ? undefined : JSON.stringify(body) });
-      const text = await resp.text();
-      if (!resp.ok) throw new Error(text || resp.statusText);
-      await refresh();
-      log(text || 'ok');
-    }
-    $('copyHermesBtn').onclick = async () => { await navigator.clipboard.writeText($('hermesUrl').textContent); log('Hermes 地址已复制'); };
-    $('groupForm').onsubmit = async (e) => {
-      e.preventDefault();
-      await mutate('/api/groups', { id:$('groupId').value || undefined, name:$('groupName').value.trim(), base_url:$('groupBase').value.trim() || undefined, ark_api_key:$('groupKey').value.trim() });
-      fillGroupForm(null);
-    };
-    $('modelForm').onsubmit = async (e) => {
-      e.preventDefault();
-      await mutate('/api/models', { id:$('modelId').value || undefined, name:$('name').value.trim(), ep_id:$('epId').value.trim(), group_id:$('groupPick').value });
-      fillForm(null);
-    };
-    $('resetBtn').onclick = async () => mutate('/api/reset', {});
-    $('clearLogsBtn').onclick = async () => mutate('/api/logs/clear', {});
-    $('exportLogsBtn').onclick = () => { location.href = '/api/logs/export'; };
-    $('batchImportBtn').onclick = async () => { await mutate('/api/models/batch', { group_id:$('batchGroupPick').value, text:$('batchModels').value }); $('batchModels').value = ''; };
-    $('toggleKeyBtn').onclick = () => { const input = $('groupKey'); input.type = input.type === 'password' ? 'text' : 'password'; $('toggleKeyBtn').textContent = input.type === 'password' ? '显示 Key' : '隐藏 Key'; };
-    $('testTemplate').onchange = applyTestTemplate;
-    $('testModel').onchange = () => {
-      if (['model', 'stream'].includes($('testTemplate').value)) applyTestTemplate();
-    };
-    $('sendTest').onclick = async () => {
-      const btn = $('sendTest');
-      btn.disabled = true;
-      btn.textContent = '发送中...';
-      try {
-        const payload = JSON.parse($('proxyBody').value);
-        const selectedModel = $('testModel').value;
-        if (selectedModel && selectedModel !== (state.auto_model_name || AUTO_MODEL_NAME)) payload.model = selectedModel;
-        const routeKey = selectedRouteKey();
-        const startedAt = performance.now();
-        const resp = await fetch($('proxyPath').value, { method:'POST', headers:{'Content-Type':'application/json', 'Authorization':`Bearer ${routeKey}`}, body:JSON.stringify(payload) });
-        const text = await resp.text();
-        const elapsed = Math.round(performance.now() - startedAt);
-        log(`HTTP ${resp.status} · ${elapsed} ms\n${formatResponse(text)}`);
-        await refresh();
-      } catch (err) {
-        log(String(err));
-      } finally {
-        btn.disabled = false;
-        btn.textContent = '发送测试';
-      }
-    };
-    refresh().catch(err => log(String(err)));
-  </script>
-</body>
-</html>
-"""
-PAGE_HTML = PAGE_HTML.replace("__AUTO_MODEL_NAME__", DEFAULT_AUTO_MODEL_NAME)
 
 
 class RouterHandler(BaseHTTPRequestHandler):
@@ -1036,19 +793,60 @@ class RouterHandler(BaseHTTPRequestHandler):
         raw = self.rfile.read(length) if length else b"{}"
         return json.loads(raw.decode("utf-8"))
 
-    def _route_group(self) -> Optional[ConnectionGroup]:
-        auth = self.headers.get("Authorization", "")
-        if not auth.lower().startswith("bearer "):
-            return None
-        key = auth.split(" ", 1)[1].strip()
+    def _client_base_url(self) -> str:
+        host = self.headers.get("Host") or f"127.0.0.1:{self.server.server_address[1]}"
+        return f"http://{host}/v1"
+
+    def _effective_group_auth(self, group: ConnectionGroup, payload: Dict[str, Any] | None = None) -> str:
+        payload = payload or {}
+        api_key = str(payload.get("api_key") or "").strip()
+        if api_key:
+            return api_key
+        if group.provider_type == PROVIDER_PROXY:
+            return group.api_key or group.ark_api_key
+        if group.provider_type == PROVIDER_RELAY:
+            return group.ark_api_key or group.api_key
+        return group.ark_api_key or group.api_key
+
+    def _fetch_upstream_models(self, group: ConnectionGroup, auth_key: str) -> List[Dict[str, Any]]:
+        target_url = self.router._resolve_url(group.base_url, "/v1/models")
+        request = Request(
+            target_url,
+            headers=build_upstream_headers(auth_key, stream=False),
+            method="GET",
+        )
+        with urlopen(request, timeout=60) as resp:
+            raw = resp.read()
+        payload = json.loads(raw.decode("utf-8"))
+        data = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(data, list):
+            raise RuntimeError("Invalid upstream model list")
+        return [item for item in data if isinstance(item, dict)]
+
+    def _route_context(self) -> Optional[RouteContext]:
+        key = parse_bearer_key(self.headers.get("Authorization", ""))
         if not key:
             return None
-        return self.store.find_group_by_route_key(key)
+        group = self.store.find_group_by_route_key(key)
+        if not group:
+            return None
+        return RouteContext(
+            client_key=key,
+            group=group,
+            group_id=group.id,
+            provider_type=group.provider_type,
+            base_url=group.base_url,
+            display_name=group.name,
+        )
 
-    def _require_route_group(self) -> Optional[ConnectionGroup]:
-        group = self._route_group()
-        if group:
-            return group
+    def _route_group(self) -> Optional[ConnectionGroup]:
+        ctx = self._route_context()
+        return ctx.group if ctx else None
+
+    def _require_route_context(self) -> Optional[RouteContext]:
+        ctx = self._route_context()
+        if ctx:
+            return ctx
         self._send_json({
             "error": {
                 "message": "Missing or invalid Lin Router group API key",
@@ -1057,6 +855,10 @@ class RouterHandler(BaseHTTPRequestHandler):
             }
         }, status=401)
         return None
+
+    def _require_route_group(self) -> Optional[ConnectionGroup]:
+        ctx = self._require_route_context()
+        return ctx.group if ctx else None
 
     def _visible_models(self, group: Optional[ConnectionGroup]) -> List[ModelConfig]:
         return [
@@ -1068,12 +870,13 @@ class RouterHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         if parsed.path == "/":
-            self._send_text(PAGE_HTML, content_type="text/html; charset=utf-8")
+            self._send_text(render_index_page(), content_type="text/html; charset=utf-8")
             return
         if parsed.path in {"/v1/models", "/models"}:
-            group = self._require_route_group()
-            if not group:
+            ctx = self._require_route_context()
+            if not ctx:
                 return
+            group = ctx.group
             auto_model_name = DEFAULT_AUTO_MODEL_NAME
             self._send_json({
                 "object": "list",
@@ -1090,6 +893,7 @@ class RouterHandler(BaseHTTPRequestHandler):
                         "router_virtual": True,
                         "group_id": group.id,
                         "group_name": group.name,
+                        "provider_type": group.provider_type,
                     },
                     *[
                     {
@@ -1103,6 +907,8 @@ class RouterHandler(BaseHTTPRequestHandler):
                         "display_name": model.name,
                         "ep_id": model.ep_id,
                         "group_id": model.group_id,
+                        "provider_type": group.provider_type,
+                        "price_group": model.price_group,
                     }
                     for model in self._visible_models(group)
                     ],
@@ -1127,6 +933,20 @@ class RouterHandler(BaseHTTPRequestHandler):
                 "logs": self.router.recent_logs(),
             })
             return
+        if parsed.path.startswith("/api/client-config/"):
+            group_id = parsed.path.split("/", 3)[3]
+            group = self.store.find_group(group_id)
+            if not group:
+                self._send_text("group not found", status=404)
+                return
+            self._send_json({
+                "base_url": self._client_base_url(),
+                "api_key": group.route_key,
+                "model": DEFAULT_AUTO_MODEL_NAME,
+                "group_id": group.id,
+                "group_name": group.name,
+            })
+            return
         if parsed.path == "/api/logs/export":
             csv_text = self.router.export_logs_csv()
             self._send_text(csv_text, content_type="text/csv; charset=utf-8")
@@ -1146,7 +966,20 @@ class RouterHandler(BaseHTTPRequestHandler):
             existing = self.store.find_group(str(payload.get("id") or ""))
             if existing and not payload.get("route_key"):
                 payload["route_key"] = existing.route_key
+            if not payload.get("provider_type"):
+                payload["provider_type"] = existing.provider_type if existing else PROVIDER_ARK
+            if existing and "ark_api_key" not in payload:
+                payload["ark_api_key"] = existing.ark_api_key
+            if existing and "api_key" not in payload:
+                payload["api_key"] = existing.api_key
             group = ConnectionGroup.from_dict(payload)
+            if group.provider_type == PROVIDER_PROXY and not group.api_key and group.ark_api_key:
+                group.api_key = group.ark_api_key
+            if group.provider_type == PROVIDER_RELAY:
+                group.ark_api_key = ""
+                group.api_key = ""
+            if group.provider_type == PROVIDER_ARK:
+                group.api_key = ""
             self.store.upsert_group(group)
             self._send_json({"ok": True, "group": asdict(group)})
             return
@@ -1155,10 +988,26 @@ class RouterHandler(BaseHTTPRequestHandler):
             if not payload.get("name") or not payload.get("ep_id") or not payload.get("group_id"):
                 self._send_text("missing required fields", status=400)
                 return
-            if not self.store.find_group(str(payload["group_id"])):
+            group = self.store.find_group(str(payload["group_id"]))
+            if not group:
                 self._send_text("group not found", status=400)
                 return
-            model = ModelConfig.from_dict(payload)
+            existing = self.store.find_model(str(payload.get("id") or ""))
+            merged: Dict[str, Any] = asdict(existing) if existing else {}
+            merged.update(payload)
+            model = ModelConfig.from_dict(merged)
+            if existing:
+                model.usable = bool(merged.get("usable", existing.usable))
+                model.last_error = str(merged.get("last_error", existing.last_error))
+                model.last_success_at = str(merged.get("last_success_at", existing.last_success_at))
+                model.last_checked_at = str(merged.get("last_checked_at", existing.last_checked_at))
+            if group.provider_type != PROVIDER_RELAY:
+                model.api_key = ""
+                model.price_group = ""
+            if group.provider_type in {PROVIDER_RELAY, PROVIDER_PROXY} and not model.upstream_model:
+                model.upstream_model = model.ep_id
+            if group.provider_type not in {PROVIDER_RELAY, PROVIDER_PROXY}:
+                model.upstream_model = ""
             self.store.upsert_model(model)
             self._send_json({"ok": True, "model": asdict(model)})
             return
@@ -1181,15 +1030,60 @@ class RouterHandler(BaseHTTPRequestHandler):
                     ep_id = item
                 if not ep_id:
                     continue
+                group = self.store.find_group(group_id)
                 self.store.upsert_model(ModelConfig(
                     id=uuid.uuid4().hex,
                     name=name or ep_id,
                     ep_id=ep_id,
                     group_id=group_id,
+                    upstream_model=ep_id,
+                    api_key=str(payload.get("api_key") or "") if group and group.provider_type == PROVIDER_RELAY else "",
+                    price_group=str(payload.get("price_group") or "") if group and group.provider_type == PROVIDER_RELAY else "",
                     usable=True,
                 ))
                 added += 1
             self._send_json({"ok": True, "added": added})
+            return
+        if parsed.path == "/api/models/fetch-upstream":
+            payload = self._read_json()
+            group_id = str(payload.get("group_id") or "")
+            group = self.store.find_group(group_id)
+            if not group:
+                self._send_text("group not found", status=400)
+                return
+            if group.provider_type not in {PROVIDER_RELAY, PROVIDER_PROXY}:
+                self._send_text("upstream fetch only supports relay/proxy groups", status=400)
+                return
+            auth_key = self._effective_group_auth(group, payload)
+            if not auth_key:
+                self._send_text("missing upstream api key", status=400)
+                return
+            try:
+                items = self._fetch_upstream_models(group, auth_key)
+            except HTTPError as err:
+                body = err.read().decode("utf-8", "ignore") if hasattr(err, "read") else str(err)
+                self._send_text(body or f"upstream error {err.code}", status=err.code)
+                return
+            except Exception as err:
+                self._send_text(str(err), status=500)
+                return
+            candidates: List[Dict[str, Any]] = []
+            for item in items:
+                ep_id = str(item.get("id") or "").strip()
+                if not ep_id or ep_id == DEFAULT_AUTO_MODEL_NAME:
+                    continue
+                name = str(item.get("display_name") or item.get("name") or ep_id).strip()
+                candidates.append({
+                    "name": name or ep_id,
+                    "ep_id": ep_id,
+                    "root": str(item.get("root") or item.get("id") or ep_id).strip(),
+                })
+            group.upstream_models = candidates
+            self.store.upsert_group(group)
+            self._send_json({
+                "ok": True,
+                "count": len(candidates),
+            })
             return
         if parsed.path.endswith("/toggle") and parsed.path.startswith("/api/models/"):
             model_id = parsed.path.split("/")[3]
@@ -1219,27 +1113,27 @@ class RouterHandler(BaseHTTPRequestHandler):
             self._send_json({"ok": True})
             return
         if parsed.path == "/api/test":
-            group = self._require_route_group()
-            if not group:
+            ctx = self._require_route_context()
+            if not ctx:
                 return
             payload = self._read_json()
             path = str(payload.get("path", "/v1/chat/completions"))
             body = payload.get("body") or {"messages": [{"role": "user", "content": "ping"}]}
             try:
-                status, headers, result = self.router.call(path, body, group.id if group else None)
+                status, headers, result = self.router.call(path, body, ctx)
                 self._send_json({"status": status, "headers": headers, "body": result.decode("utf-8", "ignore")})
             except Exception as err:
                 self._send_text(str(err), status=500)
             return
         if parsed.path.startswith("/v1/") or parsed.path.startswith("/chat/"):
-            group = self._require_route_group()
-            if not group:
+            ctx = self._require_route_context()
+            if not ctx:
                 return
             payload = self._read_json()
             stream = bool(payload.get("stream"))
             try:
                 if stream:
-                    status, headers, iterator = self.router.stream(parsed.path, payload, group.id if group else None)
+                    status, headers, iterator = self.router.stream(parsed.path, payload, ctx)
                     self.send_response(status)
                     for key, value in headers.items():
                         if key.lower() in {"content-length", "connection", "transfer-encoding"}:
@@ -1251,7 +1145,7 @@ class RouterHandler(BaseHTTPRequestHandler):
                         self.wfile.write(chunk)
                         self.wfile.flush()
                     return
-                status, headers, data = self.router.call(parsed.path, payload, group.id if group else None)
+                status, headers, data = self.router.call(parsed.path, payload, ctx)
                 self.send_response(status)
                 for key, value in headers.items():
                     if key.lower() in {"content-length", "connection", "transfer-encoding"}:
@@ -1296,6 +1190,7 @@ def ensure_sample_config(path: Path) -> None:
     sample_group = ConnectionGroup(
         id=uuid.uuid4().hex,
         name="默认组",
+        provider_type=PROVIDER_ARK,
         base_url=DEFAULT_BASE_URL,
         ark_api_key="sk-xxxx",
     )
@@ -1330,6 +1225,7 @@ def create_server(
     config_path = Path(config)
     ensure_sample_config(config_path)
     store = ConfigStore(config_path)
+    store.reset_usable()
     router = ArkProxyRouter(store)
     selected_port = pick_port(port, host)
 
@@ -1360,3 +1256,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

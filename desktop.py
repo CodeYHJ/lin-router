@@ -180,11 +180,11 @@ class LinRouterDesktop:
                 return 0
             if command_id == ID_COPY_BASE:
                 self.copy_to_clipboard(self.base_url)
-                self.set_status("Copied Base URL")
+                self.set_status("已复制 Base URL")
                 return 0
             if command_id == ID_COPY_UI:
                 self.copy_to_clipboard(self.ui_url)
-                self.set_status("Copied UI URL")
+                self.set_status("已复制页面地址")
                 return 0
             if command_id == ID_EXIT:
                 user32.DestroyWindow(hwnd)
@@ -235,7 +235,7 @@ class LinRouterDesktop:
         self.create_label("本地 Hermes/OpenAI 兼容模型调度器", 24, 52, 520, 24)
 
         self.create_label("状态", 28, 96, 120)
-        self.status_handle = self.create_label("Starting...", 150, 96, 400)
+        self.status_handle = self.create_label("启动中...", 150, 96, 400)
 
         self.create_label("管理页面", 28, 128, 120)
         self.ui_handle = self.create_label(self.ui_url, 150, 128, 400)
@@ -258,7 +258,7 @@ class LinRouterDesktop:
         try:
             self.server, self.port, self.config_path = create_server(HOST, DEFAULT_START_PORT, self.config_path)
         except Exception as exc:
-            self.set_status("Start failed")
+            self.set_status("启动失败")
             user32.MessageBoxW(
                 self.hwnd,
                 f"启动失败：{exc}\n\n请确认 {DEFAULT_START_PORT} 端口没有被其他程序占用。",
@@ -272,7 +272,7 @@ class LinRouterDesktop:
         self.set_label(self.ui_handle, self.ui_url)
         self.set_label(self.base_handle, self.base_url)
         self.set_label(self.config_handle, str(self.config_path))
-        self.set_status(f"Running on {HOST}:{self.port}")
+        self.set_status(f"运行中：{HOST}:{self.port}")
 
         self.server_thread = threading.Thread(target=self.server.serve_forever, name="LinRouterServer", daemon=True)
         self.server_thread.start()
