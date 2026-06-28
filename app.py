@@ -148,6 +148,16 @@ def build_passthrough_headers(api_key: str, incoming_headers: Dict[str, str], *,
     return headers
 
 
+def build_model_fetch_headers(auth_key: str) -> Dict[str, str]:
+    return {
+        "authorization": f"Bearer {auth_key}",
+        "user-agent": BROWSER_UA,
+        "accept": "application/json, text/event-stream, */*",
+        "accept-language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "content-type": "application/json",
+    }
+
+
 def can_forward_header(name: str) -> bool:
     normalized = name.strip().lower()
     return bool(normalized) and normalized not in BLOCKED_FORWARD_HEADERS and not normalized.startswith("x-stainless-")
@@ -1264,7 +1274,7 @@ class RouterHandler(BaseHTTPRequestHandler):
 
     def _fetch_upstream_models(self, group: ConnectionGroup, auth_key: str) -> List[Dict[str, Any]]:
         target_url = self.router._resolve_url(group.base_url, "/v1/models")
-        headers = self.router._headers_for(group, auth_key, {}, stream=False)
+        headers = build_model_fetch_headers(auth_key)
         request = Request(
             target_url,
             headers=headers,
@@ -1308,6 +1318,52 @@ class RouterHandler(BaseHTTPRequestHandler):
         if not isinstance(data, list):
             raise RuntimeError("Invalid upstream model list")
         return [item for item in data if isinstance(item, dict)]
+
+    def _clone_group(self, group_id: str) -> Optional[Dict[str, Any]]:
+        source = self.store.find_group(group_id)
+        if not source:
+            return None
+        cloned = ConnectionGroup(
+            id=uuid.uuid4().hex,
+            name=f"{source.name} - 副本",
+            provider_type=source.provider_type,
+            base_url=source.base_url,
+            ark_api_key=source.ark_api_key,
+            api_key=source.api_key,
+            route_key=new_route_key(),
+            auto_model_cooldown_minutes=source.auto_model_cooldown_minutes,
+            waf_compatible=source.waf_compatible,
+            auto_sticky_model_id="",
+            upstream_models=[dict(item) for item in source.upstream_models],
+            upstream_models_fetched_at=source.upstream_models_fetched_at,
+        )
+        if cloned.provider_type == PROVIDER_PROXY and not cloned.api_key and cloned.ark_api_key:
+            cloned.api_key = cloned.ark_api_key
+        if cloned.provider_type in {PROVIDER_RELAY, PROVIDER_ARK}:
+            cloned.api_key = ""
+            cloned.ark_api_key = "" if cloned.provider_type == PROVIDER_RELAY else cloned.ark_api_key
+        self.store.upsert_group(cloned)
+
+        copied = 0
+        source_models = [model for model in self.store.models if model.group_id == source.id]
+        for model in source_models:
+            self.store.upsert_model(ModelConfig(
+                id=uuid.uuid4().hex,
+                name=model.name,
+                ep_id=model.ep_id,
+                group_id=cloned.id,
+                upstream_model=model.upstream_model,
+                api_key=model.api_key,
+                price_group=model.price_group,
+                usable=model.usable,
+                last_error=model.last_error,
+                last_success_at=model.last_success_at,
+                last_checked_at=model.last_checked_at,
+                cooldown_until=model.cooldown_until,
+                cooldown_reason=model.cooldown_reason,
+            ))
+            copied += 1
+        return {"group": asdict(cloned), "copied_models": copied}
 
     def _route_context(self) -> Optional[RouteContext]:
         key = parse_bearer_key(self.headers.get("Authorization", ""))
@@ -1473,6 +1529,14 @@ class RouterHandler(BaseHTTPRequestHandler):
                 group.api_key = ""
             self.store.upsert_group(group)
             self._send_json({"ok": True, "group": asdict(group)})
+            return
+        if parsed.path.startswith("/api/groups/") and parsed.path.endswith("/clone"):
+            group_id = parsed.path.split("/")[3]
+            cloned = self._clone_group(group_id)
+            if not cloned:
+                self._send_text("group not found", status=404)
+                return
+            self._send_json({"ok": True, **cloned})
             return
         if parsed.path == "/api/models":
             payload = self._read_json()

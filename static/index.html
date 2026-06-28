@@ -473,6 +473,10 @@
         event.stopPropagation();
         await copyClientConfig(btn.dataset.copyClient);
       });
+      document.querySelectorAll("[data-group-clone]").forEach(btn => btn.onclick = (event) => {
+        event.stopPropagation();
+        mutate(`/api/groups/${btn.dataset.groupClone}/clone`, {}).catch(err => log(String(err)));
+      });
       document.querySelectorAll("[data-group-test]").forEach(btn => btn.onclick = (event) => {
         event.stopPropagation();
         $("testGroup").value = btn.dataset.groupTest;
@@ -545,6 +549,7 @@
             <span class="modelGroupActions">
               <button type="button" data-group-test="${group.id}">测试自动</button>
               <button type="button" data-copy-client="${group.id}">复制 Hermes 配置</button>
+              <button type="button" data-group-clone="${group.id}">复制组</button>
               <button type="button" data-group-edit="${group.id}">编辑组</button>
               <button type="button" data-copy-key="${group.id}">复制 Key</button>
               <button type="button" class="danger" data-group-del="${group.id}">删除组</button>
@@ -724,9 +729,14 @@
         const selectedModel = $("testModel").value;
         if (selectedModel && selectedModel !== (state.auto_model_name || AUTO_MODEL_NAME)) payload.model = selectedModel;
         const startedAt = performance.now();
+        const group = currentTestGroup();
+        const headers = { "Content-Type":"application/json", "Authorization":`Bearer ${selectedRouteKey()}` };
+        if (group?.provider_type === "relay" && group?.waf_compatible) {
+          headers["X-LinRouter-Test"] = "relay-waf";
+        }
         const resp = await fetch($("proxyPath").value, {
           method:"POST",
-          headers:{ "Content-Type":"application/json", "Authorization":`Bearer ${selectedRouteKey()}` },
+          headers,
           body: JSON.stringify(payload),
         });
         const text = await resp.text();
