@@ -1,16 +1,16 @@
 # lin-router
 
-本地 OpenAI 兼容路由器，用于给 Hermes、Codex++ 等客户端提供一个稳定入口。
+本地 OpenAI 兼容路由器，给 Hermes、Codex++、通用 OpenAI 客户端提供一个统一入口。
 
 ## 启动
 
-桌面端双击：
+桌面端：
 
 ```text
 dist\LinRouter.exe
 ```
 
-命令行启动：
+命令行：
 
 ```bash
 python app.py
@@ -20,55 +20,65 @@ python app.py
 
 ```text
 http://127.0.0.1:18400
-```
-
-客户端 Base URL：
-
-```text
 http://127.0.0.1:18400/v1
 ```
 
-客户端 API Key 使用页面里对应连接组生成的 `lr-...` key。服务端会严格按 key 判断要调用哪个连接组。
+客户端填写页面里生成的 `lr-...` Key，服务端会按 Key 绑定到对应连接组。
 
-## 三种上游模式
+## 主要能力
 
-火山方舟：
+- 连接组管理
+- 火山方舟 / 中转站 / 通用 OpenAI 代理三种模式
+- 自动调度模型 `lin-router-auto`
+- 连接组级别自动冷却
+- Hermes / WAF 兼容模式
+- 自动获取上游模型
+- 最近请求日志和请求详情
+- 代理测试
+- 复制 Hermes 配置
+- 复制连接组
+
+## 三种模式
+
+### 火山方舟
 
 - 连接组填写：组名、Base URL、Ark API Key
-- 模型填写：模型名称、EP ID
+- 模型填写：显示名称、EP ID
 
-中转站：
+### 中转站
 
 - 连接组填写：组名、Base URL
-- 模型通道填写：模型名称、上游模型名、该价格组对应的 API Key、价格组名称
+- 模型填写：显示名称、上游模型、价格组对应 API Key、价格组
+- 可开启 `Hermes / WAF 兼容`
+- 可设置自动冷却分钟数
 
-通用 OpenAI 代理：
+### 通用 OpenAI 代理
 
 - 连接组填写：组名、Base URL、上游 API Key
-- 模型可以配置本地名称到上游模型名的映射
-- 客户端指定未配置的具体模型时，会按原模型名透传给上游
+- 模型可映射到上游模型名
+- 客户端未显式指定模型时，按本地配置透传
 
-`lin-router-auto` 是统一的自动调度模型名。实际调度范围由客户端传入的连接组 key 决定。
+## Hermes / Codex++
 
-Hermes / Codex++ 接入统一填写：
+Hermes 推荐：
 
 ```text
 Base URL: http://127.0.0.1:18400/v1
-API Key: 页面里对应连接组的 lr-... key
+API Key: 对应连接组的 lr-... key
 Model: lin-router-auto
 ```
 
-上游请求会使用 Lin Router 生成的干净请求头，不会透传 `x-stainless-*` 等容易触发部分中转站拦截的 SDK 头。
+Codex++ 也走同样的本地入口，但建议单独建连接组，按实际需要开启或关闭 WAF 兼容。
 
-## 调试预览
+## 预览 / 调试
 
-如果要查看源码前端效果，可以用调试端口启动同一份正式配置：
+前端和正式服务共用同一份配置文件，便于调试：
 
 ```bash
 python app.py --port 18409 --config lin-router-config.json
 ```
 
-这样不会占用正式的 `18400`，但会读取和写入同一份 `lin-router-config.json`。也可以直接双击 `start-preview-18409.bat`。
+也可以直接双击 `start-preview-18409.bat`。
 
 ## 打包
 
@@ -82,8 +92,9 @@ python -m PyInstaller --noconfirm LinRouter.spec
 dist\LinRouter.exe
 ```
 
-前端页面放在 `static/index.html`，打包配置会把 `static` 一起带进 exe。
+## 配置文件
 
-## Git 安全
+- 正式配置：`lin-router-config.json`
+- 模板配置：`lin-router-config.example.json`
 
-真实配置文件 `lin-router-config.json` 已被 `.gitignore` 忽略，不要提交真实 API Key。仓库中只保留 `lin-router-config.example.json` 模板。
+真实配置已加入 `.gitignore`，不要提交真实 API Key。
