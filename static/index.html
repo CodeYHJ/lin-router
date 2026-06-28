@@ -110,6 +110,13 @@
               <label id="groupKeyLabel">上游 API Key</label>
               <input id="groupKey" type="password" placeholder="sk-xxxx">
             </div>
+            <div id="groupCooldownWrap" style="display:none">
+              <label>自动冷却分钟</label>
+              <input id="groupCooldownMinutes" type="number" min="0" step="1" value="5">
+            </div>
+            <div id="groupWafWrap" style="display:none; margin-top:10px">
+              <label><input id="groupWafCompatible" type="checkbox" style="width:auto"> Hermes / WAF 兼容</label>
+            </div>
             <div class="row" style="margin-top:12px">
               <button class="primary" type="submit">保存组</button>
               <button type="button" id="toggleKeyBtn">显示 Key</button>
@@ -221,7 +228,7 @@
             <button type="button" id="exportLogsBtn">导出 CSV</button>
           </div>
           <table>
-            <thead><tr><th>时间</th><th>模型</th><th>状态</th><th>耗时</th><th>Token</th><th>详情</th></tr></thead>
+            <thead><tr><th>时间</th><th>模型</th><th>状态</th><th>耗时</th><th>Token</th><th>详情</th><th>操作</th></tr></thead>
             <tbody id="logTbody"></tbody>
           </table>
         </div>
@@ -248,6 +255,10 @@
     }
 
     function statusInfo(m) {
+      if (m.cooldown_until) {
+        const until = new Date(Number(m.cooldown_until) * 1000);
+        return { text:"冷却", cls:"off", detail:`冷却至 ${until.toLocaleString("zh-CN")}` };
+      }
       if (!m.usable) return { text:"停用", cls:"off", detail:m.last_error ? "额度耗尽或手动停用" : "手动停用" };
       if (m.last_error) return { text:"异常", cls:"bad", detail:m.last_error };
       if (m.last_success_at) return { text:"可用", cls:"", detail:`最近成功 ${m.last_success_at}` };
@@ -259,6 +270,16 @@
       if (text === "200" || text.startsWith("2")) return "";
       if (text === "network" || text.includes("failed") || text.startsWith("5")) return "bad";
       return "off";
+    }
+
+    function tokenSummary(item) {
+      const prompt = Number(item.prompt_tokens || 0);
+      const completion = Number(item.completion_tokens || 0);
+      const total = Number(item.total_tokens || 0);
+      const cached = Number(item.cached_tokens || 0);
+      if (!total && !prompt && !completion && !cached) return "-";
+      const hit = prompt ? Math.round((cached / prompt) * 100) : 0;
+      return `入 ${prompt} / 出 ${completion} / 总 ${total} / 缓 ${cached} (${hit}%)`;
     }
 
     function groupModels(groupId) {
@@ -346,6 +367,8 @@
       $("groupProvider").value = group?.provider_type || "ark";
       $("groupBase").value = group?.base_url || "";
       $("groupKey").value = group?.provider_type === "proxy" ? (group?.api_key || group?.ark_api_key || "") : (group?.ark_api_key || "");
+      $("groupCooldownMinutes").value = Number(group?.auto_model_cooldown_minutes ?? 5);
+      $("groupWafCompatible").checked = Boolean(group?.waf_compatible);
       syncGroupModeUI();
     }
 
@@ -373,6 +396,8 @@
     function syncGroupModeUI() {
       const mode = $("groupProvider").value || "ark";
       const needsGroupKey = mode === "ark" || mode === "proxy";
+      $("groupCooldownWrap").style.display = mode === "relay" ? "" : "none";
+      $("groupWafWrap").style.display = mode === "relay" ? "" : "none";
       $("groupKeyWrap").style.display = needsGroupKey ? "" : "none";
       $("toggleKeyBtn").style.display = needsGroupKey ? "" : "none";
       $("groupKeyLabel").textContent = mode === "ark" ? "Ark API Key" : "上游 API Key";
@@ -501,6 +526,14 @@
       });
     }
 
+    function bindLogActions() {
+      document.querySelectorAll("[data-log-detail]").forEach(btn => btn.onclick = () => {
+        const item = (state.logs || [])[Number(btn.dataset.logDetail)];
+        if (!item) return;
+        log(`${item.time} ${item.model} ${item.status}\n${item.detail || "无详情"}`);
+      });
+    }
+
     function renderModels() {
       $("modelGroups").innerHTML = state.groups.map(group => {
         const meta = groupMeta(group.id);
@@ -518,7 +551,7 @@
             </span>
           </div></summary>
           <div class="modelGroupBody">
-            <div class="tiny muted" style="margin:10px 0">自动模型：${esc(meta.auto_model_name)} - 本地 Key：${esc(group.route_key)} - 调度范围由 Key 决定。</div>
+            <div class="tiny muted" style="margin:10px 0">自动模型：${esc(meta.auto_model_name)} - 本地 Key：${esc(group.route_key)} - 冷却：${esc(group.auto_model_cooldown_minutes ?? 5)} 分钟 - WAF：${group.waf_compatible ? "开启" : "关闭"}</div>
             <table class="modelTable">
               <thead><tr><th>优先级</th><th>名称</th><th>上游模型</th><th>通道</th><th>状态</th><th>最近结果</th><th>操作</th></tr></thead>
               <tbody>${rows || '<tr><td colspan="7" class="muted">该连接组暂无模型</td></tr>'}</tbody>
@@ -555,14 +588,16 @@
       syncModelModeUI("");
       renderTestModels($("testModel").value);
       renderModels();
-      $("logTbody").innerHTML = (state.logs || []).map(item => `<tr>
+      $("logTbody").innerHTML = (state.logs || []).map((item, idx) => `<tr>
         <td class="tiny">${esc(item.time)}</td>
         <td>${esc(item.model)}</td>
         <td><span class="pill ${logStatusClass(item.status)}">${esc(item.status)}</span></td>
         <td class="tiny">${Number(item.duration_ms || 0) ? `${Number(item.duration_ms)} ms` : "-"}</td>
-        <td class="tiny">${Number(item.total_tokens || 0) ? `入 ${Number(item.prompt_tokens || 0)} / 出 ${Number(item.completion_tokens || 0)} / 总 ${Number(item.total_tokens || 0)}` : "-"}</td>
+        <td class="tiny">${esc(tokenSummary(item))}</td>
         <td class="tiny resultText" title="${esc(item.detail)}">${esc(item.detail)}</td>
-      </tr>`).join("") || '<tr><td colspan="6" class="muted">暂无请求</td></tr>';
+        <td><button type="button" data-log-detail="${idx}">查看</button></td>
+      </tr>`).join("") || '<tr><td colspan="7" class="muted">暂无请求</td></tr>';
+      bindLogActions();
     }
 
     async function mutate(url, body, method="POST") {
@@ -593,6 +628,8 @@
         base_url:$("groupBase").value.trim() || undefined,
         ark_api_key:mode === "ark" ? key : "",
         api_key:mode === "proxy" ? key : "",
+        auto_model_cooldown_minutes:mode === "relay" ? Number($("groupCooldownMinutes").value || 0) : undefined,
+        waf_compatible:mode === "relay" ? $("groupWafCompatible").checked : false,
       });
       fillGroupForm(null);
     };
