@@ -1264,13 +1264,45 @@ class RouterHandler(BaseHTTPRequestHandler):
 
     def _fetch_upstream_models(self, group: ConnectionGroup, auth_key: str) -> List[Dict[str, Any]]:
         target_url = self.router._resolve_url(group.base_url, "/v1/models")
+        headers = self.router._headers_for(group, auth_key, {}, stream=False)
         request = Request(
             target_url,
-            headers=build_upstream_headers(auth_key, stream=False),
+            headers=headers,
             method="GET",
         )
-        with urlopen(request, timeout=60) as resp:
-            raw = resp.read()
+        started_at = time.perf_counter()
+        try:
+            with urlopen(request, timeout=60) as resp:
+                raw = resp.read()
+                duration_ms = int((time.perf_counter() - started_at) * 1000)
+                self.router.add_log(
+                    "/v1/models",
+                    group.name,
+                    str(resp.status),
+                    f"fetch upstream models ok; upstream={target_url}; out_headers=({self.router._safe_header_view(headers)})",
+                    duration_ms,
+                )
+        except HTTPError as err:
+            duration_ms = int((time.perf_counter() - started_at) * 1000)
+            body = err.read().decode("utf-8", "ignore") if hasattr(err, "read") else str(err)
+            self.router.add_log(
+                "/v1/models",
+                group.name,
+                str(err.code),
+                f"fetch upstream models failed; upstream={target_url}; error={self.router._short_error(body)}; out_headers=({self.router._safe_header_view(headers)})",
+                duration_ms,
+            )
+            raise RuntimeError(body or f"upstream error {err.code}") from err
+        except Exception as err:
+            duration_ms = int((time.perf_counter() - started_at) * 1000)
+            self.router.add_log(
+                "/v1/models",
+                group.name,
+                "network",
+                f"fetch upstream models failed; upstream={target_url}; error={self.router._short_error(str(err))}; out_headers=({self.router._safe_header_view(headers)})",
+                duration_ms,
+            )
+            raise
         payload = json.loads(raw.decode("utf-8"))
         data = payload.get("data") if isinstance(payload, dict) else None
         if not isinstance(data, list):
@@ -1523,10 +1555,6 @@ class RouterHandler(BaseHTTPRequestHandler):
                 return
             try:
                 items = self._fetch_upstream_models(group, auth_key)
-            except HTTPError as err:
-                body = err.read().decode("utf-8", "ignore") if hasattr(err, "read") else str(err)
-                self._send_text(body or f"upstream error {err.code}", status=err.code)
-                return
             except Exception as err:
                 self._send_text(str(err), status=500)
                 return
