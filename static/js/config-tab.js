@@ -88,6 +88,7 @@ const ConfigTab = {
             <button type="submit" class="btn-primary">保存连接组</button>
             ${g ? `<button type="button" class="btn-danger" id="group-delete">删除组</button>` : ''}
             ${g ? `<button type="button" id="group-clone">复制组</button>` : ''}
+            ${g ? `<button type="button" class="btn-primary" id="group-add-model">+ 添加模型</button>` : ''}
           </div>
         </section>
       </form>
@@ -318,6 +319,7 @@ const ConfigTab = {
       });
       panel.querySelector('#group-delete')?.addEventListener('click', () => this.onGroupDelete());
       panel.querySelector('#group-clone')?.addEventListener('click', () => this.onGroupClone());
+      panel.querySelector('#group-add-model')?.addEventListener('click', () => this.onAddModelToGroup());
       this.bindAutoSave(groupForm, () => this.autoSaveGroup());
     }
 
@@ -407,6 +409,26 @@ const ConfigTab = {
       Toast.success('连接组已删除');
     } catch (err) {
       Toast.error('删除失败：' + err.message);
+    }
+  },
+
+  async onAddModelToGroup() {
+    const groupId = document.getElementById('group-id')?.value;
+    if (!groupId) {
+      Toast.warning('请先保存连接组');
+      return;
+    }
+    const group = Store.getGroup(groupId);
+    const name = prompt('新模型名称：', '新模型');
+    if (!name) return;
+    try {
+      const data = await API.createModel({ name, ep_id: name, group_id: groupId, usable: true });
+      await Store.load();
+      Store.select('model', data.model.id);
+      Tabs.switch('config');
+      Toast.success('模型已创建，请填写详情');
+    } catch (err) {
+      Toast.error('创建失败：' + err.message);
     }
   },
 

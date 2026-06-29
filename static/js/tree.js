@@ -143,7 +143,13 @@ const Tree = {
           this.render();
           return;
         }
+        // 模型节点嵌套在组节点内，阻止冒泡避免同时触发组节点点击
+        if (type === 'model') {
+          e.stopPropagation();
+        }
         Store.select(type, id);
+        // 单击节点时直接切到配置 Tab，保证右侧内容与左侧选中一致
+        Tabs.switch('config');
       });
       node.addEventListener('dblclick', e => {
         const action = e.target.dataset.action;

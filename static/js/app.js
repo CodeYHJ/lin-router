@@ -177,12 +177,12 @@ const App = {
   },
 
   async createGroup() {
-    const name = prompt('新建连接组名称：', '新连接组');
-    if (!name) return;
     try {
-      await API.createGroup({ name, provider_type: 'ark', base_url: '', api_key: '', ark_api_key: '' });
+      const data = await API.createGroup({ name: '新连接组', provider_type: 'ark', base_url: '', api_key: '', ark_api_key: '' });
       await Store.load();
-      Toast.success('连接组已创建');
+      Store.select('group', data.group.id);
+      Tabs.switch('config');
+      Toast.success('已新建连接组，请直接编辑');
     } catch (err) {
       Toast.error('创建失败：' + err.message);
     }
