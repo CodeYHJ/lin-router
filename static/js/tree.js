@@ -280,8 +280,6 @@ const Tree = {
 
   groupMenuHtml(id) {
     const g = Store.getGroup(id);
-    const models = Store.getModelsByGroup(id);
-    const allUsable = models.length > 0 && models.every(m => m.usable);
     return `
       <div class="context-item" data-action="test" data-id="${id}">测试自动</div>
       <div class="context-item" data-action="copy-key" data-id="${id}">复制 Key</div>
@@ -289,7 +287,8 @@ const Tree = {
       <div class="context-item" data-action="clone-group" data-id="${id}">复制组</div>
       <div class="context-item" data-action="rename-group" data-id="${id}">重命名</div>
       <div class="context-separator"></div>
-      <div class="context-item" data-action="toggle-group" data-id="${id}">${allUsable ? '全部禁用本组模型' : '全部启用本组模型'}</div>
+      <div class="context-item" data-action="enable-group" data-id="${id}">全部启用本组模型</div>
+      <div class="context-item" data-action="disable-group" data-id="${id}">全部禁用本组模型</div>
       <div class="context-item" data-action="expand-all" data-id="${id}">全部展开</div>
       <div class="context-item" data-action="collapse-all" data-id="${id}">全部折叠</div>
       <div class="context-separator"></div>
@@ -372,17 +371,14 @@ const Tree = {
         }
         break;
       }
-      case 'toggle-group': {
-        const g = Store.getGroup(id);
-        const models = Store.getModelsByGroup(id);
-        const allUsable = models.length > 0 && models.every(m => m.usable);
-        try {
-          await API.setGroupUsable(id, !allUsable);
-          await Store.load();
-          Toast.success(allUsable ? '本组模型已禁用' : '本组模型已启用');
-        } catch (err) { Toast.error(err.message); }
+      case 'enable-group':
+        try { await API.setGroupUsable(id, true); await Store.load(); Toast.success('本组模型已启用'); }
+        catch (err) { Toast.error(err.message); }
         break;
-      }
+      case 'disable-group':
+        try { await API.setGroupUsable(id, false); await Store.load(); Toast.success('本组模型已禁用'); }
+        catch (err) { Toast.error(err.message); }
+        break;
       case 'enable-all':
         try { await API.setAllUsable(true); await Store.load(); Toast.success('所有模型已启用'); }
         catch (err) { Toast.error(err.message); }

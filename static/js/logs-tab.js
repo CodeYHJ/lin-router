@@ -335,7 +335,7 @@ const LogsTab = {
   async clear() {
     const ok = await Modal.confirm({
       title: '清空日志',
-      message: '确定清空所有请求日志吗？本地日志文件也会被一起删除，此操作不可恢复。',
+      message: '确定清空所有日志吗？此操作不可恢复。',
       confirmText: '确定清空',
       confirmClass: 'btn-danger'
     });

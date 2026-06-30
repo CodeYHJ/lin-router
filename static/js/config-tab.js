@@ -153,7 +153,7 @@ const ConfigTab = {
             <select id="model-group">${this.renderGroupOptions(groupId, group?.provider_type)}</select>
           </div>
           <div class="form-row">
-            <label>显示名称</label>
+            <label>模型名称</label>
             <input id="model-name" value="${Utils.escapeHtml(m?.name || '')}" placeholder="DeepSeek">
           </div>
           ${!isArk ? `
@@ -243,25 +243,13 @@ const ConfigTab = {
         <h3>批量添加模型</h3>
         <button type="button" id="group-add-model" class="btn-primary batch-add-model-btn">+ 添加模型</button>
         <div class="form-row">
-          <label>连接组</label>
-          <select id="batch-group">${this.renderGroupOptions()}</select>
-        </div>
-        <div class="form-row">
           <label>模型列表</label>
-          <textarea id="batch-models" rows="4" placeholder='粘贴模型JSON数组，格式示例：[{&quot;name&quot;:&quot;模型名&quot;,&quot;ep_id&quot;:&quot;端点ID&quot;}]'></textarea>
+          <textarea id="batch-models" rows="6" placeholder='粘贴模型JSON数组，格式示例：[{&quot;name&quot;:&quot;模型名&quot;,&quot;ep_id&quot;:&quot;端点ID&quot;}]'></textarea>
         </div>
         <details class="batch-example">
           <summary>查看格式示例</summary>
           <pre>[\n  {&quot;name&quot;: &quot;DeepSeek-V3&quot;, &quot;ep_id&quot;: &quot;deepseek-chat&quot;},\n  {&quot;name&quot;: &quot;GPT-4o&quot;, &quot;ep_id&quot;: &quot;gpt-4o&quot;}\n]</pre>
         </details>
-        <div class="form-row">
-          <label>中转站 API Key</label>
-          <input id="batch-key" type="password" placeholder="批量导入时可填">
-        </div>
-        <div class="form-row">
-          <label>价格组 / 通道</label>
-          <input id="batch-price" placeholder="cheap / standard / premium">
-        </div>
         <div class="form-actions" style="justify-content:flex-end">
           <button type="button" id="batch-import" class="btn-primary">批量导入</button>
         </div>
@@ -629,6 +617,12 @@ const ConfigTab = {
       Toast.warning('请输入模型列表');
       return;
     }
+    const sel = Store.selected;
+    const groupId = sel.type === 'group' ? sel.id : '';
+    if (!groupId) {
+      Toast.warning('请先选择一个连接组');
+      return;
+    }
     // 优先尝试 JSON 数组格式
     let text = raw;
     try {
@@ -645,12 +639,7 @@ const ConfigTab = {
     try {
       await API.req('/api/models/batch', {
         method: 'POST',
-        body: JSON.stringify({
-          group_id: document.getElementById('batch-group').value,
-          text,
-          api_key: document.getElementById('batch-key').value.trim(),
-          price_group: document.getElementById('batch-price').value.trim(),
-        })
+        body: JSON.stringify({ group_id: groupId, text })
       });
       document.getElementById('batch-models').value = '';
       await Store.load();

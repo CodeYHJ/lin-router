@@ -1512,6 +1512,34 @@ class RouterHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _send_model_list(self, ctx: Any) -> None:
+        group = ctx.group
+        visible_group = None if ctx.is_global else group
+        data = [{
+            "id": DEFAULT_AUTO_MODEL_NAME,
+            "object": "model",
+            "created": 0,
+            "owned_by": "lin-router",
+            "root": DEFAULT_AUTO_MODEL_NAME,
+            "parent": None,
+        }]
+        for model in self._visible_models(visible_group):
+            model_group = self._group_for(model)
+            data.append({
+                "id": model.name,
+                "object": "model",
+                "created": 0,
+                "owned_by": "lin-router",
+                "root": model.name,
+                "parent": None,
+                "display_name": model.name,
+                "ep_id": model.ep_id,
+                "group_id": model.group_id,
+                "provider_type": model_group.provider_type if model_group else "",
+                "price_group": model.price_group,
+            })
+        self._send_json({"object": "list", "data": data})
+
     def _send_text(self, text: str, status: int = 200, content_type: str = "text/plain; charset=utf-8") -> None:
         body = text.encode("utf-8")
         self.send_response(status)
@@ -1767,46 +1795,28 @@ class RouterHandler(BaseHTTPRequestHandler):
             ctx = self._require_route_context()
             if not ctx:
                 return
-            group = ctx.group
-            # 全局 Key：返回所有组的所有可用模型
-            visible_group = None if ctx.is_global else group
-            auto_model_name = DEFAULT_AUTO_MODEL_NAME
-            self._send_json({
-                "object": "list",
-                "data": [
-                    {
-                        "id": auto_model_name,
+            try:
+                self._send_model_list(ctx)
+            except Exception as err:
+                self.router.add_log(
+                    "/v1/models",
+                    "lin-router",
+                    "500",
+                    f"local model list failed; error={self.router._short_error(str(err))}",
+                    0,
+                    event="models_failed",
+                )
+                self._send_json({
+                    "object": "list",
+                    "data": [{
+                        "id": DEFAULT_AUTO_MODEL_NAME,
                         "object": "model",
                         "created": 0,
                         "owned_by": "lin-router",
-                        "permission": [],
-                        "root": auto_model_name,
+                        "root": DEFAULT_AUTO_MODEL_NAME,
                         "parent": None,
-                        "display_name": auto_model_name,
-                        "router_virtual": True,
-                        "group_id": GLOBAL_ROUTE_GROUP_ID if ctx.is_global else group.id,
-                        "group_name": "全局调度" if ctx.is_global else group.name,
-                        "provider_type": "global" if ctx.is_global else group.provider_type,
-                    },
-                    *[
-                    {
-                        "id": model.name,
-                        "object": "model",
-                        "created": 0,
-                        "owned_by": "lin-router",
-                        "permission": [],
-                        "root": model.name,
-                        "parent": None,
-                        "display_name": model.name,
-                        "ep_id": model.ep_id,
-                        "group_id": model.group_id,
-                        "provider_type": self._group_for(model).provider_type if self._group_for(model) else "",
-                        "price_group": model.price_group,
-                    }
-                    for model in self._visible_models(visible_group)
-                    ],
-                ],
-            })
+                    }],
+                })
             return
         if parsed.path == "/api/state":
             self.store.refresh_expired_cooldowns()
