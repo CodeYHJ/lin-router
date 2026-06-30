@@ -1523,7 +1523,10 @@ class RouterHandler(BaseHTTPRequestHandler):
             "root": DEFAULT_AUTO_MODEL_NAME,
             "parent": None,
         }]
-        for model in self._visible_models(visible_group):
+        # /v1/models 返回对应连接组下的全部已配置模型（包含禁用的），方便客户端查看完整列表
+        for model in self.store.models:
+            if visible_group and model.group_id != visible_group.id:
+                continue
             model_group = self._group_for(model)
             data.append({
                 "id": model.name,
@@ -1537,6 +1540,7 @@ class RouterHandler(BaseHTTPRequestHandler):
                 "group_id": model.group_id,
                 "provider_type": model_group.provider_type if model_group else "",
                 "price_group": model.price_group,
+                "usable": model.usable,
             })
         self._send_json({"object": "list", "data": data})
 

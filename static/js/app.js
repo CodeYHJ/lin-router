@@ -125,12 +125,10 @@ const App = {
     if (!container) return;
     container.innerHTML = `
       <button class="fab" id="fab-top" title="回到顶部">↑</button>
-      <button class="fab" id="fab-add-model" title="新建模型">+</button>
     `;
     container.querySelector('#fab-top').addEventListener('click', () => {
       document.querySelector('.tab-panel.active')?.scrollTo({ top: 0, behavior: 'smooth' });
     });
-    container.querySelector('#fab-add-model').addEventListener('click', () => this.createModelForCurrentGroup());
   },
 
   createModelForCurrentGroup() {
