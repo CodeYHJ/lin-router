@@ -219,16 +219,22 @@ const LogsTab = {
     const tbody = document.getElementById('log-tbody');
     const empty = document.getElementById('logs-empty');
     const wrap = document.querySelector('.logs-table-wrap');
-    const wasAtBottom = keepScroll && wrap ? (wrap.scrollHeight - wrap.scrollTop - wrap.clientHeight < 20) : false;
-
-    const filtered = (Store.state.logs || []).filter(item => this.matches(item));
-    if (!filtered.length) {
+    if (!tbody) return;
+    const wasAtBottom = keepScroll && wrap ? (wrap.scrollHeight - wrap.scrollTop - wrap.clientHeight < 30) : false;
+    // 记住当前展开的详情行，避免自动刷新时把它关上
+    const openIdx = Array.from(document.querySelectorAll('[data-log-detail-row]')).findIndex(r => !r.classList.contains('hidden'));
+    const filtered = this.filterLogs();
+    if (filtered.length === 0) {
       tbody.innerHTML = '';
       empty.classList.remove('hidden');
       return;
     }
     empty.classList.add('hidden');
     tbody.innerHTML = filtered.map((item, idx) => this.rowHtml(item, idx)).join('');
+    if (openIdx >= 0 && openIdx < filtered.length) {
+      const row = document.querySelector(`[data-log-detail-row="${openIdx}"]`);
+      row?.classList.remove('hidden');
+    }
     tbody.querySelectorAll('[data-log-detail]').forEach(btn => {
       btn.addEventListener('click', () => this.toggleDetail(Number(btn.dataset.logDetail)));
     });

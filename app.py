@@ -1520,6 +1520,8 @@ class RouterHandler(BaseHTTPRequestHandler):
             model for model in self.store.models
             if not visible_group or model.group_id == visible_group.id
         ]
+        # 全局 Key 使用统一的 all-router-auto 模型名，连接组 Key 使用 lin-router-auto
+        auto_model_name = "all-router-auto" if ctx.is_global else DEFAULT_AUTO_MODEL_NAME
         self.router.add_log(
             "/v1/models",
             "lin-router",
@@ -1530,11 +1532,11 @@ class RouterHandler(BaseHTTPRequestHandler):
             event="models_list",
         )
         data = [{
-            "id": DEFAULT_AUTO_MODEL_NAME,
+            "id": auto_model_name,
             "object": "model",
             "created": 0,
             "owned_by": "lin-router",
-            "root": DEFAULT_AUTO_MODEL_NAME,
+            "root": auto_model_name,
             "parent": None,
         }]
         # /v1/models 返回对应连接组下的全部已配置模型（包含禁用的），方便客户端查看完整列表
