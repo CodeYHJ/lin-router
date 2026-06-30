@@ -126,16 +126,18 @@ const LogsTab = {
     if (!this.autoRefresh) return;
     // 只在当前是 logs tab 时刷新
     if (Tabs.current !== 'logs') return;
-    await this.manualRefresh();
+    // 自动刷新使用静默模式，不触发全局 loading 遮罩
+    await this.manualRefresh(true);
   },
 
-  async manualRefresh() {
+  async manualRefresh(silent = false) {
     try {
-      const data = await API.getState();
+      const data = await API.req('/api/state', { silent });
       Store.update({ logs: data.logs });
       this.renderRows(true);
     } catch (err) {
       // 自动刷新失败不弹 Toast，避免打扰
+      if (!silent) Toast.error('刷新失败：' + err.message);
       console.error('日志刷新失败', err);
     }
   },

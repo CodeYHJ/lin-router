@@ -242,7 +242,7 @@ const ConfigTab = {
       <section class="form-card batch-import-card">
         <h3>批量添加模型</h3>
         <button type="button" id="group-add-model" class="btn-primary batch-add-model-btn">+ 添加模型</button>
-        <div class="form-row">
+        <div class="form-row batch-models-row">
           <label>模型列表</label>
           <textarea id="batch-models" rows="6" placeholder='粘贴模型JSON数组，格式示例：[{&quot;name&quot;:&quot;模型名&quot;,&quot;ep_id&quot;:&quot;端点ID&quot;}]'></textarea>
         </div>

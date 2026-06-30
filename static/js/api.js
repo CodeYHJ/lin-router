@@ -10,7 +10,9 @@ const API = {
 
   async req(path, opts = {}) {
     const url = `${this.base}${path}`;
-    this.setLoading(1);
+    // silent 模式不触发全局 loading，用于后台轮询等无感更新场景
+    const silent = opts.silent === true;
+    if (!silent) this.setLoading(1);
     try {
       // FormData 上传时不能手动设置 Content-Type，浏览器需要自动生成 boundary
       const headers = {};
@@ -47,7 +49,7 @@ const API = {
       if (contentType.includes('application/json')) return res.json();
       return res.text();
     } finally {
-      this.setLoading(-1);
+      if (!silent) this.setLoading(-1);
     }
   },
 
