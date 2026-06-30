@@ -80,10 +80,18 @@
 }
 
 .result-text {
-  max-width: 260px;
+  max-width: 480px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.log-detail-preview {
+  cursor: pointer;
+}
+
+.log-detail-preview:hover {
+  background: var(--bg-secondary);
 }
 
 .log-detail-row {
@@ -136,6 +144,11 @@
   background: none;
   color: var(--text-tertiary);
   padding: 0;
+}
+
+.log-detail-raw-block {
+  grid-column: 1 / -1;
+  margin-bottom: 4px;
 }
 
 .log-detail-raw {

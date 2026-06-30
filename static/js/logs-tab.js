@@ -133,7 +133,8 @@ const LogsTab = {
   async manualRefresh(silent = false) {
     try {
       const data = await API.req('/api/state', { silent });
-      Store.update({ logs: data.logs });
+      // 同步最新的模型状态，确保配置页能正确显示冷却截止时间等信息
+      Store.update({ logs: data.logs, models: data.models, groups: data.groups });
       this.renderRows(true);
     } catch (err) {
       // 自动刷新失败不弹 Toast，避免打扰
@@ -148,6 +149,11 @@ const LogsTab = {
     this.filters.group = document.getElementById('log-group')?.value || '';
     this.filters.status = document.getElementById('log-status')?.value || '';
     this.renderRows();
+  },
+
+  filterLogs() {
+    const logs = Store.state.logs || [];
+    return logs.filter(item => this.matches(item));
   },
 
   resetFilters() {
@@ -238,6 +244,10 @@ const LogsTab = {
     tbody.querySelectorAll('[data-log-detail]').forEach(btn => {
       btn.addEventListener('click', () => this.toggleDetail(Number(btn.dataset.logDetail)));
     });
+    // 点击详情单元格也可展开/收起详情行，解决列表截断后无法查看完整内容的问题
+    tbody.querySelectorAll('[data-log-detail-preview]').forEach(cell => {
+      cell.addEventListener('click', () => this.toggleDetail(Number(cell.dataset.logDetailPreview)));
+    });
 
     if (wasAtBottom && wrap) {
       wrap.scrollTop = wrap.scrollHeight;
@@ -255,7 +265,7 @@ const LogsTab = {
         <td class="tiny">${Number(item.attempt || 0) || 1}</td>
         <td class="tiny">${Number(item.duration_ms || 0) ? `${Number(item.duration_ms)} ms` : '-'}</td>
         <td class="tiny">${Utils.escapeHtml(this.tokenSummary(item))}</td>
-        <td class="tiny result-text" title="${Utils.escapeHtml(item.detail)}">${this.formatDetailPreview(item.detail)}</td>
+        <td class="tiny result-text log-detail-preview" title="${Utils.escapeHtml(item.detail)}" data-log-detail-preview="${idx}">${this.formatDetailPreview(item.detail)}</td>
         <td><button type="button" data-log-detail="${idx}">查看</button></td>
       </tr>
       <tr class="log-detail-row hidden" data-log-detail-row="${idx}">
@@ -269,7 +279,7 @@ const LogsTab = {
     // 把分号分隔的 detail 做简单可读化处理
     const text = String(detail).replace(/;/g, '; ');
     const escaped = Utils.escapeHtml(text);
-    return escaped.length > 120 ? escaped.slice(0, 120) + '…' : escaped;
+    return escaped.length > 200 ? escaped.slice(0, 200) + '…' : escaped;
   },
 
   formatJsonBlock(value) {
@@ -284,6 +294,13 @@ const LogsTab = {
 
   detailHtml(item) {
     const parsed = this.parseDetail(item.detail);
+    const rawDetail = item.detail ? String(item.detail) : '';
+    const rawBlock = rawDetail ? `
+      <div class="log-detail-block log-detail-raw-block">
+        <h4>详情原文</h4>
+        <div class="log-detail-raw">${this.formatJsonBlock(rawDetail)}</div>
+      </div>
+    ` : '';
     const routeSteps = [
       parsed.requested ? Utils.escapeHtml(parsed.requested) : (item.model || 'lin-router-auto'),
       parsed.group_name ? Utils.escapeHtml(parsed.group_name) : Utils.escapeHtml(this.groupName(item)),
@@ -292,6 +309,7 @@ const LogsTab = {
       parsed.channel ? Utils.escapeHtml(parsed.channel) : '-',
     ];
     return `
+      ${rawBlock}
       <div class="log-detail-grid">
         <div class="log-detail-block">
           <h4>基础信息</h4>

@@ -114,8 +114,9 @@ const Tree = {
   },
 
   modelStatus(m) {
-    if (!m.usable) return 'error';
+    // 冷却状态优先于可用状态，避免冷却中的模型被误判为错误
     if (this.isCooling(m)) return 'cooldown';
+    if (!m.usable) return 'error';
     return 'ok';
   },
 

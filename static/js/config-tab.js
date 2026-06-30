@@ -8,6 +8,9 @@ const ConfigTab = {
   render() {
     const panel = document.getElementById('panel-config');
     const sel = Store.selected;
+    // 重新渲染前保留用户正在编辑的表单值，避免自动刷新导致输入丢失
+    const formValues = this._captureFormValues();
+    this._stopCooldownTimer();
     if (!sel.id) {
       panel.innerHTML = this.renderEmptyState();
       this.attachEmptyEvents(panel);
@@ -30,8 +33,10 @@ const ConfigTab = {
         </div>
       </div>
     `;
+    this._restoreFormValues(formValues);
     this.attachEvents(panel);
     this.syncUIFromState();
+    this._startCooldownTimer();
   },
 
   renderEmptyState() {
@@ -327,16 +332,8 @@ const ConfigTab = {
 
     if (relay || proxy) this.renderUpstreamOptions(groupId);
 
-    // 更新冷却显示
-    const m = Store.getModel(document.getElementById('model-id')?.value);
-    const display = document.getElementById('model-cooldown-display');
-    if (display && m) {
-      if (m.cooldown_until && m.cooldown_until * 1000 > Date.now()) {
-        display.textContent = Utils.formatDate(m.cooldown_until);
-      } else {
-        display.textContent = '-';
-      }
-    }
+    // 更新冷却显示（由定时器持续刷新）
+    this.updateCooldownDisplay();
   },
 
   renderUpstreamOptions(groupId) {
@@ -426,6 +423,59 @@ const ConfigTab = {
       el.classList.add('error');
     } else {
       el.textContent = '';
+    }
+  },
+
+  // 捕获当前表单中用户已编辑的值，用于重新渲染后恢复
+  _captureFormValues() {
+    const values = {};
+    const panel = document.getElementById('panel-config');
+    if (!panel) return values;
+    panel.querySelectorAll('input, select, textarea').forEach(el => {
+      if (!el.id) return;
+      if (el.type === 'checkbox' || el.type === 'radio') values[el.id] = el.checked;
+      else values[el.id] = el.value;
+    });
+    return values;
+  },
+
+  // 恢复用户之前编辑的表单值
+  _restoreFormValues(values) {
+    if (!values) return;
+    Object.entries(values).forEach(([id, value]) => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      if (el.type === 'checkbox' || el.type === 'radio') el.checked = Boolean(value);
+      else el.value = value ?? '';
+    });
+  },
+
+  // 启动冷却倒计时定时器，实时更新状态信息中的冷却截止时间
+  _startCooldownTimer() {
+    this._stopCooldownTimer();
+    this.updateCooldownDisplay();
+    this._cooldownTimer = setInterval(() => this.updateCooldownDisplay(), 1000);
+  },
+
+  _stopCooldownTimer() {
+    if (this._cooldownTimer) {
+      clearInterval(this._cooldownTimer);
+      this._cooldownTimer = null;
+    }
+  },
+
+  updateCooldownDisplay() {
+    const display = document.getElementById('model-cooldown-display');
+    if (!display) return;
+    const modelId = document.getElementById('model-id')?.value;
+    const m = modelId ? Store.getModel(modelId) : null;
+    if (m && m.cooldown_until && m.cooldown_until * 1000 > Date.now()) {
+      const remain = Math.max(0, Math.ceil((m.cooldown_until * 1000 - Date.now()) / 1000));
+      const mm = Math.floor(remain / 60).toString().padStart(2, '0');
+      const ss = (remain % 60).toString().padStart(2, '0');
+      display.textContent = `${Utils.formatDate(m.cooldown_until)}（还剩 ${mm}:${ss}）`;
+    } else {
+      display.textContent = '-';
     }
   },
 

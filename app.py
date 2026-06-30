@@ -706,8 +706,9 @@ class ArkProxyRouter:
                 if isinstance(row, dict):
                     row.setdefault("time", row.get("time") or self._now())
                     items.append(self._log_from_row(row))
+            # 文件中按时间顺序追加（旧在前），内存中 logs[0] 需要是最新的，因此要反转
             if items:
-                self.logs = items
+                self.logs = list(reversed(items))
         except Exception as exc:
             self.log_write_error = f"日志加载失败: {exc}"
             return
@@ -778,6 +779,21 @@ class ArkProxyRouter:
                 item.total_tokens = total_tokens
                 item.cached_tokens = cached_tokens
                 break
+        # 同步回写日志文件，避免重启后流式请求的 token 使用量丢失
+        self._rewrite_log_file()
+
+    def _rewrite_log_file(self) -> None:
+        """将内存中的日志按时间顺序（旧在前，新在后）重新写入文件。"""
+        try:
+            if not self.log_file.exists():
+                return
+            self.log_file.parent.mkdir(parents=True, exist_ok=True)
+            # self.logs 是新的在前，文件需要旧在前，因此反转写入
+            lines = [json.dumps(asdict(item), ensure_ascii=False) + "\n" for item in reversed(self.logs)]
+            with self.log_file.open("w", encoding="utf-8") as f:
+                f.writelines(lines)
+        except Exception as exc:
+            self.log_write_error = f"日志回写失败: {exc}"
 
     def export_logs_csv(self) -> str:
         output = io.StringIO()
@@ -1522,15 +1538,18 @@ class RouterHandler(BaseHTTPRequestHandler):
         ]
         # 全局 Key 使用统一的 all-router-auto 模型名，连接组 Key 使用 lin-router-auto
         auto_model_name = "all-router-auto" if ctx.is_global else DEFAULT_AUTO_MODEL_NAME
-        self.router.add_log(
-            "/v1/models",
-            "lin-router",
-            "200",
-            f"key_type={'global' if ctx.is_global else 'route'}; group_id={ctx.group_id}; "
-            f"total_models={len(self.store.models)}; matched_models={len(matched_models)}",
-            0,
-            event="models_list",
-        )
+        # 容错：旧进程可能没挂载 router，避免因此 500
+        router = getattr(self, 'router', None)
+        if router:
+            router.add_log(
+                "/v1/models",
+                "lin-router",
+                "200",
+                f"key_type={'global' if ctx.is_global else 'route'}; group_id={ctx.group_id}; "
+                f"total_models={len(self.store.models)}; matched_models={len(matched_models)}",
+                0,
+                event="models_list",
+            )
         data = [{
             "id": auto_model_name,
             "object": "model",
@@ -1541,7 +1560,7 @@ class RouterHandler(BaseHTTPRequestHandler):
         }]
         # /v1/models 返回对应连接组下的全部已配置模型（包含禁用的），方便客户端查看完整列表
         for model in matched_models:
-            model_group = self._group_for(model)
+            model_group = self.store.find_group(model.group_id)
             data.append({
                 "id": model.name,
                 "object": "model",
@@ -1816,14 +1835,19 @@ class RouterHandler(BaseHTTPRequestHandler):
             try:
                 self._send_model_list(ctx)
             except Exception as err:
-                self.router.add_log(
-                    "/v1/models",
-                    "lin-router",
-                    "500",
-                    f"local model list failed; error={self.router._short_error(str(err))}",
-                    0,
-                    event="models_failed",
-                )
+                router = getattr(self, 'router', None)
+                error_msg = f"local model list failed; error={str(err)}"
+                if router and hasattr(router, '_short_error'):
+                    error_msg = f"local model list failed; error={router._short_error(str(err))}"
+                if router and hasattr(router, 'add_log'):
+                    router.add_log(
+                        "/v1/models",
+                        "lin-router",
+                        "500",
+                        error_msg,
+                        0,
+                        event="models_failed",
+                    )
                 self._send_json({
                     "object": "list",
                     "data": [{
