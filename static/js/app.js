@@ -131,25 +131,6 @@ const App = {
     });
   },
 
-  createModelForCurrentGroup() {
-    let groupId = null;
-    if (Store.selected.type === 'group') groupId = Store.selected.id;
-    else if (Store.selected.type === 'model') {
-      const m = Store.getModel(Store.selected.id);
-      if (m) groupId = m.group_id;
-    }
-    if (!groupId) {
-      Toast.warning('请先选择一个连接组');
-      return;
-    }
-    const name = prompt('新建模型名称：', '新模型');
-    if (!name) return;
-    API.createModel({ name, ep_id: name, group_id: groupId, usable: true })
-      .then(() => Store.load())
-      .then(() => Toast.success('模型已创建'))
-      .catch(err => Toast.error('创建失败：' + err.message));
-  },
-
   bindShortcuts() {
     document.addEventListener('keydown', e => {
       if (e.key === 'Escape') {
