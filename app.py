@@ -6,6 +6,7 @@ import hashlib
 import io
 import json
 import os
+import queue
 import re
 import socket
 import sys
@@ -65,6 +66,8 @@ DEFAULT_CONFIG_FILE = "lin-router-config.json"
 DEFAULT_START_PORT = 18400
 DEFAULT_AUTO_MODEL_NAME = "lin-router-auto"
 DEFAULT_AUTO_MODEL_COOLDOWN_MINUTES = 5
+DEFAULT_STREAM_IDLE_TIMEOUT_SECONDS = 120
+MAX_STREAM_IDLE_TIMEOUT_SECONDS = 600
 DEFAULT_PUBLIC_API_KEY = "lin-router"
 GLOBAL_ROUTE_GROUP_ID = "__global__"
 PROVIDER_ARK = "ark"
@@ -219,6 +222,7 @@ class ConnectionGroup:
     api_key: str = ""
     route_key: str = ""
     auto_model_cooldown_minutes: int = DEFAULT_AUTO_MODEL_COOLDOWN_MINUTES
+    stream_idle_timeout: int = DEFAULT_STREAM_IDLE_TIMEOUT_SECONDS
     waf_compatible: bool = False
     upstream_models: List[Dict[str, Any]] = field(default_factory=list)
     upstream_models_fetched_at: str = ""
@@ -234,6 +238,7 @@ class ConnectionGroup:
             api_key=str(data.get("api_key") or ""),
             route_key=str(data.get("route_key") or ""),
             auto_model_cooldown_minutes=int(data.get("auto_model_cooldown_minutes") or DEFAULT_AUTO_MODEL_COOLDOWN_MINUTES),
+            stream_idle_timeout=max(0, min(MAX_STREAM_IDLE_TIMEOUT_SECONDS, int(data.get("stream_idle_timeout", DEFAULT_STREAM_IDLE_TIMEOUT_SECONDS) or 0))),
             waf_compatible=bool(data.get("waf_compatible", False)),
             upstream_models=[item for item in data.get("upstream_models", []) if isinstance(item, dict)] if isinstance(data.get("upstream_models", []), list) else [],
             upstream_models_fetched_at=str(data.get("upstream_models_fetched_at") or ""),
@@ -291,6 +296,7 @@ class RequestLog:
     completion_tokens: int = 0
     total_tokens: int = 0
     cached_tokens: int = 0
+    reasoning_tokens: int = 0
     group_id: str = ""
     group_name: str = ""
     provider_type: str = ""
@@ -547,10 +553,16 @@ class ConfigStore:
 
 
 class AllModelsFailedError(RuntimeError):
-    """所有候选模型均不可用或均失败时抛出，便于外层返回 503。"""
-    def __init__(self, message: str, attempted: int = 0) -> None:
+    """所有候选模型均不可用时抛出，便于 HTTP 层返回 503。"""
+
+    def __init__(self, message: str, attempted: int = 0, stream_timeout: bool = False) -> None:
         super().__init__(message)
         self.attempted = attempted
+        self.stream_timeout = stream_timeout
+
+
+class StreamIdleTimeoutError(TimeoutError):
+    pass
 
 
 class ArkProxyRouter:
@@ -590,6 +602,7 @@ class ArkProxyRouter:
         completion_tokens: int = 0,
         total_tokens: int = 0,
         cached_tokens: int = 0,
+        reasoning_tokens: int = 0,
         group: Optional[ConnectionGroup] = None,
         event: str = "",
         request_id: str = "",
@@ -610,6 +623,7 @@ class ArkProxyRouter:
             completion_tokens,
             total_tokens,
             cached_tokens,
+            reasoning_tokens,
             group_id,
             group_name,
             provider_type,
@@ -687,6 +701,7 @@ class ArkProxyRouter:
             completion_tokens=int(row.get("completion_tokens") or 0),
             total_tokens=int(row.get("total_tokens") or 0),
             cached_tokens=int(row.get("cached_tokens") or 0),
+            reasoning_tokens=int(row.get("reasoning_tokens") or 0),
             group_id=str(row.get("group_id") or ""),
             group_name=str(row.get("group_name") or ""),
             provider_type=str(row.get("provider_type") or ""),
@@ -732,6 +747,7 @@ class ArkProxyRouter:
                 completion_tokens=0,
                 total_tokens=0,
                 cached_tokens=0,
+                reasoning_tokens=0,
                 group_id="",
                 group_name="系统",
                 provider_type="system",
@@ -768,8 +784,8 @@ class ArkProxyRouter:
         except Exception:
             return
 
-    def update_latest_stream_usage(self, path: str, model: str, usage: Tuple[int, int, int, int]) -> None:
-        prompt_tokens, completion_tokens, total_tokens, cached_tokens = usage
+    def update_latest_stream_usage(self, path: str, model: str, usage: Tuple[int, int, int, int, int]) -> None:
+        prompt_tokens, completion_tokens, total_tokens, cached_tokens, reasoning_tokens = usage
         if not any(usage):
             return
         for item in self.logs:
@@ -778,6 +794,7 @@ class ArkProxyRouter:
                 item.completion_tokens = completion_tokens
                 item.total_tokens = total_tokens
                 item.cached_tokens = cached_tokens
+                item.reasoning_tokens = reasoning_tokens
                 break
         # 同步回写日志文件，避免重启后流式请求的 token 使用量丢失
         self._rewrite_log_file()
@@ -798,7 +815,7 @@ class ArkProxyRouter:
     def export_logs_csv(self) -> str:
         output = io.StringIO()
         writer = csv.writer(output)
-        writer.writerow(["time", "path", "request_id", "attempt", "group_name", "provider_type", "model", "status", "event", "duration_ms", "prompt_tokens", "completion_tokens", "total_tokens", "cached_tokens", "detail"])
+        writer.writerow(["time", "path", "request_id", "attempt", "group_name", "provider_type", "model", "status", "event", "duration_ms", "prompt_tokens", "completion_tokens", "total_tokens", "cached_tokens", "reasoning_tokens", "detail"])
         for item in self.all_logs():
             writer.writerow([
                 item.time,
@@ -815,6 +832,7 @@ class ArkProxyRouter:
                 item.completion_tokens,
                 item.total_tokens,
                 item.cached_tokens,
+                item.reasoning_tokens,
                 item.detail,
             ])
         return output.getvalue()
@@ -862,37 +880,59 @@ class ArkProxyRouter:
         return f"{base}/{suffix}"
 
     @staticmethod
-    def _usage_from_response(data: bytes) -> Tuple[int, int, int, int]:
+    def _empty_usage() -> Tuple[int, int, int, int, int]:
+        return 0, 0, 0, 0, 0
+
+    @staticmethod
+    def _int_value(value: Any) -> int:
+        try:
+            return int(value or 0)
+        except Exception:
+            return 0
+
+    @staticmethod
+    def _usage_from_payload(payload: Any) -> Tuple[int, int, int, int, int]:
+        if not isinstance(payload, dict):
+            return ArkProxyRouter._empty_usage()
+        usage = payload.get("usage")
+        if not isinstance(usage, dict):
+            response = payload.get("response")
+            usage = response.get("usage") if isinstance(response, dict) else None
+        if not isinstance(usage, dict):
+            return ArkProxyRouter._empty_usage()
+
+        prompt_tokens = ArkProxyRouter._int_value(usage.get("prompt_tokens") or usage.get("input_tokens"))
+        completion_tokens = ArkProxyRouter._int_value(usage.get("completion_tokens") or usage.get("output_tokens"))
+        total_tokens = ArkProxyRouter._int_value(usage.get("total_tokens")) or (prompt_tokens + completion_tokens)
+
+        prompt_details = usage.get("prompt_tokens_details") if isinstance(usage.get("prompt_tokens_details"), dict) else {}
+        input_details = usage.get("input_tokens_details") if isinstance(usage.get("input_tokens_details"), dict) else {}
+        output_details = usage.get("output_tokens_details") if isinstance(usage.get("output_tokens_details"), dict) else {}
+        cached_tokens = ArkProxyRouter._int_value(prompt_details.get("cached_tokens") or input_details.get("cached_tokens"))
+        reasoning_tokens = ArkProxyRouter._int_value(output_details.get("reasoning_tokens"))
+        return prompt_tokens, completion_tokens, total_tokens, cached_tokens, reasoning_tokens
+
+    @staticmethod
+    def _usage_from_response(data: bytes) -> Tuple[int, int, int, int, int]:
         try:
             payload = json.loads(data.decode("utf-8"))
         except Exception:
-            return 0, 0, 0, 0
-        usage = payload.get("usage") if isinstance(payload, dict) else None
-        if not isinstance(usage, dict):
-            return 0, 0, 0, 0
-        prompt_tokens = int(usage.get("prompt_tokens") or 0)
-        completion_tokens = int(usage.get("completion_tokens") or 0)
-        total_tokens = int(usage.get("total_tokens") or (prompt_tokens + completion_tokens))
-        prompt_details = usage.get("prompt_tokens_details") if isinstance(usage.get("prompt_tokens_details"), dict) else {}
-        cached_tokens = int(prompt_details.get("cached_tokens") or 0)
-        return prompt_tokens, completion_tokens, total_tokens, cached_tokens
+            return ArkProxyRouter._empty_usage()
+        return ArkProxyRouter._usage_from_payload(payload)
 
     @staticmethod
-    def _usage_from_stream_chunk(chunk: bytes) -> Tuple[int, int, int, int]:
+    def _usage_from_stream_chunk(chunk: bytes) -> Tuple[int, int, int, int, int]:
         text = chunk.decode("utf-8", "ignore").strip()
         if not text.startswith("data:"):
-            return 0, 0, 0, 0
+            return ArkProxyRouter._empty_usage()
         data = text[5:].strip()
         if not data or data == "[DONE]":
-            return 0, 0, 0, 0
+            return ArkProxyRouter._empty_usage()
         try:
             payload = json.loads(data)
         except Exception:
-            return 0, 0, 0, 0
-        usage = payload.get("usage") if isinstance(payload, dict) else None
-        if not isinstance(usage, dict):
-            return 0, 0, 0, 0
-        return ArkProxyRouter._usage_from_response(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+            return ArkProxyRouter._empty_usage()
+        return ArkProxyRouter._usage_from_payload(payload)
 
     def default_model(self) -> Optional[ModelConfig]:
         return next((m for m in self.store.models if m.usable), None)
@@ -903,7 +943,7 @@ class ArkProxyRouter:
 
     @staticmethod
     def _is_auto_model(requested_model: str | None) -> bool:
-        return not requested_model or requested_model == DEFAULT_AUTO_MODEL_NAME
+        return not requested_model or requested_model in {DEFAULT_AUTO_MODEL_NAME, "all-router-auto"}
 
     def _iter_candidates(self, requested_model: str | None, group_id: str | None = None) -> Iterator[Tuple[int, ModelConfig]]:
         if self._is_auto_model(requested_model):
@@ -1251,6 +1291,45 @@ class ArkProxyRouter:
         return max(0, minutes) * 60
 
     @staticmethod
+    def _stream_idle_timeout_seconds(group: Optional[ConnectionGroup]) -> int:
+        if not group:
+            return DEFAULT_STREAM_IDLE_TIMEOUT_SECONDS
+        try:
+            seconds = int(group.stream_idle_timeout)
+        except Exception:
+            seconds = DEFAULT_STREAM_IDLE_TIMEOUT_SECONDS
+        return max(0, min(MAX_STREAM_IDLE_TIMEOUT_SECONDS, seconds))
+
+    def _mark_stream_timeout(self, candidate: UpstreamCandidate, error: str) -> int:
+        if candidate.idx is None:
+            return 0
+        cooldown_seconds = self._auto_cooldown_seconds(candidate.group)
+        self._set_cooldown(candidate.idx, error, cooldown_seconds, "stream_timeout")
+        return cooldown_seconds
+
+    @staticmethod
+    def _readline_with_idle_timeout(resp: Any, timeout_seconds: int) -> bytes:
+        if timeout_seconds <= 0:
+            return resp.readline()
+        result: queue.Queue[Any] = queue.Queue(maxsize=1)
+
+        def read_once() -> None:
+            try:
+                result.put(resp.readline())
+            except Exception as exc:
+                result.put(exc)
+
+        worker = threading.Thread(target=read_once, daemon=True)
+        worker.start()
+        try:
+            item = result.get(timeout=timeout_seconds)
+        except queue.Empty as exc:
+            raise StreamIdleTimeoutError("stream_idle_timeout") from exc
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    @staticmethod
     def _body_for_upstream(payload: Dict[str, Any], raw_body: bytes | None, requested_model: str | None, target_model: str) -> Tuple[bytes, str]:
         if raw_body and requested_model:
             if requested_model == target_model:
@@ -1306,7 +1385,7 @@ class ArkProxyRouter:
                 with urlopen(request, timeout=120) as resp:
                     data = resp.read()
                     duration_ms = int((time.perf_counter() - started_at) * 1000)
-                    prompt_tokens, completion_tokens, total_tokens, cached_tokens = self._usage_from_response(data)
+                    prompt_tokens, completion_tokens, total_tokens, cached_tokens, reasoning_tokens = self._usage_from_response(data)
                     self._mark_success(candidate)
                     self.add_log(
                         path,
@@ -1318,6 +1397,7 @@ class ArkProxyRouter:
                         completion_tokens,
                         total_tokens,
                         cached_tokens,
+                        reasoning_tokens,
                         group=group,
                         event="ok",
                     )
@@ -1342,7 +1422,7 @@ class ArkProxyRouter:
                         with urlopen(request, timeout=120) as resp:
                             data = resp.read()
                             retry_duration_ms = int((time.perf_counter() - retry_started_at) * 1000)
-                            prompt_tokens, completion_tokens, total_tokens, cached_tokens = self._usage_from_response(data)
+                            prompt_tokens, completion_tokens, total_tokens, cached_tokens, reasoning_tokens = self._usage_from_response(data)
                             self._mark_success(candidate)
                             self.add_log(
                                 path,
@@ -1354,6 +1434,7 @@ class ArkProxyRouter:
                                 completion_tokens,
                                 total_tokens,
                                 cached_tokens,
+                                reasoning_tokens,
                                 group=group,
                                 event="retry_ok",
                             )
@@ -1401,18 +1482,18 @@ class ArkProxyRouter:
         requested_model = payload.get("model")
         requested_label = str(requested_model) if requested_model else DEFAULT_AUTO_MODEL_NAME
         group_id = self._route_group_id(route)
-        route_group = route.group if isinstance(route, RouteContext) else self.store.find_group(group_id) if group_id else None
         auto_mode = self._is_auto_model(str(requested_model) if requested_model else None)
-        # auto_fallback：组级 auto 或全局 Key 模式下，失败时尝试下一个候选
-        auto_fallback = auto_mode or (isinstance(route, RouteContext) and route.is_global)
+        auto_fallback = auto_mode
         request_id = uuid.uuid4().hex[:12]
         attempt = 0
         last_error: Optional[Exception] = None
+        saw_stream_timeout = False
 
         for candidate in self._iter_upstream_candidates(str(requested_model) if requested_model else None, group_id):
             attempt += 1
             group = candidate.group
             target_url = self._resolve_url(group.base_url, path)
+            idle_timeout = self._stream_idle_timeout_seconds(group)
             if not candidate.auth_key:
                 self.add_log(path, candidate.label, "skip", f"requested={requested_label}; missing upstream api key", group=group, request_id=request_id, attempt=attempt, event="skip")
                 continue
@@ -1427,31 +1508,102 @@ class ArkProxyRouter:
                 headers=outbound_headers,
                 method="POST",
             )
+            resp = None
             started_at = time.perf_counter()
             try:
                 resp = urlopen(request, timeout=120)
+                first_chunk = self._readline_with_idle_timeout(resp, idle_timeout)
+                if not first_chunk:
+                    raise URLError("upstream stream closed before first chunk")
                 duration_ms = int((time.perf_counter() - started_at) * 1000)
+                latest_usage = self._usage_from_stream_chunk(first_chunk)
                 self._mark_success(candidate)
-                self.add_log(path, candidate.label, "200", self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload, outbound_headers, "stream ok"), duration_ms, group=group, request_id=request_id, attempt=attempt, event="stream_ok")
+                detail = self._debug_detail(
+                    candidate,
+                    requested_label,
+                    target_url,
+                    body_mode,
+                    body,
+                    payload,
+                    outbound_headers,
+                    f"stream ok; idle_timeout_seconds={idle_timeout}; chunks_received=1; bytes_received={len(first_chunk)}; final_result=streaming",
+                )
+                self.add_log(path, candidate.label, "200", detail, duration_ms, *latest_usage, group=group, request_id=request_id, attempt=attempt, event="stream_ok")
 
                 def iterator() -> Iterator[bytes]:
-                    latest_usage = (0, 0, 0, 0)
+                    usage_total = latest_usage
+                    chunks_received = 1
+                    bytes_received = len(first_chunk)
                     try:
+                        yield first_chunk
                         while True:
-                            chunk = resp.readline()
+                            try:
+                                chunk = self._readline_with_idle_timeout(resp, idle_timeout)
+                            except StreamIdleTimeoutError:
+                                self.add_log(
+                                    path,
+                                    candidate.label,
+                                    "timeout",
+                                    self._debug_detail(
+                                        candidate,
+                                        requested_label,
+                                        target_url,
+                                        body_mode,
+                                        body,
+                                        payload,
+                                        outbound_headers,
+                                        f"reason=stream_idle_timeout; idle_timeout_seconds={idle_timeout}; chunks_received={chunks_received}; bytes_received={bytes_received}; final_result=client_stream_aborted",
+                                    ),
+                                    int((time.perf_counter() - started_at) * 1000),
+                                    *usage_total,
+                                    group=group,
+                                    request_id=request_id,
+                                    attempt=attempt,
+                                    event="stream_timeout",
+                                )
+                                break
                             if not chunk:
                                 break
+                            chunks_received += 1
+                            bytes_received += len(chunk)
                             usage = self._usage_from_stream_chunk(chunk)
                             if any(usage):
-                                latest_usage = usage
+                                usage_total = usage
                             yield chunk
                     finally:
-                        resp.close()
-                        self.update_latest_stream_usage(path, candidate.label, latest_usage)
+                        if resp:
+                            resp.close()
+                        self.update_latest_stream_usage(path, candidate.label, usage_total)
                         self._release_lock(upstream_lock)
 
                 return 200, dict(resp.headers.items()), iterator()
+            except StreamIdleTimeoutError as err:
+                saw_stream_timeout = True
+                last_error = err
+                duration_ms = int((time.perf_counter() - started_at) * 1000)
+                if resp:
+                    resp.close()
+                self._release_lock(upstream_lock)
+                cooldown_seconds = self._mark_stream_timeout(candidate, "stream_idle_timeout")
+                detail = self._debug_detail(
+                    candidate,
+                    requested_label,
+                    target_url,
+                    body_mode,
+                    body,
+                    payload,
+                    outbound_headers,
+                    f"reason=stream_idle_timeout; idle_timeout_seconds={idle_timeout}; chunks_received=0; bytes_received=0; cooldown_minutes={cooldown_seconds // 60}; fallback_next={str(auto_fallback).lower()}; final_result=timeout",
+                )
+                self.add_log(path, candidate.label, "timeout", detail, duration_ms, group=group, request_id=request_id, attempt=attempt, event="stream_timeout")
+                if auto_fallback:
+                    self.add_log(path, candidate.label, "fallback", self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload, outbound_headers, "reason=stream_idle_timeout; fallback_next=true"), duration_ms, group=group, request_id=request_id, attempt=attempt, event="fallback")
+                    continue
+                error_body = json.dumps({"error": {"message": "stream_idle_timeout", "type": "timeout", "code": "stream_idle_timeout", "request_id": request_id}}, ensure_ascii=False).encode("utf-8")
+                return 504, {"Content-Type": "application/json; charset=utf-8"}, [error_body]
             except HTTPError as err:
+                if resp:
+                    resp.close()
                 self._release_lock(upstream_lock)
                 duration_ms = int((time.perf_counter() - started_at) * 1000)
                 raw = err.read().decode("utf-8", "ignore") if hasattr(err, "read") else str(err)
@@ -1472,7 +1624,6 @@ class ArkProxyRouter:
                 if self._is_server_error(err.code):
                     self.add_log(path, candidate.label, str(err.code), self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload, outbound_headers, "server error, try next"), duration_ms, group=group, request_id=request_id, attempt=attempt, event="fallback")
                     continue
-                # 自动调度/全局 Key 模式下，流式请求同样应继续尝试下一个候选
                 if auto_fallback:
                     self._mark_unusable(candidate, raw)
                     detail = f"upstream error, try next; error={self._short_error(raw)}"
@@ -1483,6 +1634,8 @@ class ArkProxyRouter:
                 self.add_log(path, candidate.label, str(err.code), self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload, outbound_headers, detail), duration_ms, group=group, request_id=request_id, attempt=attempt, event="error")
                 return err.code, headers, [raw.encode("utf-8")]
             except (URLError, TimeoutError, OSError) as err:
+                if resp:
+                    resp.close()
                 self._release_lock(upstream_lock)
                 duration_ms = int((time.perf_counter() - started_at) * 1000)
                 last_error = err
@@ -1497,8 +1650,9 @@ class ArkProxyRouter:
                 continue
 
         if last_error is None:
-            raise AllModelsFailedError("No usable models available", attempted=attempt - 1)
-        raise AllModelsFailedError(f"All available models failed, attempted {attempt - 1}", attempted=attempt - 1) from last_error
+            raise AllModelsFailedError("No usable models available", attempted=attempt, stream_timeout=saw_stream_timeout)
+        message = f"All available models failed, attempted {attempt}, last_error={last_error}"
+        raise AllModelsFailedError(message, attempted=attempt, stream_timeout=saw_stream_timeout) from last_error
 
 
 
@@ -1712,6 +1866,7 @@ class RouterHandler(BaseHTTPRequestHandler):
             api_key=source.api_key,
             route_key=new_route_key(),
             auto_model_cooldown_minutes=source.auto_model_cooldown_minutes if source.provider_type == PROVIDER_RELAY else 0,
+            stream_idle_timeout=source.stream_idle_timeout,
             waf_compatible=source.waf_compatible,
             upstream_models=[dict(item) for item in source.upstream_models],
             upstream_models_fetched_at=source.upstream_models_fetched_at,
@@ -2072,6 +2227,8 @@ class RouterHandler(BaseHTTPRequestHandler):
                 payload["api_key"] = existing.api_key
             if existing and "auto_model_cooldown_minutes" not in payload:
                 payload["auto_model_cooldown_minutes"] = existing.auto_model_cooldown_minutes
+            if existing and "stream_idle_timeout" not in payload:
+                payload["stream_idle_timeout"] = existing.stream_idle_timeout
             if existing and "waf_compatible" not in payload:
                 payload["waf_compatible"] = existing.waf_compatible
             group = ConnectionGroup.from_dict(payload)
@@ -2332,13 +2489,14 @@ class RouterHandler(BaseHTTPRequestHandler):
                 status, headers, result = self.router.call(path, body, ctx, dict(self.headers.items()))
                 self._send_json({"status": status, "headers": headers, "body": result.decode("utf-8", "ignore")})
             except AllModelsFailedError as err:
+                status = 504 if getattr(err, "stream_timeout", False) else 503
                 self._send_json({
                     "error": {
                         "message": f"{err}，共尝试 {err.attempted} 个上游",
                         "type": "all_models_failed",
-                        "code": "service_unavailable",
+                        "code": "stream_idle_timeout" if status == 504 else "service_unavailable",
                     }
-                }, status=503)
+                }, status=status)
             except Exception as err:
                 self._send_text(str(err), status=500)
             return
@@ -2373,13 +2531,14 @@ class RouterHandler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(data)
             except AllModelsFailedError as err:
+                status = 504 if getattr(err, "stream_timeout", False) else 503
                 self._send_json({
                     "error": {
                         "message": f"{err}，共尝试 {err.attempted} 个上游",
                         "type": "all_models_failed",
-                        "code": "service_unavailable",
+                        "code": "stream_idle_timeout" if status == 504 else "service_unavailable",
                     }
-                }, status=503)
+                }, status=status)
             except Exception as err:
                 self._send_text(str(err), status=500)
             return

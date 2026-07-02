@@ -189,7 +189,7 @@ const LogsTab = {
   },
 
   eventLabel(event) {
-    const map = { ok:'成功', stream_ok:'流式成功', retry_ok:'重试成功', cooldown:'冷却切换', fallback:'自动切换', skip:'跳过', network:'网络错误', error:'错误', system:'系统' };
+    const map = { ok:'成功', stream_ok:'流式成功', retry_ok:'重试成功', cooldown:'冷却切换', fallback:'自动切换', skip:'跳过', network:'网络错误', error:'错误', system:'系统', stream_timeout:'流式超时' };
     return map[event] || event || '-';
   },
 
@@ -201,13 +201,14 @@ const LogsTab = {
   },
 
   tokenSummary(item) {
-    const prompt = Number(item.prompt_tokens || 0);
-    const completion = Number(item.completion_tokens || 0);
+    const input = Number(item.prompt_tokens || 0);
+    const output = Number(item.completion_tokens || 0);
     const total = Number(item.total_tokens || 0);
     const cached = Number(item.cached_tokens || 0);
-    if (!total && !prompt && !completion && !cached) return '-';
-    const hit = prompt ? Math.round((cached / prompt) * 100) : 0;
-    return `入 ${prompt} / 出 ${completion} / 总 ${total} / 缓 ${cached} (${hit}%)`;
+    const reasoning = Number(item.reasoning_tokens || 0);
+    if (!total && !input && !output && !cached && !reasoning) return '-';
+    const hit = input ? Math.round((cached / input) * 100) : 0;
+    return `input/prompt ${input} / output/completion ${output} / cached ${cached} (${hit}%) / reasoning ${reasoning} / total ${total}`;
   },
 
   parseDetail(detail) {

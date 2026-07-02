@@ -7,7 +7,8 @@
       "base_url": "https://ark.cn-beijing.volces.com/api/v3",
       "ark_api_key": "sk-xxxx",
       "api_key": "",
-      "route_key": "lr-example-ark"
+      "route_key": "lr-example-ark",
+      "stream_idle_timeout": 120
     },
     {
       "id": "relay-example-group",
@@ -16,7 +17,8 @@
       "base_url": "https://relay.example.com/v1",
       "ark_api_key": "",
       "api_key": "",
-      "route_key": "lr-example-relay"
+      "route_key": "lr-example-relay",
+      "stream_idle_timeout": 120
     },
     {
       "id": "proxy-example-group",
@@ -25,7 +27,8 @@
       "base_url": "https://proxy.example.com/v1",
       "ark_api_key": "",
       "api_key": "sk-proxy-group-key",
-      "route_key": "lr-example-proxy"
+      "route_key": "lr-example-proxy",
+      "stream_idle_timeout": 120
     }
   ],
   "models": [

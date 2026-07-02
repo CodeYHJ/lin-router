@@ -69,7 +69,6 @@ const ConfigTab = {
     const sel = Store.selected;
     const g = sel.type === 'group' ? Store.getGroup(sel.id) : null;
     const provider = g?.provider_type || 'ark';
-    const showAdvanced = provider === 'relay';
     return `
       <form class="config-form" id="group-form" data-type="group">
         <input type="hidden" id="group-id" value="${g?.id || ''}">
@@ -99,11 +98,15 @@ const ConfigTab = {
             </div>
           </div>
         </section>
-        <section class="form-card ${showAdvanced ? '' : 'hidden'}" id="group-advanced-card">
+        <section class="form-card" id="group-advanced-card">
           <h3>高级配置</h3>
           <div class="form-row" id="group-cooldown-row">
             <label>自动冷却分钟</label>
             <input id="group-cooldown" type="number" min="0" step="1" value="${g?.auto_model_cooldown_minutes ?? 5}">
+          </div>
+          <div class="form-row" id="group-stream-timeout-row">
+            <label>流式空闲超时秒</label>
+            <input id="group-stream-timeout" type="number" min="0" max="600" step="1" value="${g?.stream_idle_timeout ?? 120}">
           </div>
           <div class="form-row" id="group-waf-row">
             <label class="checkbox">
@@ -300,13 +303,15 @@ const ConfigTab = {
     const keyRow = document.getElementById('group-key-row');
     const advancedCard = document.getElementById('group-advanced-card');
     const cooldownRow = document.getElementById('group-cooldown-row');
+    const streamTimeoutRow = document.getElementById('group-stream-timeout-row');
     const wafRow = document.getElementById('group-waf-row');
     const hint = document.getElementById('group-mode-hint');
     const label = document.getElementById('group-key-label');
 
     if (keyRow) keyRow.classList.toggle('hidden', !needsKey);
-    if (advancedCard) advancedCard.classList.toggle('hidden', mode !== 'relay');
-    if (cooldownRow) cooldownRow.classList.toggle('hidden', mode !== 'relay');
+    if (advancedCard) advancedCard.classList.remove('hidden');
+    if (cooldownRow) cooldownRow.classList.remove('hidden');
+    if (streamTimeoutRow) streamTimeoutRow.classList.remove('hidden');
     if (wafRow) wafRow.classList.toggle('hidden', mode !== 'relay');
     if (label) label.textContent = mode === 'ark' ? 'Ark API Key' : '上游 API Key';
 
@@ -512,7 +517,8 @@ const ConfigTab = {
       base_url: document.getElementById('group-base').value.trim() || undefined,
       ark_api_key: mode === 'ark' ? key : '',
       api_key: mode === 'proxy' ? key : '',
-      auto_model_cooldown_minutes: mode === 'relay' ? Number(document.getElementById('group-cooldown').value || 0) : undefined,
+      auto_model_cooldown_minutes: Number(document.getElementById('group-cooldown').value || 0),
+      stream_idle_timeout: Math.max(0, Math.min(600, Number(document.getElementById('group-stream-timeout').value || 0))),
       waf_compatible: mode === 'relay' ? document.getElementById('group-waf').checked : false,
     };
     try {
