@@ -22,44 +22,18 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
+import certifi
+import ssl
+
+from linrouter_platform import get_platform
 from settings_store import SettingsStore
 
 
+# 全局 SSL context：使用 certifi 提供的 CA bundle 验证所有 HTTPS 上游
+_ssl_context = ssl.create_default_context(cafile=certifi.where())
+
+
 DEFAULT_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
-
-
-def _set_windows_auto_start(enabled: bool) -> bool:
-    """Windows 下设置当前用户开机自启（HKCU Run）。打包为 exe 时生效，开发模式跳过。"""
-    if not getattr(sys, "frozen", False):
-        # 开发模式下不写注册表，避免把 python.exe 写进去
-        return True
-    try:
-        import winreg
-        key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
-        exe = Path(sys.executable).resolve()
-        command = f'"{exe}" --tray'
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_WRITE) as key:
-            if enabled:
-                winreg.SetValueEx(key, "LinRouter", 0, winreg.REG_SZ, command)
-            else:
-                try:
-                    winreg.DeleteValue(key, "LinRouter")
-                except FileNotFoundError:
-                    pass
-        return True
-    except Exception:
-        return False
-
-
-def _get_windows_auto_start() -> bool:
-    """读取 Windows 当前用户开机自启是否启用。"""
-    try:
-        import winreg
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_READ) as key:
-            winreg.QueryValueEx(key, "LinRouter")
-            return True
-    except (FileNotFoundError, OSError):
-        return False
 
 
 DEFAULT_CONFIG_FILE = "lin-router-config.json"
@@ -124,17 +98,8 @@ BROWSER_UA = (
 )
 
 
-def resource_path(*parts: str) -> Path:
-    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
-        bundled = Path(sys._MEIPASS).joinpath(*parts)
-        if bundled.exists():
-            return bundled
-        return Path(sys.executable).resolve().parent.joinpath(*parts)
-    return Path(__file__).resolve().parent.joinpath(*parts)
-
-
 def render_index_page() -> str:
-    page_path = resource_path("static", "index.html")
+    page_path = get_platform().get_resource_path("static", "index.html")
     html = page_path.read_text(encoding="utf-8")
     return html.replace("__AUTO_MODEL_NAME__", DEFAULT_AUTO_MODEL_NAME)
 
@@ -577,7 +542,7 @@ class ArkProxyRouter:
 
     def _resolve_log_file(self) -> Path:
         candidates = [
-            self.store.path.parent / "lin-router-logs.jsonl",
+            get_platform().get_log_dir() / "lin-router-logs.jsonl",
             Path.home() / ".lin-router" / "logs" / "lin-router-logs.jsonl",
             Path(tempfile.gettempdir()) / "lin-router-logs.jsonl",
         ]
@@ -1382,7 +1347,7 @@ class ArkProxyRouter:
             )
             started_at = time.perf_counter()
             try:
-                with urlopen(request, timeout=120) as resp:
+                with urlopen(request, timeout=120, context=_ssl_context) as resp:
                     data = resp.read()
                     duration_ms = int((time.perf_counter() - started_at) * 1000)
                     prompt_tokens, completion_tokens, total_tokens, cached_tokens, reasoning_tokens = self._usage_from_response(data)
@@ -1419,7 +1384,7 @@ class ArkProxyRouter:
                 if self._is_rate_limited(err.code, raw):
                     try:
                         retry_started_at = time.perf_counter()
-                        with urlopen(request, timeout=120) as resp:
+                        with urlopen(request, timeout=120, context=_ssl_context) as resp:
                             data = resp.read()
                             retry_duration_ms = int((time.perf_counter() - retry_started_at) * 1000)
                             prompt_tokens, completion_tokens, total_tokens, cached_tokens, reasoning_tokens = self._usage_from_response(data)
@@ -1511,7 +1476,7 @@ class ArkProxyRouter:
             resp = None
             started_at = time.perf_counter()
             try:
-                resp = urlopen(request, timeout=120)
+                resp = urlopen(request, timeout=120, context=_ssl_context)
                 first_chunk = self._readline_with_idle_timeout(resp, idle_timeout)
                 if not first_chunk:
                     raise URLError("upstream stream closed before first chunk")
@@ -1810,7 +1775,7 @@ class RouterHandler(BaseHTTPRequestHandler):
         )
         started_at = time.perf_counter()
         try:
-            with urlopen(request, timeout=60) as resp:
+            with urlopen(request, timeout=60, context=_ssl_context) as resp:
                 raw = resp.read()
                 duration_ms = int((time.perf_counter() - started_at) * 1000)
                 self.router.add_log(
@@ -1969,7 +1934,7 @@ class RouterHandler(BaseHTTPRequestHandler):
             if ".." in rel:
                 self._send_text("forbidden", status=403)
                 return
-            file_path = resource_path("static", *rel.split("/"))
+            file_path = get_platform().get_resource_path("static", *rel.split("/"))
             self._send_file(file_path)
             return
         if parsed.path in {"/v1/models", "/models"}:
@@ -2013,7 +1978,7 @@ class RouterHandler(BaseHTTPRequestHandler):
                 "settings": {
                     **settings,
                     # 开机自启以注册表真实状态为准
-                    "auto_start": _get_windows_auto_start(),
+                    "auto_start": get_platform().is_autostart_enabled(),
                 },
                 "group_meta": {
                     group.id: {
@@ -2202,13 +2167,13 @@ class RouterHandler(BaseHTTPRequestHandler):
             allowed = {"auto_start", "start_minimized", "theme", "auto_refresh_logs"}
             new_settings = {k: v for k, v in settings_raw.items() if k in allowed}
             if "auto_start" in new_settings:
-                _set_windows_auto_start(bool(new_settings["auto_start"]))
+                get_platform().set_autostart(bool(new_settings["auto_start"]))
             updated = settings_store.update(new_settings)
             self._send_json({
                 "ok": True,
                 "groups": len(self.store.groups),
                 "models": len(self.store.models),
-                "settings": {**updated, "auto_start": _get_windows_auto_start()},
+                "settings": {**updated, "auto_start": get_platform().is_autostart_enabled()},
             })
             return
         if parsed.path == "/api/groups":
@@ -2469,12 +2434,12 @@ class RouterHandler(BaseHTTPRequestHandler):
             new_settings = {k: v for k, v in payload.items() if k in allowed}
             # 开机自启需要同步到 Windows 注册表
             if "auto_start" in new_settings:
-                _set_windows_auto_start(bool(new_settings["auto_start"]))
+                get_platform().set_autostart(bool(new_settings["auto_start"]))
             settings_store = self.server.settings_store  # type: ignore[attr-defined]
             updated = settings_store.update(new_settings)
             self._send_json({
                 **updated,
-                "auto_start": _get_windows_auto_start(),
+                "auto_start": get_platform().is_autostart_enabled(),
             })
             return
         if parsed.path == "/api/test":
@@ -2649,7 +2614,7 @@ def create_server(
 
 def main() -> None:
     # 默认配置文件固定在项目根目录，不跟随命令行工作目录变化
-    default_config = str(Path(__file__).resolve().parent / DEFAULT_CONFIG_FILE)
+    default_config = str(get_platform().get_config_path(DEFAULT_CONFIG_FILE))
     parser = argparse.ArgumentParser(description="Lin Router proxy UI")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", default=DEFAULT_START_PORT, type=int)

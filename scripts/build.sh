@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+set -e
+
+# Lin Router 跨平台构建脚本
+# 用法：
+#   scripts/build.sh --target win32
+#   scripts/build.sh --target darwin
+#   scripts/build.sh --target darwin --dmg
+
+TARGET=""
+BUILD_DMG=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --target)
+      TARGET="$2"
+      shift 2
+      ;;
+    --dmg)
+      BUILD_DMG=1
+      shift
+      ;;
+    *)
+      echo "未知选项：$1" >&2
+      echo "用法：$0 --target {win32|darwin} [--dmg]" >&2
+      exit 1
+      ;;
+  esac
+done
+
+if [[ -z "$TARGET" ]]; then
+  echo "必须指定 --target {win32|darwin}" >&2
+  echo "用法：$0 --target {win32|darwin} [--dmg]" >&2
+  exit 1
+fi
+
+PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+RESOURCES_DIR="$PROJECT_ROOT/resources"
+DIST_DIR="$PROJECT_ROOT/dist"
+
+generate_icon() {
+  python "$PROJECT_ROOT/scripts/generate_icon.py" "$1" "$2"
+}
+
+case "$TARGET" in
+  win32)
+    ICON_PATH="$RESOURCES_DIR/win32/LinRouter.ico"
+    if [[ ! -f "$ICON_PATH" ]]; then
+      echo "生成 Windows 图标..."
+      generate_icon win32 "$ICON_PATH"
+    fi
+    python -m PyInstaller --noconfirm --clean "$PROJECT_ROOT/LinRouter.spec"
+    # 若旧产物仍存在，先尝试删除以避免 mv 失败
+    rm -f "$DIST_DIR/LinRouter_windows.exe"
+    mv "$DIST_DIR/LinRouter.exe" "$DIST_DIR/LinRouter_windows.exe"
+    echo "Windows 构建完成：$DIST_DIR/LinRouter_windows.exe"
+    ;;
+
+  darwin)
+    ICON_PATH="$RESOURCES_DIR/darwin/LinRouter.icns"
+    if [[ ! -f "$ICON_PATH" ]]; then
+      echo "生成 macOS 图标..."
+      generate_icon darwin "$ICON_PATH"
+    fi
+    python -m PyInstaller --noconfirm --clean "$PROJECT_ROOT/LinRouter.spec"
+    echo "macOS 构建完成：$DIST_DIR/LinRouter.app"
+    if [[ "$BUILD_DMG" == "1" ]]; then
+      DMG_PATH="$DIST_DIR/LinRouter.dmg"
+      APP_PATH="$DIST_DIR/LinRouter.app"
+      if command -v create-dmg >/dev/null 2>&1; then
+        create-dmg \
+          --volname "LinRouter" \
+          --window-pos 200 120 \
+          --window-size 800 400 \
+          --icon-size 100 \
+          --app-drop-link 600 185 \
+          "$DMG_PATH" \
+          "$APP_PATH"
+      else
+        hdiutil create -srcfolder "$APP_PATH" -volname "LinRouter" -fs HFS+ -format UDZO "$DMG_PATH"
+      fi
+      echo "macOS DMG 构建完成：$DMG_PATH"
+    fi
+    ;;
+
+  *)
+    echo "不支持的目标平台：$TARGET" >&2
+    echo "用法：$0 --target {win32|darwin} [--dmg]" >&2
+    exit 1
+    ;;
+esac
