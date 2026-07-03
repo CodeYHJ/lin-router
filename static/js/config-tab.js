@@ -657,7 +657,10 @@ const ConfigTab = {
     try {
       await API.fetchUpstreamModels(groupId, apiKey);
       await Store.load();
-      this.syncModelModeUI();
+      // 重新渲染上游模型下拉列表，并清空旧值，确保用户看到新获取的完整候选列表
+      const upstreamInput = document.getElementById('model-upstream');
+      if (upstreamInput) upstreamInput.value = '';
+      this.renderUpstreamOptions(groupId);
       Toast.success('上游模型已获取');
     } catch (err) {
       Toast.error('获取失败：' + err.message);
