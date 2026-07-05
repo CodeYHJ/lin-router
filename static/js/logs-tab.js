@@ -193,6 +193,21 @@ const LogsTab = {
     return map[event] || event || '-';
   },
 
+  renderPayloadWarnings(parsed) {
+    const warnings = [];
+    const labels = {
+      payload_large: 'body 较大',
+      payload_very_large: 'body 很大',
+      tools_large: 'tools 很大',
+      tool_results_large: 'tool_results 很大',
+      messages_many: 'messages 过多'
+    };
+    Object.entries(labels).forEach(([key, label]) => {
+      if (parsed[key] === 'true') warnings.push(label);
+    });
+    return warnings.length ? `<span class="pill warning">${Utils.escapeHtml(warnings.join(' / '))}</span>` : '-';
+  },
+
   statusClass(status) {
     const text = String(status || '');
     if (text === '200' || text.startsWith('2')) return 'success';
@@ -327,6 +342,22 @@ const LogsTab = {
           <dl style="margin-top:10px;">
             <dt>模式</dt><dd>${Utils.escapeHtml(parsed.provider || item.provider_type || '-')}</dd>
             <dt>Mode</dt><dd>${Utils.escapeHtml(parsed.mode || '-')}</dd>
+          </dl>
+        </div>
+        <div class="log-detail-block">
+          <h4>诊断信息</h4>
+          <dl>
+            <dt>Usage 来源</dt><dd>${Utils.escapeHtml(parsed.usage_source || item.usage_source || '-')}</dd>
+            <dt>Header 策略</dt><dd>${Utils.escapeHtml(parsed.header_policy || '-')}</dd>
+            <dt>Accept</dt><dd>${Utils.escapeHtml(parsed.accept || '-')}</dd>
+            <dt>Content-Type</dt><dd>${Utils.escapeHtml(parsed.content_type || '-')}</dd>
+            <dt>UA 类型</dt><dd>${Utils.escapeHtml(parsed.user_agent_family || '-')}</dd>
+            <dt>WAF 兼容</dt><dd>${Utils.escapeHtml(parsed.waf_compatible || '-')}</dd>
+            <dt>WAF 锁</dt><dd>${Utils.escapeHtml(parsed.waf_lock_enabled || '-')}</dd>
+            <dt>HTTP 客户端</dt><dd>${Utils.escapeHtml(parsed.http_client || '-')}</dd>
+            <dt>HTTP 版本</dt><dd>${Utils.escapeHtml(parsed.upstream_http_version || '-')}</dd>
+            <dt>Tools 排序</dt><dd>${Utils.escapeHtml(parsed.tools_normalized || '-')}</dd>
+            <dt>Payload 预警</dt><dd>${this.renderPayloadWarnings(parsed)}</dd>
           </dl>
         </div>
       </div>

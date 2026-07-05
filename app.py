@@ -32,6 +32,7 @@ except Exception:  # certifi 未安装时回退到系统默认，Windows 不受�
 
 from linrouter_platform import get_platform
 from settings_store import SettingsStore
+from debug_capture import DebugCapture
 
 
 DEFAULT_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
@@ -190,6 +191,7 @@ class ConnectionGroup:
     auto_model_cooldown_minutes: int = DEFAULT_AUTO_MODEL_COOLDOWN_MINUTES
     stream_idle_timeout: int = DEFAULT_STREAM_IDLE_TIMEOUT_SECONDS
     waf_compatible: bool = False
+    waf_accept_policy: str = "default"
     upstream_models: List[Dict[str, Any]] = field(default_factory=list)
     upstream_models_fetched_at: str = ""
 
@@ -206,6 +208,7 @@ class ConnectionGroup:
             auto_model_cooldown_minutes=int(data.get("auto_model_cooldown_minutes") or DEFAULT_AUTO_MODEL_COOLDOWN_MINUTES),
             stream_idle_timeout=max(0, min(MAX_STREAM_IDLE_TIMEOUT_SECONDS, int(data.get("stream_idle_timeout", DEFAULT_STREAM_IDLE_TIMEOUT_SECONDS) or 0))),
             waf_compatible=bool(data.get("waf_compatible", False)),
+            waf_accept_policy=str(data.get("waf_accept_policy") or "default"),
             upstream_models=[item for item in data.get("upstream_models", []) if isinstance(item, dict)] if isinstance(data.get("upstream_models", []), list) else [],
             upstream_models_fetched_at=str(data.get("upstream_models_fetched_at") or ""),
         )
@@ -269,6 +272,7 @@ class RequestLog:
     event: str = ""
     request_id: str = ""
     attempt: int = 0
+    usage_source: str = ""
 
 
 @dataclass
@@ -532,14 +536,42 @@ class StreamIdleTimeoutError(TimeoutError):
 
 
 class ArkProxyRouter:
-    def __init__(self, store: ConfigStore) -> None:
+    def __init__(self, store: ConfigStore, settings_store: Optional[SettingsStore] = None) -> None:
         self.store = store
+        self.settings_store = settings_store
         self.logs: List[RequestLog] = []
         self.log_file = self._resolve_log_file()
         self.log_write_error = ""
         self.upstream_locks: Dict[str, threading.Lock] = {}
         self.upstream_locks_guard = threading.Lock()
+        self._upstream_client = self._create_upstream_client()
+        self.debug_capture = DebugCapture(self, settings_store)
         self._load_log_file()
+
+    def _create_upstream_client(self) -> "UpstreamClient":
+        from upstream_client import UpstreamClient
+
+        if self.settings_store is None:
+            return UpstreamClient(client_type="urllib", ssl_context=_ssl_context)
+        client_type = str(self.settings_store.get("upstream_http_client", "urllib")).lower()
+        http2 = bool(self.settings_store.get("upstream_http2", False))
+        keepalive = bool(self.settings_store.get("upstream_keepalive", False))
+        return UpstreamClient(client_type=client_type, http2=http2, keepalive=keepalive, ssl_context=_ssl_context)
+
+    def _refresh_upstream_client(self) -> None:
+        if self.settings_store is None:
+            return
+        client_type = str(self.settings_store.get("upstream_http_client", "urllib")).lower()
+        http2 = bool(self.settings_store.get("upstream_http2", False))
+        keepalive = bool(self.settings_store.get("upstream_keepalive", False))
+        current = self._upstream_client
+        if (
+            current.client_type != client_type
+            or current.http2 != http2
+            or current.keepalive != keepalive
+        ):
+            current.close()
+            self._upstream_client = UpstreamClient(client_type=client_type, http2=http2, keepalive=keepalive, ssl_context=_ssl_context)
 
     def _resolve_log_file(self) -> Path:
         candidates = [
@@ -573,6 +605,7 @@ class ArkProxyRouter:
         event: str = "",
         request_id: str = "",
         attempt: int = 0,
+        usage_source: str = "",
     ) -> None:
         detail = self._sanitize_detail(detail)
         group_id = group.id if group else self._detail_value(detail, "group_id")
@@ -596,6 +629,7 @@ class ArkProxyRouter:
             event or self._infer_event(status, detail),
             request_id,
             attempt,
+            usage_source,
         )
         self.logs.insert(0, item)
         self._append_log_file(item)
@@ -674,6 +708,7 @@ class ArkProxyRouter:
             event=str(row.get("event") or ""),
             request_id=str(row.get("request_id") or ""),
             attempt=int(row.get("attempt") or 0),
+            usage_source=str(row.get("usage_source") or ""),
         )
 
     def _load_log_file(self) -> None:
@@ -750,17 +785,18 @@ class ArkProxyRouter:
         except Exception:
             return
 
-    def update_latest_stream_usage(self, path: str, model: str, usage: Tuple[int, int, int, int, int]) -> None:
-        prompt_tokens, completion_tokens, total_tokens, cached_tokens, reasoning_tokens = usage
-        if not any(usage):
+    def update_latest_stream_usage(self, request_id: str, usage: Tuple[int, int, int, int, int], usage_source: str) -> None:
+        if not request_id:
             return
+        prompt_tokens, completion_tokens, total_tokens, cached_tokens, reasoning_tokens = usage
         for item in self.logs:
-            if item.path == path and item.model == model and item.status == "200":
+            if item.request_id == request_id and item.event == "stream_ok":
                 item.prompt_tokens = prompt_tokens
                 item.completion_tokens = completion_tokens
                 item.total_tokens = total_tokens
                 item.cached_tokens = cached_tokens
                 item.reasoning_tokens = reasoning_tokens
+                item.usage_source = usage_source
                 break
         # 同步回写日志文件，避免重启后流式请求的 token 使用量丢失
         self._rewrite_log_file()
@@ -781,7 +817,7 @@ class ArkProxyRouter:
     def export_logs_csv(self) -> str:
         output = io.StringIO()
         writer = csv.writer(output)
-        writer.writerow(["time", "path", "request_id", "attempt", "group_name", "provider_type", "model", "status", "event", "duration_ms", "prompt_tokens", "completion_tokens", "total_tokens", "cached_tokens", "reasoning_tokens", "detail"])
+        writer.writerow(["time", "path", "request_id", "attempt", "group_name", "provider_type", "model", "status", "event", "duration_ms", "prompt_tokens", "completion_tokens", "total_tokens", "cached_tokens", "reasoning_tokens", "usage_source", "detail"])
         for item in self.all_logs():
             writer.writerow([
                 item.time,
@@ -799,6 +835,7 @@ class ArkProxyRouter:
                 item.total_tokens,
                 item.cached_tokens,
                 item.reasoning_tokens,
+                item.usage_source,
                 item.detail,
             ])
         return output.getvalue()
@@ -990,23 +1027,65 @@ class ArkProxyRouter:
         return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
 
     @staticmethod
+    def _json_bytes(value: Any) -> int:
+        try:
+            return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+        except Exception:
+            return len(str(value).encode("utf-8"))
+
+    @staticmethod
     def _cache_prefix_fingerprint(payload: Dict[str, Any], body: bytes) -> str:
         parts = [
+            f"body_len={len(body)}",
             f"body_4k={hashlib.sha256(body[:4096]).hexdigest()[:16]}",
             f"body_16k={hashlib.sha256(body[:16384]).hexdigest()[:16]}",
             f"body_64k={hashlib.sha256(body[:65536]).hexdigest()[:16]}",
+            f"body_128k={hashlib.sha256(body[:131072]).hexdigest()[:16]}",
+            f"body_256k={hashlib.sha256(body[:262144]).hexdigest()[:16]}",
+            f"body_all={hashlib.sha256(body).hexdigest()[:16]}",
         ]
         messages = payload.get("messages")
+        system_bytes = 0
+        developer_bytes = 0
+        user_assistant_bytes = 0
+        tool_result_bytes = 0
         if isinstance(messages, list):
             normalized_messages = ArkProxyRouter._normalize_for_cache(messages)
             for count in (1, 4, 16, 32, 64):
                 if len(normalized_messages) >= count:
                     parts.append(f"msg_{count}={ArkProxyRouter._hash_json(normalized_messages[:count])}")
             parts.append(f"msg_all={ArkProxyRouter._hash_json(normalized_messages)}")
+            for message in messages:
+                if not isinstance(message, dict):
+                    continue
+                role = str(message.get("role") or "")
+                content = message.get("content")
+                size = ArkProxyRouter._json_bytes(content)
+                if role == "system":
+                    system_bytes += size
+                elif role == "developer":
+                    developer_bytes += size
+                elif role in ("user", "assistant"):
+                    user_assistant_bytes += size
+                elif role == "tool":
+                    tool_result_bytes += size
+        parts.append(f"system_bytes={system_bytes}")
+        parts.append(f"developer_bytes={developer_bytes}")
+        parts.append(f"user_assistant_bytes={user_assistant_bytes}")
+        parts.append(f"tool_result_bytes={tool_result_bytes}")
         tools = payload.get("tools")
+        tools_bytes = 0
+        tools_count = 0
         if isinstance(tools, list):
+            tools_count = len(tools)
+            tools_bytes = ArkProxyRouter._json_bytes(tools)
             normalized_tools = ArkProxyRouter._normalize_for_cache(tools)
+            parts.append(f"tools_count={tools_count}")
+            parts.append(f"tools_bytes={tools_bytes}")
             parts.append(f"tools_hash={ArkProxyRouter._hash_json(normalized_tools)}")
+        else:
+            parts.append("tools_count=0")
+            parts.append("tools_bytes=0")
         return "; ".join(parts)
 
     @staticmethod
@@ -1042,7 +1121,7 @@ class ArkProxyRouter:
         return "; ".join(items) if items else "headers=none"
 
     @staticmethod
-    def _payload_fingerprint(payload: Dict[str, Any], body: bytes) -> str:
+    def _payload_fingerprint(payload: Dict[str, Any], body: bytes, path: str = "", tools_normalized: bool = False) -> str:
         keys = [
             "model",
             "stream",
@@ -1061,7 +1140,10 @@ class ArkProxyRouter:
             if key in payload:
                 parts.append(f"{key}={payload.get(key)!r}")
         messages = payload.get("messages")
+        messages_count = 0
+        tool_result_bytes = 0
         if isinstance(messages, list):
+            messages_count = len(messages)
             roles: List[str] = []
             content_chars = 0
             for message in messages:
@@ -1071,13 +1153,60 @@ class ArkProxyRouter:
                         content_chars += len(json.dumps(message.get("content"), ensure_ascii=False, separators=(",", ":")))
                     except Exception:
                         content_chars += len(str(message.get("content")))
-            parts.append(f"messages={len(messages)}")
+                    if message.get("role") == "tool":
+                        tool_result_bytes += ArkProxyRouter._json_bytes(message.get("content"))
+            parts.append(f"messages={messages_count}")
             parts.append("roles=" + ",".join(roles[:12]))
             parts.append(f"content_chars={content_chars}")
-        for key in ("tools", "functions"):
+        # Responses API 结构化统计
+        is_responses = path == "/v1/responses" or "input" in payload
+        if is_responses:
+            input_value = payload.get("input")
+            input_type = "none"
+            input_items = 0
+            input_bytes = 0
+            if isinstance(input_value, str):
+                input_type = "str"
+                input_bytes = ArkProxyRouter._json_bytes(input_value)
+            elif isinstance(input_value, list):
+                input_type = "list"
+                input_items = len(input_value)
+                input_bytes = ArkProxyRouter._json_bytes(input_value)
+            elif isinstance(input_value, dict):
+                input_type = "dict"
+                input_bytes = ArkProxyRouter._json_bytes(input_value)
+            parts.append(f"responses_input_type={input_type}")
+            parts.append(f"responses_input_items={input_items}")
+            parts.append(f"responses_input_bytes={input_bytes}")
+            parts.append(f"instructions_bytes={ArkProxyRouter._json_bytes(payload.get('instructions'))}")
+            parts.append(f"previous_response_id_present={'true' if payload.get('previous_response_id') else 'false'}")
+            response_tools = payload.get("tools")
+            if isinstance(response_tools, list):
+                parts.append(f"response_tools_count={len(response_tools)}")
+                parts.append(f"response_tools_bytes={ArkProxyRouter._json_bytes(response_tools)}")
+            else:
+                parts.append("response_tools_count=0")
+                parts.append("response_tools_bytes=0")
+            metadata = payload.get("metadata")
+            if isinstance(metadata, dict):
+                parts.append(f"response_metadata_keys={len(list(metadata.keys()))}")
+            else:
+                parts.append("response_metadata_keys=0")
+        tools = payload.get("tools")
+        tools_bytes = 0
+        if isinstance(tools, list):
+            tools_bytes = ArkProxyRouter._json_bytes(tools)
+            names: List[str] = []
+            for item in tools[:12]:
+                if not isinstance(item, dict):
+                    continue
+                fn = item.get("function") if isinstance(item.get("function"), dict) else {}
+                names.append(str(fn.get("name") or item.get("name") or item.get("type") or "?"))
+            parts.append(f"tools={len(tools)}:{','.join(names)}")
+        for key in ("functions",):
             value = payload.get(key)
             if isinstance(value, list):
-                names: List[str] = []
+                names = []
                 for item in value[:12]:
                     if not isinstance(item, dict):
                         continue
@@ -1087,7 +1216,21 @@ class ArkProxyRouter:
         stream_options = payload.get("stream_options")
         if isinstance(stream_options, dict):
             parts.append("stream_options=" + ",".join(f"{k}={stream_options[k]!r}" for k in sorted(stream_options)))
-        parts.append(f"body_len={len(body)}")
+        if tools_normalized:
+            parts.append("tools_normalized=true")
+        # Payload 减重预警标记
+        body_len = len(body)
+        if body_len > 262144:
+            parts.append("payload_very_large=true")
+        elif body_len > 131072:
+            parts.append("payload_large=true")
+        if tools_bytes > 65536:
+            parts.append("tools_large=true")
+        if tool_result_bytes > 65536:
+            parts.append("tool_results_large=true")
+        if messages_count > 60:
+            parts.append("messages_many=true")
+        parts.append(f"body_len={body_len}")
         parts.append(f"body_sha256={ArkProxyRouter._body_sha256(body)}")
         parts.append(f"normalized_sha256={ArkProxyRouter._normalized_body_sha256(payload)}")
         parts.append(f"prefix=({ArkProxyRouter._cache_prefix_fingerprint(payload, body)})")
@@ -1103,22 +1246,82 @@ class ArkProxyRouter:
         payload: Dict[str, Any],
         headers: Dict[str, str],
         suffix: str,
+        resp: Optional[Any] = None,
+        tools_normalized: bool = False,
     ) -> str:
         base = self._candidate_hit_detail(candidate, requested_label, suffix)
         group_name = str(candidate.group.name).replace(";", ",")
         # mode=passthrough 表示该请求走透传路径（ark/proxy），relay 专属逻辑不介入
         mode_tag = "passthrough" if candidate.group.provider_type != PROVIDER_RELAY else "relay"
+        path = urlparse(target_url).path
+        header_policy = "waf_browser" if candidate.group.provider_type == PROVIDER_RELAY and candidate.group.waf_compatible else "passthrough"
+        lower_headers = {k.lower(): v for k, v in headers.items()}
+        accept = lower_headers.get("accept", "")
+        content_type = lower_headers.get("content-type", "")
+        user_agent = lower_headers.get("user-agent", "")
+        user_agent_family = self._user_agent_family(user_agent)
+        waf_lock_enabled = self._candidate_lock_enabled(candidate)
+        http_client = getattr(self, "_upstream_client", None) and getattr(self._upstream_client, "client_type", "urllib") or "urllib"
+        http_version = getattr(resp, "http_version", "") if resp else ""
+        extra = (
+            f"; header_policy={header_policy}"
+            f"; accept={accept}"
+            f"; content_type={content_type}"
+            f"; user_agent_family={user_agent_family}"
+            f"; waf_compatible={'true' if candidate.group.waf_compatible else 'false'}"
+            f"; waf_lock_enabled={'true' if waf_lock_enabled else 'false'}"
+            f"; http_client={http_client}"
+            f"; upstream_http_version={http_version or '-'}"
+        )
         return (
             f"{base}; group_id={candidate.group.id}; group_name={group_name}; provider={candidate.group.provider_type}; mode={mode_tag}; "
             f"upstream={target_url}; body={body_mode}; "
-            f"fingerprint=({self._payload_fingerprint(payload, body)}); "
+            f"fingerprint=({self._payload_fingerprint(payload, body, path, tools_normalized=tools_normalized)}); "
             f"out_headers=({self._safe_header_view(headers)})"
+            f"{extra}"
         )
+
+    @staticmethod
+    def _user_agent_family(user_agent: str) -> str:
+        ua = str(user_agent).lower()
+        if "codex" in ua:
+            return "codex"
+        if any(k in ua for k in ("chrome", "safari", "firefox", "edge", "mozilla")):
+            return "browser"
+        return "other"
 
     @staticmethod
     def _short_error(raw: str, limit: int = 900) -> str:
         text = " ".join(str(raw or "").split())
         return text[:limit]
+
+    def _tools_order_enabled(self) -> bool:
+        if self.settings_store is None:
+            return False
+        return bool(self.settings_store.get("normalize_tools_order", False))
+
+    @staticmethod
+    def _normalize_tools_order(payload: Dict[str, Any]) -> Tuple[Dict[str, Any], bool]:
+        tools = payload.get("tools")
+        if not isinstance(tools, list) or len(tools) <= 1:
+            return payload, False
+        try:
+            def _tool_key(item: Any) -> str:
+                if not isinstance(item, dict):
+                    return ""
+                fn = item.get("function")
+                if isinstance(fn, dict):
+                    return str(fn.get("name") or "")
+                return str(item.get("name") or item.get("type") or "")
+
+            sorted_tools = sorted(tools, key=_tool_key)
+            if sorted_tools == tools:
+                return payload, False
+            new_payload = dict(payload)
+            new_payload["tools"] = sorted_tools
+            return new_payload, True
+        except Exception:
+            return payload, False
 
     def _auth_for(self, group: ConnectionGroup, model: Optional[ModelConfig]) -> str:
         mode = self._mode_for(group)
@@ -1135,6 +1338,17 @@ class ArkProxyRouter:
             headers["authorization"] = f"Bearer {auth_key}"
             if not any(key.lower() == "content-type" for key in headers):
                 headers["content-type"] = "application/json"
+            policy = str(group.waf_accept_policy or "default")
+            if policy == "text_event_stream":
+                headers["accept"] = "text/event-stream" if stream else "application/json"
+            elif policy == "passthrough":
+                incoming_accept = None
+                for name, value in incoming_headers.items():
+                    if name.strip().lower() == "accept":
+                        incoming_accept = value
+                        break
+                if incoming_accept:
+                    headers["accept"] = incoming_accept
             return headers
         if incoming_headers:
             return build_passthrough_headers(auth_key, incoming_headers, stream=stream)
@@ -1158,7 +1372,7 @@ class ArkProxyRouter:
         )
 
     def _candidate_lock(self, candidate: UpstreamCandidate) -> Optional[threading.Lock]:
-        if candidate.group.provider_type != PROVIDER_RELAY or not candidate.group.waf_compatible:
+        if not self._candidate_lock_enabled(candidate):
             return None
         key = f"{candidate.group.id}:{candidate.target_model}:{candidate.channel}"
         with self.upstream_locks_guard:
@@ -1167,6 +1381,10 @@ class ArkProxyRouter:
                 lock = threading.Lock()
                 self.upstream_locks[key] = lock
             return lock
+
+    @staticmethod
+    def _candidate_lock_enabled(candidate: UpstreamCandidate) -> bool:
+        return candidate.group.provider_type == PROVIDER_RELAY and candidate.group.waf_compatible
 
     @staticmethod
     def _release_lock(lock: Optional[threading.Lock]) -> None:
@@ -1275,6 +1493,12 @@ class ArkProxyRouter:
 
     @staticmethod
     def _readline_with_idle_timeout(resp: Any, timeout_seconds: int) -> bytes:
+        # UpstreamResponse 等包装对象支持带超时的 readline
+        if hasattr(resp, "readline") and callable(getattr(resp, "readline")):
+            try:
+                return resp.readline(timeout_seconds)
+            except TypeError:
+                pass
         if timeout_seconds <= 0:
             return resp.readline()
         result: queue.Queue[Any] = queue.Queue(maxsize=1)
@@ -1335,20 +1559,19 @@ class ArkProxyRouter:
             if not candidate.auth_key:
                 self.add_log(path, candidate.label, "skip", f"requested={requested_label}; missing upstream api key", group=group, request_id=request_id, attempt=attempt, event="skip")
                 continue
-            body, body_mode = self._body_for_upstream(payload, raw_body, str(requested_model) if requested_model else None, candidate.target_model)
+            payload_for_upstream = payload
+            tools_normalized = False
+            if self._tools_order_enabled():
+                payload_for_upstream, tools_normalized = self._normalize_tools_order(payload)
+            body, body_mode = self._body_for_upstream(payload_for_upstream, raw_body, str(requested_model) if requested_model else None, candidate.target_model)
             outbound_headers = self._headers_for(group, candidate.auth_key, incoming_headers, stream=False)
             upstream_lock = self._candidate_lock(candidate)
             if upstream_lock:
                 upstream_lock.acquire()
-            request = Request(
-                target_url,
-                data=body,
-                headers=outbound_headers,
-                method="POST",
-            )
             started_at = time.perf_counter()
             try:
-                with urlopen(request, timeout=120, context=_ssl_context) as resp:
+                resp = self._upstream_client.request("POST", target_url, outbound_headers, body, stream=False, timeout=120)
+                with resp:
                     data = resp.read()
                     duration_ms = int((time.perf_counter() - started_at) * 1000)
                     prompt_tokens, completion_tokens, total_tokens, cached_tokens, reasoning_tokens = self._usage_from_response(data)
@@ -1357,7 +1580,7 @@ class ArkProxyRouter:
                         path,
                         candidate.label,
                         str(resp.status),
-                        self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload, outbound_headers, "ok"),
+                        self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, "ok", resp=resp, tools_normalized=tools_normalized),
                         duration_ms,
                         prompt_tokens,
                         completion_tokens,
@@ -1366,7 +1589,24 @@ class ArkProxyRouter:
                         reasoning_tokens,
                         group=group,
                         event="ok",
+                        request_id=request_id,
+                        usage_source="response_inline",
                     )
+                    try:
+                        self.debug_capture.capture(
+                            path=path,
+                            group=group,
+                            model=candidate.label,
+                            target_model=candidate.target_model,
+                            body=body,
+                            body_mode=body_mode,
+                            headers=outbound_headers,
+                            fingerprint=self._payload_fingerprint(payload_for_upstream, body, urlparse(target_url).path, tools_normalized=tools_normalized),
+                            request_id=request_id,
+                            usage_source="response_inline",
+                        )
+                    except Exception:
+                        pass
                     return resp.status, dict(resp.headers.items()), data
             except HTTPError as err:
                 duration_ms = int((time.perf_counter() - started_at) * 1000)
@@ -1376,11 +1616,11 @@ class ArkProxyRouter:
                     cooldown_seconds = self._auto_cooldown_seconds(group)
                     self._set_cooldown(candidate.idx, raw or str(err), cooldown_seconds, f"http_{err.code}")
                     detail = f"cooldown {cooldown_seconds // 60 or 0}m, try next; error={self._short_error(raw)}"
-                    self.add_log(path, candidate.label, str(err.code), self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload, outbound_headers, detail), duration_ms, group=group, request_id=request_id, attempt=attempt, event="cooldown")
+                    self.add_log(path, candidate.label, str(err.code), self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, detail), duration_ms, group=group, request_id=request_id, attempt=attempt, event="cooldown")
                     continue
                 if self._is_quota_exhausted(err.code, raw):
                     self._mark_unusable(candidate, raw)
-                    self.add_log(path, candidate.label, str(err.code), self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload, outbound_headers, "quota exhausted, try next"), duration_ms, group=group, request_id=request_id, attempt=attempt, event="fallback")
+                    self.add_log(path, candidate.label, str(err.code), self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, "quota exhausted, try next"), duration_ms, group=group, request_id=request_id, attempt=attempt, event="fallback")
                     continue
                 if self._is_rate_limited(err.code, raw):
                     try:
@@ -1394,7 +1634,7 @@ class ArkProxyRouter:
                                 path,
                                 candidate.label,
                                 str(resp.status),
-                                self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload, outbound_headers, "retry ok"),
+                                self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, "retry ok"),
                                 retry_duration_ms,
                                 prompt_tokens,
                                 completion_tokens,
@@ -1408,20 +1648,20 @@ class ArkProxyRouter:
                     except Exception as retry_err:
                         last_error = retry_err
                         retry_duration_ms = int((time.perf_counter() - started_at) * 1000)
-                        self.add_log(path, candidate.label, "retry failed", self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload, outbound_headers, str(retry_err)), retry_duration_ms, group=group, request_id=request_id, attempt=attempt, event="error")
+                        self.add_log(path, candidate.label, "retry failed", self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, str(retry_err)), retry_duration_ms, group=group, request_id=request_id, attempt=attempt, event="error")
                         continue
                 if self._is_server_error(err.code):
-                    self.add_log(path, candidate.label, str(err.code), self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload, outbound_headers, "server error, try next"), duration_ms, group=group, request_id=request_id, attempt=attempt, event="fallback")
+                    self.add_log(path, candidate.label, str(err.code), self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, "server error, try next"), duration_ms, group=group, request_id=request_id, attempt=attempt, event="fallback")
                     continue
                 # 自动调度/全局 Key 模式下，任何 HTTP 错误都应尝试下一个候选，而不是把单次错误直接返回给客户端
                 if auto_fallback:
                     self._mark_unusable(candidate, raw)
                     detail = f"upstream error, try next; error={self._short_error(raw)}"
-                    self.add_log(path, candidate.label, str(err.code), self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload, outbound_headers, detail), duration_ms, group=group, request_id=request_id, attempt=attempt, event="fallback")
+                    self.add_log(path, candidate.label, str(err.code), self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, detail), duration_ms, group=group, request_id=request_id, attempt=attempt, event="fallback")
                     continue
                 headers = dict(getattr(err, "headers", {}) or {})
                 detail = f"error={self._short_error(raw)}"
-                self.add_log(path, candidate.label, str(err.code), self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload, outbound_headers, detail), duration_ms, group=group, request_id=request_id, attempt=attempt, event="error")
+                self.add_log(path, candidate.label, str(err.code), self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, detail), duration_ms, group=group, request_id=request_id, attempt=attempt, event="error")
                 return err.code, headers, raw.encode("utf-8")
             except (URLError, TimeoutError, OSError) as err:
                 duration_ms = int((time.perf_counter() - started_at) * 1000)
@@ -1430,10 +1670,10 @@ class ArkProxyRouter:
                     cooldown_seconds = self._auto_cooldown_seconds(group)
                     self._set_cooldown(candidate.idx, str(err), cooldown_seconds, "network")
                     detail = f"cooldown {cooldown_seconds // 60 or 0}m, try next; error={self._short_error(str(err))}"
-                    self.add_log(path, candidate.label, "network", self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload, outbound_headers, detail), duration_ms, group=group, request_id=request_id, attempt=attempt, event="network")
+                    self.add_log(path, candidate.label, "network", self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, detail), duration_ms, group=group, request_id=request_id, attempt=attempt, event="network")
                     continue
                 detail = f"error={self._short_error(str(err))}"
-                self.add_log(path, candidate.label, "network", self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload, outbound_headers, detail), duration_ms, group=group, request_id=request_id, attempt=attempt, event="network")
+                self.add_log(path, candidate.label, "network", self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, detail), duration_ms, group=group, request_id=request_id, attempt=attempt, event="network")
                 continue
             finally:
                 self._release_lock(upstream_lock)
@@ -1463,21 +1703,19 @@ class ArkProxyRouter:
             if not candidate.auth_key:
                 self.add_log(path, candidate.label, "skip", f"requested={requested_label}; missing upstream api key", group=group, request_id=request_id, attempt=attempt, event="skip")
                 continue
-            body, body_mode = self._body_for_upstream(payload, raw_body, str(requested_model) if requested_model else None, candidate.target_model)
+            payload_for_upstream = payload
+            tools_normalized = False
+            if self._tools_order_enabled():
+                payload_for_upstream, tools_normalized = self._normalize_tools_order(payload)
+            body, body_mode = self._body_for_upstream(payload_for_upstream, raw_body, str(requested_model) if requested_model else None, candidate.target_model)
             outbound_headers = self._headers_for(group, candidate.auth_key, incoming_headers, stream=True)
             upstream_lock = self._candidate_lock(candidate)
             if upstream_lock:
                 upstream_lock.acquire()
-            request = Request(
-                target_url,
-                data=body,
-                headers=outbound_headers,
-                method="POST",
-            )
-            resp = None
+            resp: Optional[Any] = None
             started_at = time.perf_counter()
             try:
-                resp = urlopen(request, timeout=120, context=_ssl_context)
+                resp = self._upstream_client.request("POST", target_url, outbound_headers, body, stream=True, timeout=120)
                 first_chunk = self._readline_with_idle_timeout(resp, idle_timeout)
                 if not first_chunk:
                     raise URLError("upstream stream closed before first chunk")
@@ -1490,22 +1728,41 @@ class ArkProxyRouter:
                     target_url,
                     body_mode,
                     body,
-                    payload,
+                    payload_for_upstream,
                     outbound_headers,
                     f"stream ok; idle_timeout_seconds={idle_timeout}; chunks_received=1; bytes_received={len(first_chunk)}; final_result=streaming",
+                    resp=resp,
+                    tools_normalized=tools_normalized,
                 )
                 self.add_log(path, candidate.label, "200", detail, duration_ms, *latest_usage, group=group, request_id=request_id, attempt=attempt, event="stream_ok")
+                try:
+                    self.debug_capture.capture(
+                        path=path,
+                        group=group,
+                        model=candidate.label,
+                        target_model=candidate.target_model,
+                        body=body,
+                        body_mode=body_mode,
+                        headers=outbound_headers,
+                        fingerprint=self._payload_fingerprint(payload_for_upstream, body, urlparse(target_url).path, tools_normalized=tools_normalized),
+                        request_id=request_id,
+                        usage_source="",
+                    )
+                except Exception:
+                    pass
 
                 def iterator() -> Iterator[bytes]:
                     usage_total = latest_usage
                     chunks_received = 1
                     bytes_received = len(first_chunk)
+                    stream_state = {"timeout": False, "completed_normally": False}
                     try:
                         yield first_chunk
                         while True:
                             try:
                                 chunk = self._readline_with_idle_timeout(resp, idle_timeout)
                             except StreamIdleTimeoutError:
+                                stream_state["timeout"] = True
                                 self.add_log(
                                     path,
                                     candidate.label,
@@ -1526,9 +1783,11 @@ class ArkProxyRouter:
                                     request_id=request_id,
                                     attempt=attempt,
                                     event="stream_timeout",
+                                    usage_source="stream_incomplete",
                                 )
                                 break
                             if not chunk:
+                                stream_state["completed_normally"] = True
                                 break
                             chunks_received += 1
                             bytes_received += len(chunk)
@@ -1539,7 +1798,13 @@ class ArkProxyRouter:
                     finally:
                         if resp:
                             resp.close()
-                        self.update_latest_stream_usage(path, candidate.label, usage_total)
+                        if stream_state["timeout"]:
+                            usage_source = "stream_incomplete"
+                        elif stream_state["completed_normally"]:
+                            usage_source = "stream_final" if any(usage_total) else "missing"
+                        else:
+                            usage_source = "stream_incomplete"
+                        self.update_latest_stream_usage(request_id, usage_total, usage_source)
                         self._release_lock(upstream_lock)
 
                 return 200, dict(resp.headers.items()), iterator()
@@ -1561,9 +1826,9 @@ class ArkProxyRouter:
                     outbound_headers,
                     f"reason=stream_idle_timeout; idle_timeout_seconds={idle_timeout}; chunks_received=0; bytes_received=0; cooldown_minutes={cooldown_seconds // 60}; fallback_next={str(auto_fallback).lower()}; final_result=timeout",
                 )
-                self.add_log(path, candidate.label, "timeout", detail, duration_ms, group=group, request_id=request_id, attempt=attempt, event="stream_timeout")
+                self.add_log(path, candidate.label, "timeout", detail, duration_ms, group=group, request_id=request_id, attempt=attempt, event="stream_timeout", usage_source="stream_incomplete")
                 if auto_fallback:
-                    self.add_log(path, candidate.label, "fallback", self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload, outbound_headers, "reason=stream_idle_timeout; fallback_next=true"), duration_ms, group=group, request_id=request_id, attempt=attempt, event="fallback")
+                    self.add_log(path, candidate.label, "fallback", self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, "reason=stream_idle_timeout; fallback_next=true"), duration_ms, group=group, request_id=request_id, attempt=attempt, event="fallback")
                     continue
                 error_body = json.dumps({"error": {"message": "stream_idle_timeout", "type": "timeout", "code": "stream_idle_timeout", "request_id": request_id}}, ensure_ascii=False).encode("utf-8")
                 return 504, {"Content-Type": "application/json; charset=utf-8"}, [error_body]
@@ -1578,26 +1843,26 @@ class ArkProxyRouter:
                     cooldown_seconds = self._auto_cooldown_seconds(group)
                     self._set_cooldown(candidate.idx, raw or str(err), cooldown_seconds, f"http_{err.code}")
                     detail = f"cooldown {cooldown_seconds // 60 or 0}m, try next; error={self._short_error(raw)}"
-                    self.add_log(path, candidate.label, str(err.code), self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload, outbound_headers, detail), duration_ms, group=group, request_id=request_id, attempt=attempt, event="cooldown")
+                    self.add_log(path, candidate.label, str(err.code), self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, detail), duration_ms, group=group, request_id=request_id, attempt=attempt, event="cooldown")
                     continue
                 if self._is_quota_exhausted(err.code, raw):
                     self._mark_unusable(candidate, raw)
-                    self.add_log(path, candidate.label, str(err.code), self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload, outbound_headers, "quota exhausted, try next"), duration_ms, group=group, request_id=request_id, attempt=attempt, event="fallback")
+                    self.add_log(path, candidate.label, str(err.code), self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, "quota exhausted, try next"), duration_ms, group=group, request_id=request_id, attempt=attempt, event="fallback")
                     continue
                 if self._is_rate_limited(err.code, raw):
-                    self.add_log(path, candidate.label, str(err.code), self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload, outbound_headers, "rate limited, try next"), duration_ms, group=group, request_id=request_id, attempt=attempt, event="fallback")
+                    self.add_log(path, candidate.label, str(err.code), self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, "rate limited, try next"), duration_ms, group=group, request_id=request_id, attempt=attempt, event="fallback")
                     continue
                 if self._is_server_error(err.code):
-                    self.add_log(path, candidate.label, str(err.code), self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload, outbound_headers, "server error, try next"), duration_ms, group=group, request_id=request_id, attempt=attempt, event="fallback")
+                    self.add_log(path, candidate.label, str(err.code), self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, "server error, try next"), duration_ms, group=group, request_id=request_id, attempt=attempt, event="fallback")
                     continue
                 if auto_fallback:
                     self._mark_unusable(candidate, raw)
                     detail = f"upstream error, try next; error={self._short_error(raw)}"
-                    self.add_log(path, candidate.label, str(err.code), self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload, outbound_headers, detail), duration_ms, group=group, request_id=request_id, attempt=attempt, event="fallback")
+                    self.add_log(path, candidate.label, str(err.code), self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, detail), duration_ms, group=group, request_id=request_id, attempt=attempt, event="fallback")
                     continue
                 headers = dict(getattr(err, "headers", {}) or {})
                 detail = f"error={self._short_error(raw)}"
-                self.add_log(path, candidate.label, str(err.code), self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload, outbound_headers, detail), duration_ms, group=group, request_id=request_id, attempt=attempt, event="error")
+                self.add_log(path, candidate.label, str(err.code), self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, detail), duration_ms, group=group, request_id=request_id, attempt=attempt, event="error")
                 return err.code, headers, [raw.encode("utf-8")]
             except (URLError, TimeoutError, OSError) as err:
                 if resp:
@@ -1609,10 +1874,10 @@ class ArkProxyRouter:
                     cooldown_seconds = self._auto_cooldown_seconds(group)
                     self._set_cooldown(candidate.idx, str(err), cooldown_seconds, "network")
                     detail = f"cooldown {cooldown_seconds // 60 or 0}m, try next; error={self._short_error(str(err))}"
-                    self.add_log(path, candidate.label, "network", self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload, outbound_headers, detail), duration_ms, group=group, request_id=request_id, attempt=attempt, event="network")
+                    self.add_log(path, candidate.label, "network", self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, detail), duration_ms, group=group, request_id=request_id, attempt=attempt, event="network")
                     continue
                 detail = f"error={self._short_error(str(err))}"
-                self.add_log(path, candidate.label, "network", self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload, outbound_headers, detail), duration_ms, group=group, request_id=request_id, attempt=attempt, event="network")
+                self.add_log(path, candidate.label, "network", self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, detail), duration_ms, group=group, request_id=request_id, attempt=attempt, event="network")
                 continue
 
         if last_error is None:
@@ -2014,6 +2279,17 @@ class RouterHandler(BaseHTTPRequestHandler):
             # 返回当前用户设置（开机自启、启动最小化等）
             self._send_json(self.server.settings_store.to_dict())
             return
+        if parsed.path == "/api/debug/capture":
+            capture = self.router.debug_capture.load_capture()
+            if capture is None:
+                self._send_json({"ok": True, "exists": False})
+                return
+            # 返回快照摘要，不暴露完整 body_base64，避免前端意外泄露长内容
+            summary = {k: v for k, v in capture.items() if k != "body_base64"}
+            summary["exists"] = True
+            summary["has_body"] = bool(capture.get("body_base64"))
+            self._send_json({"ok": True, "capture": summary})
+            return
         if parsed.path == "/api/logs/export":
             csv_text = self.router.export_logs_csv()
             self._send_text(csv_text, content_type="text/csv; charset=utf-8")
@@ -2165,11 +2441,19 @@ class RouterHandler(BaseHTTPRequestHandler):
                 self.store.save()
             # 恢复设置
             settings_store = self.server.settings_store  # type: ignore[attr-defined]
-            allowed = {"auto_start", "start_minimized", "theme", "auto_refresh_logs"}
+            allowed = {
+                "auto_start", "start_minimized", "theme", "auto_refresh_logs",
+                "upstream_http_client", "upstream_http2", "upstream_keepalive",
+                "debug_capture_enabled", "debug_capture_last_body",
+                "normalize_tools_order",
+            }
             new_settings = {k: v for k, v in settings_raw.items() if k in allowed}
             if "auto_start" in new_settings:
                 get_platform().set_autostart(bool(new_settings["auto_start"]))
             updated = settings_store.update(new_settings)
+            # 恢复设置后若影响上游客户端，立即刷新
+            if any(k in new_settings for k in ("upstream_http_client", "upstream_http2", "upstream_keepalive")):
+                self.router._refresh_upstream_client()
             self._send_json({
                 "ok": True,
                 "groups": len(self.store.groups),
@@ -2197,6 +2481,8 @@ class RouterHandler(BaseHTTPRequestHandler):
                 payload["stream_idle_timeout"] = existing.stream_idle_timeout
             if existing and "waf_compatible" not in payload:
                 payload["waf_compatible"] = existing.waf_compatible
+            if existing and "waf_accept_policy" not in payload:
+                payload["waf_accept_policy"] = existing.waf_accept_policy
             group = ConnectionGroup.from_dict(payload)
             if group.provider_type == PROVIDER_PROXY and not group.api_key and group.ark_api_key:
                 group.api_key = group.ark_api_key
@@ -2431,13 +2717,21 @@ class RouterHandler(BaseHTTPRequestHandler):
             if not isinstance(payload, dict):
                 self._send_text("invalid payload", status=400)
                 return
-            allowed = {"auto_start", "start_minimized", "theme", "auto_refresh_logs"}
+            allowed = {
+                "auto_start", "start_minimized", "theme", "auto_refresh_logs",
+                "upstream_http_client", "upstream_http2", "upstream_keepalive",
+                "debug_capture_enabled", "debug_capture_last_body",
+                "normalize_tools_order",
+            }
             new_settings = {k: v for k, v in payload.items() if k in allowed}
             # 开机自启需要同步到 Windows 注册表
             if "auto_start" in new_settings:
                 get_platform().set_autostart(bool(new_settings["auto_start"]))
             settings_store = self.server.settings_store  # type: ignore[attr-defined]
             updated = settings_store.update(new_settings)
+            # 上游客户端相关设置变更后，立即刷新客户端实例
+            if any(k in new_settings for k in ("upstream_http_client", "upstream_http2", "upstream_keepalive")):
+                self.router._refresh_upstream_client()
             self._send_json({
                 **updated,
                 "auto_start": get_platform().is_autostart_enabled(),
@@ -2465,6 +2759,16 @@ class RouterHandler(BaseHTTPRequestHandler):
                 }, status=status)
             except Exception as err:
                 self._send_text(str(err), status=500)
+            return
+        if parsed.path == "/api/debug/replay":
+            payload = self._read_json()
+            count = int(payload.get("count", 10)) if isinstance(payload.get("count"), (int, float, str)) else 10
+            client_type = str(payload.get("client", "")).lower() or None
+            if client_type not in ("urllib", "httpx", None):
+                client_type = None
+            waf_off_variant = bool(payload.get("waf_off_variant", False))
+            results = self.router.debug_capture.replay(count=count, client_type=client_type, waf_off_variant=waf_off_variant)
+            self._send_json({"ok": True, "count": len(results), "results": results})
             return
         if parsed.path.startswith("/v1/") or parsed.path.startswith("/chat/"):
             ctx = self._require_route_context()
@@ -2602,8 +2906,8 @@ def create_server(
     ensure_sample_config(config_path)
     store = ConfigStore(config_path)
     store.reset_usable()
-    router = ArkProxyRouter(store)
     settings_store = SettingsStore(config_path)
+    router = ArkProxyRouter(store, settings_store)
     selected_port = pick_port(port, host)
 
     server = ThreadingHTTPServer((host, selected_port), RouterHandler)

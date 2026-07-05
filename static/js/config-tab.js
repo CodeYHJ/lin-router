@@ -118,6 +118,15 @@ const ConfigTab = {
               <span>仅中转站 WAF 兼容</span>
             </label>
           </div>
+          <div class="form-row hidden" id="group-waf-policy-row">
+            <label>Accept 策略</label>
+            <select id="group-waf-policy">
+              <option value="default" ${(g?.waf_accept_policy || 'default') === 'default' ? 'selected' : ''}>默认（浏览器 Accept）</option>
+              <option value="text_event_stream" ${g?.waf_accept_policy === 'text_event_stream' ? 'selected' : ''}>固定 text/event-stream</option>
+              <option value="passthrough" ${g?.waf_accept_policy === 'passthrough' ? 'selected' : ''}>passthrough（透传入站 Accept）</option>
+            </select>
+            <div class="form-hint">仅在 WAF 兼容开启时生效；passthrough 仅用于 debug 对照。</div>
+          </div>
         </section>
         <section class="form-card">
           <h3>其他</h3>
@@ -310,6 +319,7 @@ const ConfigTab = {
     const cooldownRow = document.getElementById('group-cooldown-row');
     const streamTimeoutRow = document.getElementById('group-stream-timeout-row');
     const wafRow = document.getElementById('group-waf-row');
+    const wafPolicyRow = document.getElementById('group-waf-policy-row');
     const hint = document.getElementById('group-mode-hint');
     const label = document.getElementById('group-key-label');
 
@@ -318,6 +328,10 @@ const ConfigTab = {
     if (cooldownRow) cooldownRow.classList.remove('hidden');
     if (streamTimeoutRow) streamTimeoutRow.classList.remove('hidden');
     if (wafRow) wafRow.classList.toggle('hidden', mode !== 'relay');
+    if (wafPolicyRow) {
+      const wafChecked = document.getElementById('group-waf')?.checked || false;
+      wafPolicyRow.classList.toggle('hidden', mode !== 'relay' || !wafChecked);
+    }
     if (label) label.textContent = mode === 'ark' ? 'Ark API Key' : '上游 API Key';
 
     if (hint) {
@@ -637,6 +651,9 @@ const ConfigTab = {
       auto_model_cooldown_minutes: Number(document.getElementById('group-cooldown').value || 0),
       stream_idle_timeout: Math.max(0, Math.min(600, Number(document.getElementById('group-stream-timeout').value || 0))),
       waf_compatible: mode === 'relay' ? document.getElementById('group-waf').checked : false,
+      waf_accept_policy: mode === 'relay' && document.getElementById('group-waf').checked
+        ? (document.getElementById('group-waf-policy')?.value || 'default')
+        : 'default',
     };
     try {
       this.setSaveStatus('saving');

@@ -60,6 +60,65 @@ const SettingsPanel = {
           </section>
 
           <section class="settings-section">
+            <h3>实验功能</h3>
+            <div class="settings-row">
+              <span>上游 HTTP 客户端</span>
+              <select id="setting-upstream-http-client">
+                <option value="urllib" ${s.upstream_http_client === 'urllib' ? 'selected' : ''}>urllib（默认）</option>
+                <option value="httpx" ${s.upstream_http_client === 'httpx' ? 'selected' : ''}>httpx</option>
+              </select>
+            </div>
+            <label class="settings-row">
+              <span>启用 HTTP/2（仅 httpx）</span>
+              <input id="setting-upstream-http2" type="checkbox" ${s.upstream_http2 ? 'checked' : ''}>
+            </label>
+            <label class="settings-row">
+              <span>启用 HTTP keep-alive（仅 httpx）</span>
+              <input id="setting-upstream-keepalive" type="checkbox" ${s.upstream_keepalive ? 'checked' : ''}>
+            </label>
+            <label class="settings-row">
+              <span>归一化 tools 顺序（实验）</span>
+              <input id="setting-normalize-tools-order" type="checkbox" ${s.normalize_tools_order ? 'checked' : ''}>
+            </label>
+            <div class="settings-hint">默认保持 urllib；httpx / HTTP2 / keep-alive 仅用于对照实验，确认有效后再长期开启。tools 排序默认关闭，不修改现有请求。</div>
+          </section>
+
+          <section class="settings-section">
+            <h3>诊断工具</h3>
+            <label class="settings-row">
+              <span>捕获最近请求快照</span>
+              <input id="setting-debug-capture-enabled" type="checkbox" ${s.debug_capture_enabled ? 'checked' : ''}>
+            </label>
+            <label class="settings-row">
+              <span>同时捕获完整请求体（仅本地）</span>
+              <input id="setting-debug-capture-last-body" type="checkbox" ${s.debug_capture_last_body ? 'checked' : ''}>
+            </label>
+            <div class="settings-hint">快照保存到 .tmp/cache-debug/latest.json，不进入 git，不写入日志正文。完整 body 默认不捕获。</div>
+            <div class="settings-row" style="margin-top:12px; flex-wrap:wrap; gap:10px;">
+              <div style="display:flex; align-items:center; gap:6px;">
+                <label style="font-size:12px; color:var(--text-secondary);">重放次数</label>
+                <input id="debug-replay-count" type="number" min="1" max="50" value="10" style="width:60px;">
+              </div>
+              <div style="display:flex; align-items:center; gap:6px;">
+                <label style="font-size:12px; color:var(--text-secondary);">客户端</label>
+                <select id="debug-replay-client">
+                  <option value="">当前设置</option>
+                  <option value="urllib">urllib</option>
+                  <option value="httpx">httpx</option>
+                </select>
+              </div>
+              <label class="checkbox" style="font-size:12px;">
+                <input id="debug-replay-waf-off" type="checkbox">
+                <span>WAF off 对照（一次性）</span>
+              </label>
+            </div>
+            <div class="settings-actions" style="margin-top:10px;">
+              <button type="button" id="debug-replay-btn" class="btn-secondary">开始重放</button>
+            </div>
+            <div id="debug-replay-results" style="margin-top:10px;"></div>
+          </section>
+
+          <section class="settings-section">
             <h3>备份与恢复</h3>
             <div class="settings-actions">
               <button type="button" id="settings-backup" class="btn-secondary">导出全部数据</button>
@@ -101,6 +160,72 @@ const SettingsPanel = {
     panel.querySelector('#settings-backup')?.addEventListener('click', () => this.backupAll());
     panel.querySelector('#settings-restore')?.addEventListener('click', () => panel.querySelector('#settings-restore-file')?.click());
     panel.querySelector('#settings-restore-file')?.addEventListener('change', e => this.restoreAll(e));
+
+    // 实验功能
+    panel.querySelector('#setting-upstream-http-client')?.addEventListener('change', e => {
+      this.updateSetting('upstream_http_client', e.target.value);
+      this.syncExperimentalUI(panel);
+    });
+    panel.querySelector('#setting-upstream-http2')?.addEventListener('change', e => this.updateSetting('upstream_http2', e.target.checked));
+    panel.querySelector('#setting-upstream-keepalive')?.addEventListener('change', e => this.updateSetting('upstream_keepalive', e.target.checked));
+    panel.querySelector('#setting-normalize-tools-order')?.addEventListener('change', e => this.updateSetting('normalize_tools_order', e.target.checked));
+
+    // 诊断工具
+    panel.querySelector('#setting-debug-capture-enabled')?.addEventListener('change', e => {
+      this.updateSetting('debug_capture_enabled', e.target.checked);
+      this.syncExperimentalUI(panel);
+    });
+    panel.querySelector('#setting-debug-capture-last-body')?.addEventListener('change', e => this.updateSetting('debug_capture_last_body', e.target.checked));
+    panel.querySelector('#debug-replay-btn')?.addEventListener('click', () => this.runReplay());
+
+    this.syncExperimentalUI(panel);
+  },
+
+  syncExperimentalUI(panel) {
+    const client = panel.querySelector('#setting-upstream-http-client')?.value || 'urllib';
+    const http2 = panel.querySelector('#setting-upstream-http2');
+    const keepalive = panel.querySelector('#setting-upstream-keepalive');
+    if (http2) {
+      http2.disabled = client !== 'httpx';
+      http2.parentElement.style.opacity = client === 'httpx' ? '1' : '0.5';
+    }
+    if (keepalive) {
+      keepalive.disabled = client !== 'httpx';
+      keepalive.parentElement.style.opacity = client === 'httpx' ? '1' : '0.5';
+    }
+  },
+
+  async runReplay() {
+    const panel = document.getElementById('settings-panel');
+    const resultsEl = panel?.querySelector('#debug-replay-results');
+    if (!resultsEl) return;
+    const count = Math.max(1, Math.min(50, Number(document.getElementById('debug-replay-count')?.value || 10)));
+    const client = document.getElementById('debug-replay-client')?.value || '';
+    const wafOff = document.getElementById('debug-replay-waf-off')?.checked || false;
+    resultsEl.innerHTML = '<div class="settings-hint">重放中…</div>';
+    try {
+      const data = await API.replayDebug({ count, client: client || undefined, waf_off_variant: wafOff });
+      resultsEl.innerHTML = this.renderReplayResults(data.results || []);
+    } catch (err) {
+      resultsEl.innerHTML = `<div class="settings-hint" style="color:var(--danger);">重放失败：${Utils.escapeHtml(err.message)}</div>`;
+    }
+  },
+
+  renderReplayResults(results) {
+    if (!results.length) return '<div class="settings-hint">无重放结果</div>';
+    if (results[0]?.error) {
+      return `<div class="settings-hint" style="color:var(--danger);">${Utils.escapeHtml(results[0].error)}</div>`;
+    }
+    const rows = results.map(r => {
+      const warn = r.waf_off_unusable ? ' <span style="color:var(--danger);">(WAF off 不可用)</span>' : '';
+      return `<div style="font-size:12px; margin-bottom:4px;">
+        #${r.index}: status=${r.status}, client=${r.http_client}, version=${r.http_version},
+        hit_rate=${(r.hit_rate * 100).toFixed(1)}%, tokens=${r.total_tokens}, cached=${r.cached_tokens}, duration=${r.duration_ms}ms${warn}
+      </div>`;
+    }).join('');
+    const rates = results.filter(r => typeof r.hit_rate === 'number').map(r => r.hit_rate);
+    const avg = rates.length ? (rates.reduce((a, b) => a + b, 0) / rates.length * 100).toFixed(1) : '-';
+    return `<div class="settings-hint">平均命中率：${avg}%</div>${rows}`;
   },
 
   async updateSetting(key, value) {

@@ -4,6 +4,7 @@ lin-router-logs.jsonl
 __pycache__/
 *.py[cod]
 .tmp/
+.tmp/cache-debug/
 build/
 dist/
 *.spec

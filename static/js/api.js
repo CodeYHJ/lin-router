@@ -94,5 +94,7 @@ const API = {
     form.append('file', file);
     return this.req('/api/backup/import', { method: 'POST', body: form });
   },
-  testProxy(data) { return this.req('/api/test', { method: 'POST', body: JSON.stringify(data) }); }
+  testProxy(data) { return this.req('/api/test', { method: 'POST', body: JSON.stringify(data) }); },
+  getDebugCapture() { return this.req('/api/debug/capture'); },
+  replayDebug(data) { return this.req('/api/debug/replay', { method: 'POST', body: JSON.stringify(data) }); }
 };

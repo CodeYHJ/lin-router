@@ -6,7 +6,18 @@ from pathlib import Path
 from typing import Any, Dict
 
 
-DEFAULT_SETTINGS = {"auto_start": False, "start_minimized": False, "theme": "system", "auto_refresh_logs": True}
+DEFAULT_SETTINGS = {
+    "auto_start": False,
+    "start_minimized": False,
+    "theme": "system",
+    "auto_refresh_logs": True,
+    "upstream_http_client": "urllib",
+    "upstream_http2": False,
+    "upstream_keepalive": False,
+    "debug_capture_enabled": False,
+    "debug_capture_last_body": False,
+    "normalize_tools_order": False,
+}
 
 
 class SettingsStore:
@@ -27,6 +38,9 @@ class SettingsStore:
                 raw = json.load(f)
             if isinstance(raw, dict):
                 self._settings = {**DEFAULT_SETTINGS, **raw}
+                # 兼容旧配置：将已废弃的 debug_capture_body 迁移到 PRD 指定的 debug_capture_last_body
+                if "debug_capture_body" in self._settings:
+                    self._settings["debug_capture_last_body"] = bool(self._settings.pop("debug_capture_body"))
         except Exception:
             pass
 
