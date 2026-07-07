@@ -38,7 +38,6 @@ const App = {
       <div class="topbar-left">
         <span class="status-dot" id="status-dot" title="运行中"></span>
         <span class="copy-chip" id="server-addr" title="点击复制兼容 OpenAI 的接口地址（自动带 /v1）">${window.location.origin}/v1</span>
-        <span class="copy-chip" id="global-key" title="点击复制全局 Key">lin-router</span>
       </div>
       <div class="topbar-center">
         <input type="text" class="global-search" id="global-search" placeholder="搜索连接组或模型...">
@@ -55,9 +54,6 @@ const App = {
     topbar.querySelector('#server-addr').addEventListener('click', e => {
       const addr = `${window.location.origin}/v1`;
       Utils.copy(addr).then(ok => ok ? Toast.success('接口地址已复制（含 /v1）') : Toast.error('复制失败'));
-    });
-    topbar.querySelector('#global-key').addEventListener('click', () => {
-      Utils.copy('lin-router').then(ok => ok ? Toast.success('全局 Key 已复制') : Toast.error('复制失败'));
     });
     const searchInput = topbar.querySelector('#global-search');
     searchInput.addEventListener('input', e => Tree.setSearch(e.target.value));

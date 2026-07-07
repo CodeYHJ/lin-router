@@ -72,8 +72,7 @@ const Tree = {
     const emptyHtml = !aggregates.length ? `
       <div class="tree-aggregate-empty">
         <div class="tree-empty-title">暂无聚合模型</div>
-        <div class="tree-empty-desc">聚合模型用于替代 all-router-auto，实现多中转站 fallback 调度。</div>
-        <div class="tree-empty-tip">建议先创建 <strong>lin-router-gpt-5.5</strong>，并设为默认全局聚合模型，用于承接 all-router-auto。</div>
+        <div class="tree-empty-desc">聚合模型用于替代旧全局模型能力，实现多中转站 fallback 调度。</div>
         <button type="button" class="btn-primary btn-sm" id="tree-new-aggregate">新建聚合模型</button>
       </div>
     ` : '';
@@ -90,12 +89,10 @@ const Tree = {
     const status = this.aggregateStatus(a, members);
     const active = Store.selected.type === 'aggregate' && Store.selected.id === a.id ? 'active' : '';
     const memberCount = members.filter(m => m.aggregate_id === a.id).length;
-    const defaultBadge = a.is_default_global ? '<span class="tree-badge tree-badge-default">默认</span>' : '';
     return `
       <div class="tree-aggregate ${active}" data-type="aggregate" data-id="${a.id}" data-context="aggregate" title="${Utils.escapeHtml(a.description || '')}">
         <span class="tree-status ${status}"></span>
         <span class="tree-label">${this.highlight(Utils.escapeHtml(a.display_name || a.name))}</span>
-        ${defaultBadge}
         <span class="tree-meta">${memberCount}成员</span>
       </div>
     `;

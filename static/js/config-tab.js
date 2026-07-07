@@ -61,7 +61,7 @@ const ConfigTab = {
           <button type="button" class="btn-primary" id="empty-new-group">新建连接组</button>
           <button type="button" class="btn-secondary" id="empty-import">导入配置</button>
         </div>
-        <p class="empty-hint">全局Key: <code>lin-router</code>，本地地址点击顶部复制即可使用</p>
+        <p class="empty-hint">客户端请使用连接组 Key（lr-...）或聚合模型 Key（lr-ag-...），旧全局 Key lin-router 已停用</p>
       </div>
     `;
   },
@@ -265,7 +265,6 @@ const ConfigTab = {
 
   renderAggregateSection(sel = Store.selected) {
     const a = sel.type === 'aggregate' ? Store.getAggregate(sel.id) : null;
-    const isDefault = a?.is_default_global;
     return `
       <form class="config-form" id="aggregate-form" data-type="aggregate" data-selected-type="aggregate" data-selected-id="${a?.id || ''}">
         <input type="hidden" id="aggregate-id" value="${a?.id || ''}">
@@ -275,6 +274,16 @@ const ConfigTab = {
             <label>模型名<span class="required-mark"> *</span></label>
             <input id="aggregate-name" value="${Utils.escapeHtml(a?.name || '')}" placeholder="对外暴露的 model id，如 lin-router-gpt-5.5">
           </div>
+          ${a ? `
+          <div class="form-row">
+            <label>聚合模型 Key</label>
+            <div class="input-with-btn">
+              <input id="aggregate-route-key" value="${Utils.escapeHtml(a.route_key || '')}" readonly>
+              <button type="button" id="aggregate-copy-route-key" class="btn-secondary btn-sm">复制</button>
+            </div>
+            <div class="form-hint">客户端使用：Base URL + 该 Key + 聚合模型名。全局 Key 已停用。</div>
+          </div>
+          ` : ''}
           <div class="form-row">
             <label>显示名</label>
             <input id="aggregate-display-name" value="${Utils.escapeHtml(a?.display_name || '')}" placeholder="可选，用于界面展示">
@@ -290,18 +299,16 @@ const ConfigTab = {
             </label>
           </div>
           <div class="form-row">
-            <label class="checkbox" title="设为默认全局聚合模型后，global key 请求 all-router-auto 将映射到该模型">
-              <input id="aggregate-is-default-global" type="checkbox" ${isDefault ? 'checked' : ''}>
-              <span>默认全局聚合模型（承接 all-router-auto）</span>
-            </label>
-          </div>
-          <div class="form-row">
             <label>冷却分钟</label>
             <input id="aggregate-cooldown" type="number" min="0" step="1" value="${a?.cooldown_minutes ?? 5}">
           </div>
           <div class="form-row">
             <label>调度策略</label>
-            <input id="aggregate-strategy" value="priority" readonly title="MVP 仅支持手动优先级排序">
+            <select id="aggregate-strategy">
+              <option value="priority" ${(a?.strategy || 'priority') === 'priority' ? 'selected' : ''}>手动优先级</option>
+              <option value="price_first" ${(a?.strategy || 'priority') === 'price_first' ? 'selected' : ''}>价格优先</option>
+            </select>
+            <div class="form-hint">手动优先级：按成员排序依次尝试。价格优先：按手动价格从低到高尝试；同价按成员排序；未填写价格的成员排在最后。</div>
           </div>
           <div class="form-actions form-actions-split">
             <div class="form-actions-left">
@@ -335,7 +342,7 @@ const ConfigTab = {
                 <th>连接组</th>
                 <th>模型</th>
                 <th>上游模型</th>
-                <th>价格组</th>
+                <th>手动价格</th>
                 <th>状态</th>
                 <th>操作</th>
               </tr>
@@ -361,7 +368,7 @@ const ConfigTab = {
         <td>${Utils.escapeHtml(group?.name || '-')}</td>
         <td>${Utils.escapeHtml(model?.name || '-')}</td>
         <td>${Utils.escapeHtml(model?.upstream_model || model?.ep_id || '-')}</td>
-        <td>${Utils.escapeHtml(model?.price_group || '-')}</td>
+        <td><input type="number" class="aggregate-member-price" data-member-id="${member.id}" value="${member.manual_price != null ? member.manual_price : ''}" step="0.001" placeholder="未填"></td>
         <td class="tiny"><span class="pill ${status.class}">${status.text}</span></td>
         <td class="aggregate-member-actions">
           <button type="button" class="btn-icon" data-action="up" data-member-id="${member.id}" ${idx === 0 ? 'disabled' : ''} title="上移">↑</button>
@@ -728,9 +735,15 @@ const ConfigTab = {
     if (aggregateForm) {
       aggregateForm.addEventListener('submit', e => this.onAggregateSubmit(e));
       panel.querySelector('#aggregate-delete')?.addEventListener('click', () => this.onAggregateDelete());
+      panel.querySelector('#aggregate-copy-route-key')?.addEventListener('click', () => this.onCopyAggregateRouteKey());
       panel.querySelector('#aggregate-add-member')?.addEventListener('click', () => this.onAddAggregateMember());
       panel.querySelectorAll('.aggregate-member-enabled').forEach(el => {
         el.addEventListener('change', () => this.onToggleAggregateMember(el.dataset.memberId, el.checked));
+      });
+      panel.querySelectorAll('.aggregate-member-price').forEach(el => {
+        const save = () => this.onUpdateAggregateMemberPrice(el.dataset.memberId, el.value);
+        el.addEventListener('change', save);
+        el.addEventListener('blur', save);
       });
       panel.querySelectorAll('.aggregate-member-actions button[data-action]').forEach(el => {
         el.addEventListener('click', () => this.onAggregateMemberAction(el.dataset.action, el.dataset.memberId));
@@ -750,6 +763,9 @@ const ConfigTab = {
   bindAutoSave(form, callback) {
     if (!form) return;
     form.querySelectorAll('input, select, textarea').forEach(el => {
+      // 聚合成员字段有独立保存逻辑，避免 autoSaveAggregate 的 blur 事件与成员保存竞争
+      const cls = el.className || '';
+      if (cls.includes('aggregate-member-price') || cls.includes('aggregate-member-enabled')) return;
       const event = el.tagName === 'SELECT' || el.type === 'checkbox' ? 'change' : 'blur';
       el.addEventListener(event, () => callback());
     });
@@ -1025,9 +1041,8 @@ const ConfigTab = {
       display_name: document.getElementById('aggregate-display-name').value.trim(),
       description: document.getElementById('aggregate-description').value.trim(),
       enabled: document.getElementById('aggregate-enabled').checked,
-      is_default_global: document.getElementById('aggregate-is-default-global').checked,
       cooldown_minutes: Math.max(0, Number(document.getElementById('aggregate-cooldown').value || 0)),
-      strategy: 'priority',
+      strategy: document.getElementById('aggregate-strategy').value,
     };
     try {
       this.setSaveStatus('saving');
@@ -1082,6 +1097,10 @@ const ConfigTab = {
         <select id="member-model"><option value="">请选择模型</option></select>
       </div>
       <div class="form-row">
+        <label>手动价格（可选）</label>
+        <input id="member-price" type="number" step="0.001" placeholder="价格优先策略下用于排序，留空则排最后">
+      </div>
+      <div class="form-row">
         <label>预览</label>
         <div id="member-preview" class="form-hint">-</div>
       </div>
@@ -1121,8 +1140,14 @@ const ConfigTab = {
       }
     });
     if (!values) return;
+    const priceValue = values['member-price']?.trim();
+    const manualPrice = priceValue === '' ? null : Number(priceValue);
+    if (priceValue !== '' && (isNaN(manualPrice) || manualPrice < 0)) {
+      Toast.error('手动价格必须是大于等于 0 的数字');
+      return;
+    }
     try {
-      await API.createAggregateMember(aggregateId, { group_id: values['member-group'], model_id: values['member-model'] });
+      await API.createAggregateMember(aggregateId, { group_id: values['member-group'], model_id: values['member-model'], manual_price: manualPrice });
       await Store.load();
       Toast.success('成员已添加');
     } catch (err) {
@@ -1153,6 +1178,39 @@ const ConfigTab = {
       await Store.load();
     } catch (err) {
       Toast.error('排序失败：' + err.message);
+    }
+  },
+
+  async onCopyAggregateRouteKey() {
+    const input = document.getElementById('aggregate-route-key');
+    if (!input || !input.value) return;
+    try {
+      await navigator.clipboard.writeText(input.value);
+      Toast.success('聚合模型 Key 已复制');
+    } catch (err) {
+      input.select();
+      document.execCommand('copy');
+      Toast.success('聚合模型 Key 已复制');
+    }
+  },
+
+  async onUpdateAggregateMemberPrice(memberId, value) {
+    const member = Store.state.aggregate_members?.find(m => m.id === memberId);
+    if (!member) return;
+    const trimmed = value.trim();
+    const manualPrice = trimmed === '' ? null : Number(trimmed);
+    if (trimmed !== '' && (isNaN(manualPrice) || manualPrice < 0)) {
+      Toast.error('手动价格必须是大于等于 0 的数字');
+      return;
+    }
+    // 避免 change + blur 重复保存，或重新渲染后旧值触发无意义请求
+    const currentPrice = member.manual_price != null ? Number(member.manual_price) : null;
+    if (manualPrice === currentPrice) return;
+    try {
+      await API.saveAggregateMember(memberId, { manual_price: manualPrice });
+      await Store.load();
+    } catch (err) {
+      Toast.error('价格更新失败：' + err.message);
     }
   },
 

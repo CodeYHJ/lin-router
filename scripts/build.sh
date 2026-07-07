@@ -6,10 +6,11 @@ set -e
 #   scripts/build.sh --target win32
 #   scripts/build.sh --target darwin
 #   scripts/build.sh --target darwin --dmg
+# 构建完成后默认复制产物到桌面；--desktop 保留为兼容参数。
 
 TARGET=""
 BUILD_DMG=0
-COPY_TO_DESKTOP=0
+COPY_TO_DESKTOP=1
 
 while [[ $# -gt 0 ]]; do
   case "$1" in

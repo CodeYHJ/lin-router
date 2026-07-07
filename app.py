@@ -111,6 +111,10 @@ def new_route_key() -> str:
     return f"lr-{uuid.uuid4().hex[:16]}"
 
 
+def new_aggregate_route_key() -> str:
+    return f"lr-ag-{uuid.uuid4().hex[:16]}"
+
+
 def mask_secret(value: str) -> str:
     if not value:
         return ""
@@ -264,10 +268,10 @@ class AggregateModel:
     name: str
     display_name: str = ""
     description: str = ""
+    route_key: str = ""
     enabled: bool = True
     strategy: str = "priority"
     cooldown_minutes: int = DEFAULT_AUTO_MODEL_COOLDOWN_MINUTES
-    is_default_global: bool = False
     created_at: str = ""
     updated_at: str = ""
 
@@ -279,10 +283,10 @@ class AggregateModel:
             name=str(data.get("name") or "").strip(),
             display_name=str(data.get("display_name") or "").strip(),
             description=str(data.get("description") or "").strip(),
+            route_key=str(data.get("route_key") or "").strip(),
             enabled=bool(data.get("enabled", True)),
             strategy=str(data.get("strategy") or "priority").strip() or "priority",
             cooldown_minutes=int(data.get("cooldown_minutes") or DEFAULT_AUTO_MODEL_COOLDOWN_MINUTES),
-            is_default_global=bool(data.get("is_default_global", False)),
             created_at=str(data.get("created_at") or now),
             updated_at=str(data.get("updated_at") or now),
         )
@@ -295,6 +299,7 @@ class AggregateMember:
     group_id: str
     model_id: str
     priority: int = 0
+    manual_price: float | None = None
     weight: int = 100
     enabled: bool = True
     cooldown_until: int = 0
@@ -305,12 +310,21 @@ class AggregateMember:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "AggregateMember":
+        manual_price = data.get("manual_price")
+        if manual_price is None or manual_price == "":
+            manual_price = None
+        else:
+            try:
+                manual_price = float(manual_price)
+            except Exception:
+                manual_price = None
         return cls(
             id=str(data.get("id") or uuid.uuid4().hex),
             aggregate_id=str(data.get("aggregate_id") or ""),
             group_id=str(data.get("group_id") or ""),
             model_id=str(data.get("model_id") or ""),
             priority=int(data.get("priority") or 0),
+            manual_price=manual_price,
             weight=int(data.get("weight") or 100),
             enabled=bool(data.get("enabled", True)),
             cooldown_until=int(data.get("cooldown_until") or 0),
@@ -368,12 +382,13 @@ class UpstreamCandidate:
     aggregate_id: str = ""
     aggregate_name: str = ""
     aggregate_member_id: str = ""
+    manual_price: float | None = None
 
 
 @dataclass
 class RouteContext:
     client_key: str
-    group: ConnectionGroup
+    group: Optional[ConnectionGroup]
     group_id: str
     provider_type: str
     base_url: str
@@ -381,8 +396,12 @@ class RouteContext:
     # passthrough 标识：proxy/ark 模式为 True，请求体与头部尽量原样转发；
     # relay 模式为 False，允许 WAF 兼容、冷却、自动调度等专属逻辑介入。
     passthrough: bool = True
-    # 全局 Key 标识：使用 DEFAULT_PUBLIC_API_KEY 时跨所有组调度
+    # 全局 Key 标识：使用 DEFAULT_PUBLIC_API_KEY 时跨所有组调度（已退役）
     is_global: bool = False
+    # 聚合模型入口：使用 AggregateModel.route_key 时命中
+    aggregate: Optional[AggregateModel] = None
+    # 旧全局 Key 已退役，需要明确提示用户
+    is_deprecated_global: bool = False
 
 
 class ConfigStore:
@@ -480,10 +499,13 @@ class ConfigStore:
 
         self.aggregate_models = [AggregateModel.from_dict(x) for x in aggregates_raw if isinstance(x, dict)] if isinstance(aggregates_raw, list) else []
         self.aggregate_members = [AggregateMember.from_dict(x) for x in members_raw if isinstance(x, dict)] if isinstance(members_raw, list) else []
-        # 清理 orphan 成员，确保默认全局唯一且启用
+        # 旧配置升级：为没有 route_key 的聚合模型自动生成
+        for agg in self.aggregate_models:
+            if not str(agg.route_key or "").strip():
+                agg.route_key = new_aggregate_route_key()
+                changed = True
+        # 清理 orphan 成员
         if self._cleanup_orphan_members():
-            changed = True
-        if self._ensure_single_default_global():
             changed = True
         if changed:
             self.save()
@@ -516,33 +538,14 @@ class ConfigStore:
             ]
             return len(self.aggregate_members) != before
 
-    def _ensure_single_default_global(self) -> bool:
-        """确保只有一个默认全局聚合模型；禁用的默认全局自动取消。"""
-        with self._lock:
-            changed = False
-            default = None
-            for agg in self.aggregate_models:
-                if agg.is_default_global:
-                    if not agg.enabled:
-                        agg.is_default_global = False
-                        agg.updated_at = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-                        changed = True
-                    elif default is None:
-                        default = agg
-                    else:
-                        agg.is_default_global = False
-                        agg.updated_at = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-                        changed = True
-            return changed
-
     def find_aggregate(self, aggregate_id: str) -> Optional[AggregateModel]:
         return next((a for a in self.aggregate_models if a.id == aggregate_id), None)
 
     def find_aggregate_by_name(self, name: str) -> Optional[AggregateModel]:
         return next((a for a in self.aggregate_models if a.name == name), None)
 
-    def get_default_global_aggregate(self) -> Optional[AggregateModel]:
-        return next((a for a in self.aggregate_models if a.is_default_global and a.enabled), None)
+    def find_aggregate_by_route_key(self, route_key: str) -> Optional[AggregateModel]:
+        return next((a for a in self.aggregate_models if a.route_key == route_key), None)
 
     def get_aggregate_members(self, aggregate_id: str) -> List[AggregateMember]:
         return [m for m in self.aggregate_members if m.aggregate_id == aggregate_id]
@@ -567,6 +570,22 @@ class ConfigStore:
                 return False, f"聚合模型名已存在: {name}"
         return True, ""
 
+    def _validate_aggregate_route_key(
+        self, route_key: str, exclude_id: Optional[str] = None
+    ) -> Tuple[bool, str]:
+        route_key = str(route_key or "").strip()
+        if not route_key:
+            return False, "聚合模型 Key 不能为空"
+        if route_key == DEFAULT_PUBLIC_API_KEY:
+            return False, f"聚合模型 Key 不能为保留 Key {DEFAULT_PUBLIC_API_KEY}"
+        for group in self.groups:
+            if group.route_key == route_key:
+                return False, "聚合模型 Key 与连接组 Key 冲突"
+        for agg in self.aggregate_models:
+            if agg.id != exclude_id and agg.route_key == route_key:
+                return False, "聚合模型 Key 已存在"
+        return True, ""
+
     @staticmethod
     def _group_auto_model_name_static(group: ConnectionGroup) -> str:
         if group and group.auto_model_name and group.auto_model_name.strip():
@@ -578,8 +597,16 @@ class ConfigStore:
             ok, msg = self._validate_aggregate_name(aggregate.name, aggregate.id)
             if not ok:
                 return False, msg
-            if aggregate.is_default_global and not aggregate.enabled:
-                return False, "默认全局聚合模型必须启用"
+            # 新建或更新时若 route_key 为空，自动生成 lr-ag- 前缀 Key
+            if not str(aggregate.route_key or "").strip():
+                for _ in range(100):
+                    aggregate.route_key = new_aggregate_route_key()
+                    ok, _ = self._validate_aggregate_route_key(aggregate.route_key, aggregate.id)
+                    if ok:
+                        break
+            ok, msg = self._validate_aggregate_route_key(aggregate.route_key, aggregate.id)
+            if not ok:
+                return False, msg
             now = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
             aggregate.updated_at = now
             existing = self.find_aggregate(aggregate.id)
@@ -592,13 +619,6 @@ class ConfigStore:
             else:
                 aggregate.created_at = now
                 self.aggregate_models.append(aggregate)
-            # 默认全局唯一
-            if aggregate.is_default_global:
-                for agg in self.aggregate_models:
-                    if agg.id != aggregate.id and agg.is_default_global:
-                        agg.is_default_global = False
-                        agg.updated_at = now
-            self._ensure_single_default_global()
             self.save()
             return True, ""
 
@@ -867,11 +887,13 @@ class ConfigStore:
 class AllModelsFailedError(RuntimeError):
     """所有候选模型均不可用时抛出，便于 HTTP 层返回 503。"""
 
-    def __init__(self, message: str, attempted: int = 0, stream_timeout: bool = False, error_code: str = "") -> None:
+    def __init__(self, message: str, attempted: int = 0, stream_timeout: bool = False, error_code: str = "", fallback_chain: Optional[List[Dict[str, Any]]] = None, aggregate_name: str = "") -> None:
         super().__init__(message)
         self.attempted = attempted
         self.stream_timeout = stream_timeout
         self.error_code = error_code
+        self.fallback_chain = fallback_chain or []
+        self.aggregate_name = aggregate_name
 
 
 class StreamIdleTimeoutError(TimeoutError):
@@ -1403,10 +1425,13 @@ class ArkProxyRouter:
         selection_reason: str,
         fallback_index: int,
         fallback_chain: List[Dict[str, Any]],
+        strategy: str = "priority",
+        manual_price: float | None = None,
     ) -> str:
         chain_str = ""
         if fallback_chain:
             chain_str = "; fallback_chain=" + json.dumps(fallback_chain, ensure_ascii=False, separators=(",", ":"))
+        price_str = f"; manual_price={manual_price}" if manual_price is not None else ""
         return (
             f"resolved_as={resolved_as}"
             f"; aggregate_model={aggregate_model}"
@@ -1416,6 +1441,8 @@ class ArkProxyRouter:
             f"; selected_upstream_model={selected_upstream_model}"
             f"; selection_reason={selection_reason}"
             f"; fallback_index={fallback_index}"
+            f"; strategy={strategy}"
+            f"{price_str}"
             f"{chain_str}"
         )
 
@@ -1850,12 +1877,8 @@ class ArkProxyRouter:
         return f"{detail}; {suffix}"
 
     def _iter_upstream_candidates(self, requested_model: str | None, group_id: str | None = None) -> Iterator[UpstreamCandidate]:
-        # 全局 Key：跨所有组按 models 数组顺序调度
+        # 旧全局 Key 已退役，不再跨组调度真实模型
         if group_id == GLOBAL_ROUTE_GROUP_ID:
-            for idx, model in self._iter_candidates(requested_model, None):
-                group = self._group_for(model)
-                if group:
-                    yield self._candidate_from_model(idx, model, group)
             return
         if group_id:
             group = self.store.find_group(group_id)
@@ -1886,63 +1909,71 @@ class ArkProxyRouter:
     def _resolve_aggregate(
         self,
         requested_model: str | None,
-        group_id: str | None,
-        route_group: Optional[ConnectionGroup],
-        is_global: bool,
+        route: RouteContext | str | None,
     ) -> Optional[Tuple[AggregateModel, str]]:
         """解析聚合模型。返回 (AggregateModel, resolved_as)。
 
         resolved_as:
         - "aggregate": 直接命中 AggregateModel.name
-        - "aggregate_alias": all-router-auto 映射到默认全局聚合模型
+        - all-router-auto 与旧全局默认聚合模型已退役，不再映射
         """
         if not requested_model:
             return None
-        # 全局 Key：可访问所有启用的聚合模型
-        if is_global:
-            aggregate = self.store.find_aggregate_by_name(requested_model)
-            if aggregate:
-                if not aggregate.enabled:
-                    raise AllModelsFailedError("聚合模型已禁用", attempted=0, error_code="aggregate_disabled")
+        aggregate = getattr(route, "aggregate", None) if isinstance(route, RouteContext) else None
+        if aggregate:
+            if not aggregate.enabled:
+                raise AllModelsFailedError(
+                    f"聚合模型 {aggregate.name} 已禁用",
+                    attempted=0,
+                    error_code="aggregate_disabled",
+                )
+            if requested_model == aggregate.name:
                 return aggregate, "aggregate"
-            if requested_model == "all-router-auto":
-                default = self.store.get_default_global_aggregate()
-                if default:
-                    return default, "aggregate_alias"
-            return None
-        # group route key：只能访问成员中包含当前 group 的聚合模型
-        if group_id and group_id != GLOBAL_ROUTE_GROUP_ID:
-            aggregate = self.store.find_aggregate_by_name(requested_model)
-            if aggregate:
-                if not aggregate.enabled:
-                    raise AllModelsFailedError("聚合模型已禁用", attempted=0, error_code="aggregate_disabled")
-                members = self.store.get_aggregate_members(aggregate.id)
-                if any(m.group_id == group_id for m in members):
-                    return aggregate, "aggregate"
-            # all-router-auto 不允许绕过隔离映射到默认全局聚合模型
-            return None
-        # 未知/未授权 key：不允许访问聚合模型
+            # 聚合模型 Key 只能请求自身聚合模型名
+            raise AllModelsFailedError(
+                f"聚合模型 Key 只能请求 {aggregate.name}",
+                attempted=0,
+                error_code="model_not_found",
+            )
+        # 连接组 Key / 旧全局 Key 不再通过 name 命中聚合模型
+        if requested_model == "all-router-auto":
+            raise AllModelsFailedError(
+                "all-router-auto 已停用，请改用具体聚合模型名和聚合模型 Key",
+                attempted=0,
+                error_code="global_auto_deprecated",
+            )
         return None
 
     def _aggregate_member_usable(self, member: AggregateMember) -> bool:
-        """检查聚合成员是否可用（存在、启用、未 cooldown）。"""
+        """检查聚合成员是否可用（存在、启用、未 cooldown、真实模型未被用户手动禁用）。"""
         if not member.enabled:
             return False
         group = self.store.find_group(member.group_id)
         if not group:
             return False
         model = self.store.find_model(member.model_id)
-        if not model or not model.usable:
+        if not model or not model.usable or getattr(model, "disabled_by_user", False):
             return False
         if member.cooldown_until and member.cooldown_until > int(time.time()):
             return False
         return True
 
     def _iter_aggregate_candidates(self, aggregate: AggregateModel) -> Iterator[UpstreamCandidate]:
-        """按 priority 升序产出聚合成员候选。"""
+        """按聚合模型策略产出候选成员。"""
         self.store.refresh_expired_cooldowns()
         members = self.store.get_aggregate_members(aggregate.id)
-        members = sorted(members, key=lambda m: m.priority)
+        strategy = aggregate.strategy or "priority"
+        if strategy == "price_first":
+            members = sorted(
+                members,
+                key=lambda m: (
+                    m.manual_price is None,
+                    m.manual_price if m.manual_price is not None else 0,
+                    m.priority,
+                ),
+            )
+        else:
+            members = sorted(members, key=lambda m: m.priority)
         for member in members:
             if not self._aggregate_member_usable(member):
                 continue
@@ -1954,6 +1985,7 @@ class ArkProxyRouter:
             candidate.aggregate_id = aggregate.id
             candidate.aggregate_name = aggregate.name
             candidate.aggregate_member_id = member.id
+            candidate.manual_price = member.manual_price
             yield candidate
 
     def _aggregate_cooldown_seconds(self, aggregate: AggregateModel) -> int:
@@ -2103,10 +2135,14 @@ class ArkProxyRouter:
         requested_label = str(requested_model) if requested_model else DEFAULT_AUTO_MODEL_NAME
         group_id = self._route_group_id(route)
         route_group = route.group if isinstance(route, RouteContext) else self.store.find_group(group_id) if group_id else None
+        is_deprecated_global = isinstance(route, RouteContext) and route.is_deprecated_global
+        if is_deprecated_global:
+            return 403, {"Content-Type": "application/json; charset=utf-8"}, json.dumps({"error": {"message": "全局 Key 已停用，请改用连接组 Key 或聚合模型 Key", "type": "global_key_deprecated", "code": "use_group_or_aggregate_key"}}, ensure_ascii=False).encode("utf-8")
+        route_aggregate = route.aggregate if isinstance(route, RouteContext) else None
         is_global = isinstance(route, RouteContext) and route.is_global
         auto_mode = self._is_auto_model(str(requested_model) if requested_model else None, route_group)
-        # auto_fallback：组级 auto、全局 Key 模式或聚合模型下，失败时尝试下一个候选
-        auto_fallback = auto_mode or is_global
+        # auto_fallback：组级 auto 或聚合模型下，失败时尝试下一个候选（全局 Key 已退役）
+        auto_fallback = auto_mode or bool(route_aggregate)
         request_id = uuid.uuid4().hex[:12]
         attempt = 0
         last_error: Optional[Exception] = None
@@ -2114,9 +2150,7 @@ class ArkProxyRouter:
         # 聚合模型解析
         aggregate_info = self._resolve_aggregate(
             str(requested_model) if requested_model else None,
-            group_id,
-            route_group,
-            is_global,
+            route,
         )
         aggregate_model: Optional[AggregateModel] = None
         resolved_as = ""
@@ -2148,6 +2182,8 @@ class ArkProxyRouter:
                     selection_reason=selection_reason,
                     fallback_index=fallback_index,
                     fallback_chain=fallback_chain,
+                    strategy=aggregate_model.strategy or "priority",
+                    manual_price=candidate.manual_price,
                 )
             if not candidate.auth_key:
                 skip_detail = f"requested={requested_label}; missing upstream api key"
@@ -2179,7 +2215,7 @@ class ArkProxyRouter:
                 )
                 if auto_fallback:
                     continue
-                return 503, {"Content-Type": "application/json; charset=utf-8"}, [json.dumps({"error": {"message": "waf_lock_wait_timeout", "type": "timeout", "code": "waf_lock_wait_timeout", "request_id": request_id}}, ensure_ascii=False).encode("utf-8")]
+                return 503, {"Content-Type": "application/json; charset=utf-8"}, [json.dumps({"error": {"message": "获取 WAF 锁超时，请稍后重试", "type": "timeout", "code": "waf_lock_wait_timeout", "request_id": request_id}}, ensure_ascii=False).encode("utf-8")]
             try:
                 resp = self._upstream_client.request("POST", target_url, outbound_headers, body, stream=False, timeout=120)
                 with resp:
@@ -2233,6 +2269,7 @@ class ArkProxyRouter:
                         "member_id": candidate.aggregate_member_id,
                         "group": group.name,
                         "model": candidate.model.name if candidate.model else candidate.label,
+                        "manual_price": candidate.manual_price,
                         "status": err.code,
                         "reason": self._short_error(raw),
                     })
@@ -2302,6 +2339,7 @@ class ArkProxyRouter:
                         "member_id": candidate.aggregate_member_id,
                         "group": group.name,
                         "model": candidate.model.name if candidate.model else candidate.label,
+                        "manual_price": candidate.manual_price,
                         "status": "network",
                         "reason": self._short_error(str(err)),
                     })
@@ -2322,10 +2360,20 @@ class ArkProxyRouter:
                 self._release_lock(upstream_lock)
 
         if aggregate_model:
-            raise AllModelsFailedError("all_aggregate_members_failed", attempted=attempt)
+            raise AllModelsFailedError(
+                f"聚合模型 {aggregate_model.name} 的所有成员均不可用",
+                attempted=attempt,
+                error_code="aggregate_members_unavailable",
+                fallback_chain=fallback_chain,
+                aggregate_name=aggregate_model.name,
+            )
         if last_error is None:
-            raise AllModelsFailedError("No usable models available", attempted=attempt)
-        raise AllModelsFailedError(f"All available models failed, attempted {attempt}", attempted=attempt) from last_error
+            raise AllModelsFailedError("没有可用模型", attempted=attempt, error_code="no_usable_models")
+        raise AllModelsFailedError(
+            f"所有可用模型均请求失败，共尝试 {attempt} 个上游",
+            attempted=attempt,
+            error_code="all_models_failed",
+        ) from last_error
 
     def stream(self, path: str, payload: Dict[str, Any], route: RouteContext | str | None = None, incoming_headers: Optional[Dict[str, str]] = None, raw_body: bytes | None = None) -> Tuple[int, Dict[str, str], Iterable[bytes]]:
         """流式请求调度。聚合 fallback 只允许在向客户端写出首字节之前发生；
@@ -2336,9 +2384,15 @@ class ArkProxyRouter:
         requested_label = str(requested_model) if requested_model else DEFAULT_AUTO_MODEL_NAME
         group_id = self._route_group_id(route)
         route_group = route.group if isinstance(route, RouteContext) else self.store.find_group(group_id) if group_id else None
+        is_deprecated_global = isinstance(route, RouteContext) and route.is_deprecated_global
+        if is_deprecated_global:
+            def deprecated_iter():
+                yield json.dumps({"error": {"message": "全局 Key 已停用，请改用连接组 Key 或聚合模型 Key", "type": "global_key_deprecated", "code": "use_group_or_aggregate_key"}}, ensure_ascii=False).encode("utf-8")
+            return 403, {"Content-Type": "application/json; charset=utf-8"}, deprecated_iter()
+        route_aggregate = route.aggregate if isinstance(route, RouteContext) else None
         is_global = isinstance(route, RouteContext) and route.is_global
         auto_mode = self._is_auto_model(str(requested_model) if requested_model else None, route_group)
-        auto_fallback = auto_mode
+        auto_fallback = auto_mode or bool(route_aggregate)
         request_id = uuid.uuid4().hex[:12]
         attempt = 0
         last_error: Optional[Exception] = None
@@ -2347,9 +2401,7 @@ class ArkProxyRouter:
         # 聚合模型解析
         aggregate_info = self._resolve_aggregate(
             str(requested_model) if requested_model else None,
-            group_id,
-            route_group,
-            is_global,
+            route,
         )
         aggregate_model: Optional[AggregateModel] = None
         resolved_as = ""
@@ -2382,6 +2434,8 @@ class ArkProxyRouter:
                     selection_reason=selection_reason,
                     fallback_index=fallback_index,
                     fallback_chain=fallback_chain,
+                    strategy=aggregate_model.strategy or "priority",
+                    manual_price=candidate.manual_price,
                 )
             if not candidate.auth_key:
                 skip_detail = f"requested={requested_label}; missing upstream api key"
@@ -2414,7 +2468,7 @@ class ArkProxyRouter:
                 )
                 if auto_fallback:
                     continue
-                error_body = json.dumps({"error": {"message": "waf_lock_wait_timeout", "type": "timeout", "code": "waf_lock_wait_timeout", "request_id": request_id}}, ensure_ascii=False).encode("utf-8")
+                error_body = json.dumps({"error": {"message": "获取 WAF 锁超时，请稍后重试", "type": "timeout", "code": "waf_lock_wait_timeout", "request_id": request_id}}, ensure_ascii=False).encode("utf-8")
                 return 503, {"Content-Type": "application/json; charset=utf-8"}, [error_body], request_id
             try:
                 resp = self._upstream_client.request("POST", target_url, outbound_headers, body, stream=True, timeout=120)
@@ -2534,6 +2588,7 @@ class ArkProxyRouter:
                         "member_id": candidate.aggregate_member_id,
                         "group": group.name,
                         "model": candidate.model.name if candidate.model else candidate.label,
+                        "manual_price": candidate.manual_price,
                         "status": "stream_idle_timeout",
                         "reason": "stream_idle_timeout",
                     })
@@ -2558,7 +2613,7 @@ class ArkProxyRouter:
                 if auto_fallback:
                     self.add_log(path, candidate.label, "fallback", self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, "reason=stream_idle_timeout; fallback_next=true", lock_wait_ms=lock_wait_ms), duration_ms, group=group, request_id=request_id, attempt=attempt, event="fallback")
                     continue
-                error_body = json.dumps({"error": {"message": "stream_idle_timeout", "type": "timeout", "code": "stream_idle_timeout", "request_id": request_id}}, ensure_ascii=False).encode("utf-8")
+                error_body = json.dumps({"error": {"message": "流式响应空闲超时，请稍后重试", "type": "timeout", "code": "stream_idle_timeout", "request_id": request_id}}, ensure_ascii=False).encode("utf-8")
                 return 504, {"Content-Type": "application/json; charset=utf-8"}, [error_body], request_id
             except HTTPError as err:
                 if resp:
@@ -2575,6 +2630,7 @@ class ArkProxyRouter:
                         "member_id": candidate.aggregate_member_id,
                         "group": group.name,
                         "model": candidate.model.name if candidate.model else candidate.label,
+                        "manual_price": candidate.manual_price,
                         "status": err.code,
                         "reason": self._short_error(raw),
                     })
@@ -2621,6 +2677,7 @@ class ArkProxyRouter:
                         "member_id": candidate.aggregate_member_id,
                         "group": group.name,
                         "model": candidate.model.name if candidate.model else candidate.label,
+                        "manual_price": candidate.manual_price,
                         "status": "network",
                         "reason": self._short_error(str(err)),
                     })
@@ -2639,11 +2696,27 @@ class ArkProxyRouter:
                 continue
 
         if aggregate_model:
-            raise AllModelsFailedError("all_aggregate_members_failed", attempted=attempt, stream_timeout=saw_stream_timeout)
+            raise AllModelsFailedError(
+                f"聚合模型 {aggregate_model.name} 的所有成员均不可用",
+                attempted=attempt,
+                stream_timeout=saw_stream_timeout,
+                error_code="aggregate_members_unavailable",
+                fallback_chain=fallback_chain,
+                aggregate_name=aggregate_model.name,
+            )
         if last_error is None:
-            raise AllModelsFailedError("No usable models available", attempted=attempt, stream_timeout=saw_stream_timeout)
-        message = f"All available models failed, attempted {attempt}, last_error={last_error}"
-        raise AllModelsFailedError(message, attempted=attempt, stream_timeout=saw_stream_timeout) from last_error
+            raise AllModelsFailedError(
+                "没有可用模型",
+                attempted=attempt,
+                stream_timeout=saw_stream_timeout,
+                error_code="no_usable_models",
+            )
+        raise AllModelsFailedError(
+            f"所有可用模型均请求失败，共尝试 {attempt} 个上游",
+            attempted=attempt,
+            stream_timeout=saw_stream_timeout,
+            error_code="all_models_failed",
+        ) from last_error
 
 
 
@@ -2673,27 +2746,110 @@ class RouterHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _send_all_models_failed_error(self, err: AllModelsFailedError) -> None:
+        """统一 AllModelsFailedError 错误响应：message 中文，type/code 英文机器码。"""
+        status = 504 if getattr(err, "stream_timeout", False) else 503
+        err_code = getattr(err, "error_code", "") or ""
+        err_type = "all_models_failed"
+        code = "stream_idle_timeout" if status == 504 else "service_unavailable"
+        message = str(err)
+        details: Dict[str, Any] | None = None
+        if err_code == "aggregate_disabled":
+            err_type = "aggregate_disabled"
+            code = "aggregate_disabled"
+        elif err_code == "global_auto_deprecated":
+            err_type = "global_auto_deprecated"
+            code = "use_aggregate_model"
+        elif err_code == "model_not_found":
+            err_type = "model_not_found"
+            code = "model_not_found"
+        elif err_code == "aggregate_members_unavailable":
+            err_type = "all_aggregate_members_failed"
+            code = "aggregate_members_unavailable"
+            aggregate = self.store.find_aggregate_by_name(getattr(err, "aggregate_name", "")) if getattr(err, "aggregate_name", "") else None
+            details = {
+                "aggregate_model": getattr(err, "aggregate_name", ""),
+                "attempted": err.attempted,
+                "strategy": aggregate.strategy if aggregate else "priority",
+                "fallback_chain": [],
+            }
+            for item in err.fallback_chain:
+                member_id = item.get("member_id") or ""
+                member = self.store.find_aggregate_member(member_id) if member_id else None
+                chain_entry = {
+                    "member_id": member_id,
+                    "group": item.get("group", ""),
+                    "model": item.get("model", ""),
+                    "manual_price": item.get("manual_price"),
+                    "status": item.get("status", ""),
+                    "reason": item.get("reason", ""),
+                }
+                if member and member.cooldown_until:
+                    chain_entry["cooldown_until"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(member.cooldown_until))
+                details["fallback_chain"].append(chain_entry)
+        elif err_code == "no_usable_models":
+            code = "no_usable_models"
+        elif err_code == "all_models_failed":
+            code = "all_models_failed"
+        payload: Dict[str, Any] = {
+            "error": {
+                "message": message,
+                "type": err_type,
+                "code": code,
+            }
+        }
+        if details:
+            payload["error"]["details"] = details
+        self._send_json(payload, status=status)
+
     def _send_model_list(self, ctx: Any) -> None:
+        # 旧全局 Key 已退役，/v1/models 不再返回所有真实模型
+        if getattr(ctx, "is_deprecated_global", False):
+            self._send_json({
+                "error": {
+                    "message": "全局 Key 已停用，请改用连接组 Key 或聚合模型 Key",
+                    "type": "global_key_deprecated",
+                    "code": "use_group_or_aggregate_key",
+                }
+            }, status=403)
+            return
+        # 聚合模型 Key：只返回自身聚合模型
+        if getattr(ctx, "aggregate", None):
+            aggregate = ctx.aggregate
+            if not aggregate.enabled:
+                self._send_json({
+                    "error": {
+                        "message": f"聚合模型 {aggregate.name} 已禁用",
+                        "type": "aggregate_disabled",
+                        "code": "aggregate_disabled",
+                    }
+                }, status=403)
+                return
+            self._send_json({
+                "object": "list",
+                "data": [{
+                    "id": aggregate.name,
+                    "object": "model",
+                    "created": 0,
+                    "owned_by": "lin-router",
+                    "root": aggregate.name,
+                    "parent": None,
+                    "display_name": aggregate.display_name or aggregate.name,
+                    "is_aggregate": True,
+                    "aggregate_id": aggregate.id,
+                    "usable": True,
+                }]
+            })
+            return
         group = ctx.group
-        visible_group = None if ctx.is_global else group
+        visible_group = group
         # 先统计匹配模型数，便于排查“只能看到 auto”的问题
         matched_models = [
             model for model in self.store.models
             if not visible_group or model.group_id == visible_group.id
         ]
-        # 全局 Key 使用统一的 all-router-auto 模型名，连接组 Key 使用组自定义 auto_model_name（默认 lin-router-auto）
-        auto_model_name = "all-router-auto" if ctx.is_global else self.router.group_auto_model_name(group)
-        # 聚合模型按 route key scope 过滤
-        visible_aggregates: List[AggregateModel] = []
-        for aggregate in self.store.aggregate_models:
-            if not aggregate.enabled:
-                continue
-            if ctx.is_global:
-                visible_aggregates.append(aggregate)
-            elif group:
-                members = self.store.get_aggregate_members(aggregate.id)
-                if any(m.group_id == group.id for m in members):
-                    visible_aggregates.append(aggregate)
+        # 连接组 Key 使用组自定义 auto_model_name（默认 lin-router-auto）
+        auto_model_name = self.router.group_auto_model_name(group)
         # 成功的 /v1/models 请求不再记录到最近请求，避免客户端频繁拉取模型列表时刷屏
         data = [{
             "id": auto_model_name,
@@ -2703,20 +2859,6 @@ class RouterHandler(BaseHTTPRequestHandler):
             "root": auto_model_name,
             "parent": None,
         }]
-        # 聚合模型作为独立全局入口展示
-        for aggregate in visible_aggregates:
-            data.append({
-                "id": aggregate.name,
-                "object": "model",
-                "created": 0,
-                "owned_by": "lin-router",
-                "root": aggregate.name,
-                "parent": None,
-                "display_name": aggregate.display_name or aggregate.name,
-                "is_aggregate": True,
-                "aggregate_id": aggregate.id,
-                "usable": True,
-            })
         # /v1/models 返回对应连接组下的全部已配置模型（包含禁用的），方便客户端查看完整列表
         for model in matched_models:
             model_group = self.store.find_group(model.group_id)
@@ -2748,7 +2890,7 @@ class RouterHandler(BaseHTTPRequestHandler):
     def _send_file(self, file_path: Path, content_type: str = "") -> None:
         import mimetypes
         if not file_path.exists():
-            self._send_text("not found", status=404)
+            self._send_json({"error": {"message": "资源不存在", "type": "invalid_request_error", "code": "not_found"}}, status=404)
             return
         data = file_path.read_bytes()
         ctype = content_type or mimetypes.guess_type(str(file_path))[0] or "application/octet-stream"
@@ -2920,32 +3062,47 @@ class RouterHandler(BaseHTTPRequestHandler):
         key = parse_bearer_key(self.headers.get("Authorization", ""))
         if not key:
             return None
-        # 全局 Key：跨所有连接组顺序调度
-        if key == DEFAULT_PUBLIC_API_KEY:
-            first_group = self.store.groups[0] if self.store.groups else None
+        # 聚合模型 Key 优先识别
+        aggregate = self.store.find_aggregate_by_route_key(key)
+        if aggregate:
             return RouteContext(
                 client_key=key,
-                group=first_group,
+                group=None,
+                group_id=f"__aggregate__{aggregate.id}",
+                provider_type="aggregate",
+                base_url="",
+                display_name=aggregate.display_name or aggregate.name,
+                passthrough=False,
+                is_global=False,
+                aggregate=aggregate,
+            )
+        # 连接组 Key
+        group = self.store.find_group_by_route_key(key)
+        if group:
+            return RouteContext(
+                client_key=key,
+                group=group,
+                group_id=group.id,
+                provider_type=group.provider_type,
+                base_url=group.base_url,
+                display_name=group.name,
+                # 仅 relay 模式不走 passthrough；ark/proxy 均视为透传，避免中转站专属逻辑污染
+                passthrough=group.provider_type != PROVIDER_RELAY,
+            )
+        # 旧全局 Key 已退役
+        if key == DEFAULT_PUBLIC_API_KEY:
+            return RouteContext(
+                client_key=key,
+                group=None,
                 group_id=GLOBAL_ROUTE_GROUP_ID,
                 provider_type="global",
-                base_url=first_group.base_url if first_group else DEFAULT_BASE_URL,
-                display_name="全局调度",
+                base_url=DEFAULT_BASE_URL,
+                display_name="全局调度（已退役）",
                 passthrough=False,
                 is_global=True,
+                is_deprecated_global=True,
             )
-        group = self.store.find_group_by_route_key(key)
-        if not group:
-            return None
-        return RouteContext(
-            client_key=key,
-            group=group,
-            group_id=group.id,
-            provider_type=group.provider_type,
-            base_url=group.base_url,
-            display_name=group.name,
-            # 仅 relay 模式不走 passthrough；ark/proxy 均视为透传，避免中转站专属逻辑污染
-            passthrough=group.provider_type != PROVIDER_RELAY,
-        )
+        return None
 
     def _route_group(self) -> Optional[ConnectionGroup]:
         ctx = self._route_context()
@@ -2957,7 +3114,7 @@ class RouterHandler(BaseHTTPRequestHandler):
             return ctx
         self._send_json({
             "error": {
-                "message": "Missing or invalid Lin Router group API key",
+                "message": "缺少或无效的 Lin Router API Key，请使用连接组 Key 或聚合模型 Key",
                 "type": "invalid_request_error",
                 "code": "invalid_api_key",
             }
@@ -2984,7 +3141,7 @@ class RouterHandler(BaseHTTPRequestHandler):
             # 服务静态资源（css/js/html 等），统一映射到 static/ 目录
             rel = parsed.path.lstrip("/")
             if ".." in rel:
-                self._send_text("forbidden", status=403)
+                self._send_json({"error": {"message": "禁止访问", "type": "invalid_request_error", "code": "forbidden"}}, status=403)
                 return
             file_path = get_platform().get_resource_path("static", *rel.split("/"))
             self._send_file(file_path)
@@ -3053,7 +3210,7 @@ class RouterHandler(BaseHTTPRequestHandler):
             group_id = parsed.path.split("/", 3)[3]
             group = self.store.find_group(group_id)
             if not group:
-                self._send_text("group not found", status=404)
+                self._send_json({"error": {"message": "连接组不存在", "type": "invalid_request_error", "code": "group_not_found"}}, status=404)
                 return
             self._send_json({
                 "base_url": self._client_base_url(),
@@ -3200,7 +3357,7 @@ class RouterHandler(BaseHTTPRequestHandler):
                 "aggregate_members": len(self.store.aggregate_members),
             })
             return
-        self._send_text("not found", status=404)
+        self._send_json({"error": {"message": "资源不存在", "type": "invalid_request_error", "code": "not_found"}}, status=404)
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
@@ -3212,17 +3369,17 @@ class RouterHandler(BaseHTTPRequestHandler):
                 try:
                     payload = self._read_json()
                 except Exception as e:
-                    self._send_text(f"invalid config file: {e}", status=400)
-                    return
+                    self._send_json({"error": {"message": f"配置文件无效：{e}", "type": "invalid_request_error", "code": "invalid_config_file"}}, status=400)
+                return
             if not isinstance(payload, dict):
-                self._send_text("invalid config file: must be a JSON object", status=400)
+                self._send_json({"error": {"message": "配置文件无效：必须是一个 JSON 对象", "type": "invalid_request_error", "code": "invalid_config_file"}}, status=400)
                 return
             groups_raw = payload.get("groups") or []
             models_raw = payload.get("models") or []
             aggregates_raw = payload.get("aggregate_models") or []
             members_raw = payload.get("aggregate_members") or []
             if not isinstance(groups_raw, list) or not isinstance(models_raw, list):
-                self._send_text("invalid payload: groups and models must be arrays", status=400)
+                self._send_json({"error": {"message": "请求参数无效：groups 和 models 必须是数组", "type": "invalid_request_error", "code": "invalid_payload"}}, status=400)
                 return
             if not isinstance(aggregates_raw, list):
                 aggregates_raw = []
@@ -3304,7 +3461,6 @@ class RouterHandler(BaseHTTPRequestHandler):
                         self.store.aggregate_members.append(member)
                     imported_member_ids.add(member.id)
                 self.store._cleanup_orphan_members()
-                self.store._ensure_single_default_global()
                 self.store.save()
             self._send_json({
                 "ok": True,
@@ -3321,10 +3477,10 @@ class RouterHandler(BaseHTTPRequestHandler):
                 try:
                     payload = self._read_json()
                 except Exception as e:
-                    self._send_text(f"invalid backup file: {e}", status=400)
-                    return
+                    self._send_json({"error": {"message": f"备份文件无效：{e}", "type": "invalid_request_error", "code": "invalid_backup_file"}}, status=400)
+                return
             if not isinstance(payload, dict):
-                self._send_text("invalid backup file: must be a JSON object", status=400)
+                self._send_json({"error": {"message": "备份文件无效：必须是一个 JSON 对象", "type": "invalid_request_error", "code": "invalid_backup_file"}}, status=400)
                 return
             groups_raw = payload.get("groups") or []
             models_raw = payload.get("models") or []
@@ -3332,7 +3488,7 @@ class RouterHandler(BaseHTTPRequestHandler):
             members_raw = payload.get("aggregate_members") or []
             settings_raw = payload.get("settings") or {}
             if not isinstance(groups_raw, list) or not isinstance(models_raw, list):
-                self._send_text("invalid payload: groups and models must be arrays", status=400)
+                self._send_json({"error": {"message": "请求参数无效：groups 和 models 必须是数组", "type": "invalid_request_error", "code": "invalid_payload"}}, status=400)
                 return
             if not isinstance(aggregates_raw, list):
                 aggregates_raw = []
@@ -3383,7 +3539,6 @@ class RouterHandler(BaseHTTPRequestHandler):
                 self.store.models = new_models
                 self.store.aggregate_models = new_aggregates
                 self.store.aggregate_members = new_members
-                self.store._ensure_single_default_global()
                 self.store.save()
             # 恢复设置
             settings_store = self.server.settings_store  # type: ignore[attr-defined]
@@ -3412,7 +3567,7 @@ class RouterHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/groups":
             payload = self._read_json()
             if not payload.get("name"):
-                self._send_text("missing group name", status=400)
+                self._send_json({"error": {"message": "缺少连接组名称", "type": "invalid_request_error", "code": "missing_group_name"}}, status=400)
                 return
             existing = self.store.find_group(str(payload.get("id") or ""))
             if existing and not payload.get("route_key"):
@@ -3456,18 +3611,18 @@ class RouterHandler(BaseHTTPRequestHandler):
             group_id = parsed.path.split("/")[3]
             cloned = self._clone_group(group_id)
             if not cloned:
-                self._send_text("group not found", status=404)
+                self._send_json({"error": {"message": "连接组不存在", "type": "invalid_request_error", "code": "group_not_found"}}, status=404)
                 return
             self._send_json({"ok": True, **cloned})
             return
         if parsed.path == "/api/models":
             payload = self._read_json()
             if not payload.get("name") or not payload.get("ep_id") or not payload.get("group_id"):
-                self._send_text("missing required fields", status=400)
+                self._send_json({"error": {"message": "缺少必填字段", "type": "invalid_request_error", "code": "missing_required_fields"}}, status=400)
                 return
             group = self.store.find_group(str(payload["group_id"]))
             if not group:
-                self._send_text("group not found", status=400)
+                self._send_json({"error": {"message": "连接组不存在", "type": "invalid_request_error", "code": "group_not_found"}}, status=400)
                 return
             existing = self.store.find_model(str(payload.get("id") or ""))
             merged: Dict[str, Any] = asdict(existing) if existing else {}
@@ -3502,7 +3657,7 @@ class RouterHandler(BaseHTTPRequestHandler):
             group_id = str(payload.get("group_id") or "")
             group = self.store.find_group(group_id)
             if not group_id or not group:
-                self._send_text("group not found", status=400)
+                self._send_json({"error": {"message": "连接组不存在", "type": "invalid_request_error", "code": "group_not_found"}}, status=400)
                 return
             raw_text = str(payload.get("text") or "")
             fmt = str(payload.get("format") or "lines").strip().lower()
@@ -3638,19 +3793,19 @@ class RouterHandler(BaseHTTPRequestHandler):
             group_id = str(payload.get("group_id") or "")
             group = self.store.find_group(group_id)
             if not group:
-                self._send_text("group not found", status=400)
+                self._send_json({"error": {"message": "连接组不存在", "type": "invalid_request_error", "code": "group_not_found"}}, status=400)
                 return
             if group.provider_type not in {PROVIDER_RELAY, PROVIDER_PROXY}:
-                self._send_text("upstream fetch only supports relay/proxy groups", status=400)
+                self._send_json({"error": {"message": "仅 relay/proxy 连接组支持拉取上游模型", "type": "invalid_request_error", "code": "upstream_fetch_unsupported_provider"}}, status=400)
                 return
             auth_key = self._effective_group_auth(group, payload)
             if not auth_key:
-                self._send_text("missing upstream api key", status=400)
+                self._send_json({"error": {"message": "缺少上游 API Key", "type": "invalid_request_error", "code": "missing_upstream_api_key"}}, status=400)
                 return
             try:
                 items = self._fetch_upstream_models(group, auth_key)
             except Exception as err:
-                self._send_text(str(err), status=500)
+                self._send_json({"error": {"message": f"拉取上游模型失败：{err}", "type": "api_error", "code": "upstream_fetch_failed"}}, status=500)
                 return
             candidates: List[Dict[str, Any]] = []
             for item in items:
@@ -3675,7 +3830,7 @@ class RouterHandler(BaseHTTPRequestHandler):
             model_id = parsed.path.split("/")[3]
             model = self.store.find_model(model_id)
             if not model:
-                self._send_text("model not found", status=404)
+                self._send_json({"error": {"message": "模型不存在", "type": "invalid_request_error", "code": "model_not_found"}}, status=404)
                 return
             if model.cooldown_until:
                 # 恢复冷却视为用户手动启用
@@ -3704,7 +3859,7 @@ class RouterHandler(BaseHTTPRequestHandler):
             model_id = parsed.path.split("/")[3]
             model = self.store.find_model(model_id)
             if not model:
-                self._send_text("model not found", status=404)
+                self._send_json({"error": {"message": "模型不存在", "type": "invalid_request_error", "code": "model_not_found"}}, status=404)
                 return
             payload = self._read_json()
             usable = bool(payload.get("usable", True))
@@ -3740,7 +3895,7 @@ class RouterHandler(BaseHTTPRequestHandler):
             group_id = parsed.path.split("/")[3]
             changed = self.store.toggle_group(group_id)
             if not changed:
-                self._send_text("group not found or empty", status=400)
+                self._send_json({"error": {"message": "连接组不存在或为空", "type": "invalid_request_error", "code": "group_not_found_or_empty"}}, status=400)
                 return
             self._send_json({"ok": True})
             return
@@ -3748,7 +3903,7 @@ class RouterHandler(BaseHTTPRequestHandler):
             group_id = parsed.path.split("/")[3]
             group = self.store.find_group(group_id)
             if not group:
-                self._send_text("group not found", status=404)
+                self._send_json({"error": {"message": "连接组不存在", "type": "invalid_request_error", "code": "group_not_found"}}, status=404)
                 return
             payload = self._read_json()
             usable = bool(payload.get("usable", True))
@@ -3774,7 +3929,7 @@ class RouterHandler(BaseHTTPRequestHandler):
             payload = self._read_json()
             moved = self.store.move_model(model_id, str(payload.get("direction", "")))
             if not moved:
-                self._send_text("move failed", status=400)
+                self._send_json({"error": {"message": "移动失败", "type": "invalid_request_error", "code": "move_failed"}}, status=400)
                 return
             self._send_json({"ok": True})
             return
@@ -3791,7 +3946,7 @@ class RouterHandler(BaseHTTPRequestHandler):
             raw = self._read_raw_body()
             payload = self._json_from_raw(raw)
             if not isinstance(payload, dict):
-                self._send_text("invalid payload", status=400)
+                self._send_json({"error": {"message": "请求参数无效", "type": "invalid_request_error", "code": "invalid_payload"}}, status=400)
                 return
             allowed = {
                 "auto_start", "start_minimized", "theme", "auto_refresh_logs",
@@ -3817,7 +3972,7 @@ class RouterHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/aggregates":
             payload = self._read_json()
             if not isinstance(payload, dict):
-                self._send_text("invalid payload", status=400)
+                self._send_json({"error": {"message": "请求参数无效", "type": "invalid_request_error", "code": "invalid_payload"}}, status=400)
                 return
             name = str(payload.get("name") or "").strip()
             if not name:
@@ -3839,12 +3994,12 @@ class RouterHandler(BaseHTTPRequestHandler):
         if parsed.path.startswith("/api/aggregates/") and parsed.path.endswith("/members"):
             parts = parsed.path.split("/")
             if len(parts) < 5:
-                self._send_text("invalid path", status=400)
+                self._send_json({"error": {"message": "请求路径无效", "type": "invalid_request_error", "code": "invalid_path"}}, status=400)
                 return
             aggregate_id = parts[3]
             payload = self._read_json()
             if not isinstance(payload, dict):
-                self._send_text("invalid payload", status=400)
+                self._send_json({"error": {"message": "请求参数无效", "type": "invalid_request_error", "code": "invalid_payload"}}, status=400)
                 return
             if not self.store.find_aggregate(aggregate_id):
                 self._send_json({"ok": False, "message": "聚合模型不存在"}, status=404)
@@ -3886,26 +4041,15 @@ class RouterHandler(BaseHTTPRequestHandler):
                 status, headers, result = self.router.call(path, body, ctx, dict(self.headers.items()))
                 self._send_json({"status": status, "headers": headers, "body": result.decode("utf-8", "ignore")})
             except AllModelsFailedError as err:
-                status = 504 if getattr(err, "stream_timeout", False) else 503
-                err_type = "all_models_failed"
-                code = "stream_idle_timeout" if status == 504 else "service_unavailable"
-                message = f"{err}，共尝试 {err.attempted} 个上游"
-                if getattr(err, "error_code", None) == "aggregate_disabled":
-                    err_type = "aggregate_disabled"
-                    code = "aggregate_disabled"
-                    message = str(err)
-                elif str(err) == "all_aggregate_members_failed":
-                    err_type = "all_aggregate_members_failed"
-                    code = "aggregate_members_unavailable"
+                self._send_all_models_failed_error(err)
+            except Exception as err:
                 self._send_json({
                     "error": {
-                        "message": message,
-                        "type": err_type,
-                        "code": code,
+                        "message": f"服务器内部错误: {err}",
+                        "type": "internal_server_error",
+                        "code": "internal_error",
                     }
-                }, status=status)
-            except Exception as err:
-                self._send_text(str(err), status=500)
+                }, status=500)
             return
         if parsed.path == "/api/debug/replay":
             payload = self._read_json()
@@ -3952,28 +4096,17 @@ class RouterHandler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(data)
             except AllModelsFailedError as err:
-                status = 504 if getattr(err, "stream_timeout", False) else 503
-                err_type = "all_models_failed"
-                code = "stream_idle_timeout" if status == 504 else "service_unavailable"
-                message = f"{err}，共尝试 {err.attempted} 个上游"
-                if getattr(err, "error_code", None) == "aggregate_disabled":
-                    err_type = "aggregate_disabled"
-                    code = "aggregate_disabled"
-                    message = str(err)
-                elif str(err) == "all_aggregate_members_failed":
-                    err_type = "all_aggregate_members_failed"
-                    code = "aggregate_members_unavailable"
+                self._send_all_models_failed_error(err)
+            except Exception as err:
                 self._send_json({
                     "error": {
-                        "message": message,
-                        "type": err_type,
-                        "code": code,
+                        "message": f"服务器内部错误: {err}",
+                        "type": "internal_server_error",
+                        "code": "internal_error",
                     }
-                }, status=status)
-            except Exception as err:
-                self._send_text(str(err), status=500)
+                }, status=500)
             return
-        self._send_text("not found", status=404)
+        self._send_json({"error": {"message": "资源不存在", "type": "invalid_request_error", "code": "not_found"}}, status=404)
 
     def do_PUT(self) -> None:
         """把 PUT /api/groups/{id}、PUT /api/models/{id} 和 PUT /api/settings 转发到对应的 POST 处理逻辑。"""
@@ -4014,7 +4147,7 @@ class RouterHandler(BaseHTTPRequestHandler):
             self.path = f"/api/aggregates/{payload.get('aggregate_id')}/members"
             self._put_body = json.dumps(payload).encode("utf-8")
             return self.do_POST()
-        self._send_text("not found", status=404)
+        self._send_json({"error": {"message": "资源不存在", "type": "invalid_request_error", "code": "not_found"}}, status=404)
 
     def do_DELETE(self) -> None:
         parsed = urlparse(self.path)
@@ -4023,7 +4156,7 @@ class RouterHandler(BaseHTTPRequestHandler):
             # 统一使用 store.remove_group()，确保级联删除组下模型及引用该组的聚合成员
             group_removed, removed_models, removed_members = self.store.remove_group(group_id)
             if not group_removed:
-                self._send_text("group not found", status=404)
+                self._send_json({"error": {"message": "连接组不存在", "type": "invalid_request_error", "code": "group_not_found"}}, status=404)
                 return
             self._send_json({"ok": True, "removed_models": removed_models, "removed_members": removed_members})
             return
@@ -4032,13 +4165,13 @@ class RouterHandler(BaseHTTPRequestHandler):
             if self.store.remove_model(model_id):
                 self._send_json({"ok": True})
             else:
-                self._send_text("model not found", status=404)
+                self._send_json({"error": {"message": "模型不存在", "type": "invalid_request_error", "code": "model_not_found"}}, status=404)
             return
         if parsed.path.startswith("/api/aggregates/"):
             aggregate_id = parsed.path.split("/")[3]
             removed_model, removed_members = self.store.remove_aggregate(aggregate_id)
             if not removed_model:
-                self._send_text("aggregate not found", status=404)
+                self._send_json({"error": {"message": "聚合模型不存在", "type": "invalid_request_error", "code": "aggregate_not_found"}}, status=404)
                 return
             self._send_json({"ok": True, "removed_members": removed_members})
             return
@@ -4047,9 +4180,9 @@ class RouterHandler(BaseHTTPRequestHandler):
             if self.store.remove_aggregate_member(member_id):
                 self._send_json({"ok": True})
             else:
-                self._send_text("aggregate member not found", status=404)
+                self._send_json({"error": {"message": "聚合成员不存在", "type": "invalid_request_error", "code": "aggregate_member_not_found"}}, status=404)
             return
-        self._send_text("not found", status=404)
+        self._send_json({"error": {"message": "资源不存在", "type": "invalid_request_error", "code": "not_found"}}, status=404)
 
 
 def ensure_sample_config(path: Path) -> None:
