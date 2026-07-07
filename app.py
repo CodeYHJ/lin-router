@@ -188,6 +188,7 @@ class ConnectionGroup:
     ark_api_key: str = ""
     api_key: str = ""
     route_key: str = ""
+    auto_model_name: str = ""
     auto_model_cooldown_minutes: int = DEFAULT_AUTO_MODEL_COOLDOWN_MINUTES
     stream_idle_timeout: int = DEFAULT_STREAM_IDLE_TIMEOUT_SECONDS
     waf_compatible: bool = False
@@ -205,6 +206,7 @@ class ConnectionGroup:
             ark_api_key=data.get("ark_api_key") or "",
             api_key=str(data.get("api_key") or ""),
             route_key=str(data.get("route_key") or ""),
+            auto_model_name=str(data.get("auto_model_name") or "").strip() or DEFAULT_AUTO_MODEL_NAME,
             auto_model_cooldown_minutes=int(data.get("auto_model_cooldown_minutes") or DEFAULT_AUTO_MODEL_COOLDOWN_MINUTES),
             stream_idle_timeout=max(0, min(MAX_STREAM_IDLE_TIMEOUT_SECONDS, int(data.get("stream_idle_timeout", DEFAULT_STREAM_IDLE_TIMEOUT_SECONDS) or 0))),
             waf_compatible=bool(data.get("waf_compatible", False)),
@@ -968,15 +970,24 @@ class ArkProxyRouter:
         return next((m for m in self.store.models if m.usable), None)
 
     @staticmethod
-    def group_auto_model_name(group: ConnectionGroup) -> str:
+    def group_auto_model_name(group: ConnectionGroup | None) -> str:
+        if group and group.auto_model_name and group.auto_model_name.strip():
+            return group.auto_model_name.strip()
         return DEFAULT_AUTO_MODEL_NAME
 
     @staticmethod
-    def _is_auto_model(requested_model: str | None) -> bool:
-        return not requested_model or requested_model in {DEFAULT_AUTO_MODEL_NAME, "all-router-auto"}
+    def _is_auto_model(requested_model: str | None, group: ConnectionGroup | None = None) -> bool:
+        if not requested_model:
+            return True
+        if requested_model in {DEFAULT_AUTO_MODEL_NAME, "all-router-auto"}:
+            return True
+        if group and requested_model == ArkProxyRouter.group_auto_model_name(group):
+            return True
+        return False
 
     def _iter_candidates(self, requested_model: str | None, group_id: str | None = None) -> Iterator[Tuple[int, ModelConfig]]:
-        if self._is_auto_model(requested_model):
+        group = self.store.find_group(group_id) if group_id else None
+        if self._is_auto_model(requested_model, group):
             requested_model = None
         for idx, model in enumerate(self.store.models):
             if model.cooldown_until and model.cooldown_until <= int(time.time()):
@@ -1456,7 +1467,7 @@ class ArkProxyRouter:
             for idx, model in candidates:
                 matched = True
                 yield self._candidate_from_model(idx, model, group)
-            if self._mode_for(group) == PROVIDER_PROXY and not matched and requested_model and not self._is_auto_model(requested_model):
+            if self._mode_for(group) == PROVIDER_PROXY and not matched and requested_model and not self._is_auto_model(requested_model, group):
                 yield UpstreamCandidate(
                     idx=None,
                     group=group,
@@ -1593,7 +1604,7 @@ class ArkProxyRouter:
         requested_label = str(requested_model) if requested_model else DEFAULT_AUTO_MODEL_NAME
         group_id = self._route_group_id(route)
         route_group = route.group if isinstance(route, RouteContext) else self.store.find_group(group_id) if group_id else None
-        auto_mode = self._is_auto_model(str(requested_model) if requested_model else None)
+        auto_mode = self._is_auto_model(str(requested_model) if requested_model else None, route_group)
         # auto_fallback：组级 auto 或全局 Key 模式下，失败时尝试下一个候选
         auto_fallback = auto_mode or (isinstance(route, RouteContext) and route.is_global)
         request_id = uuid.uuid4().hex[:12]
@@ -1751,7 +1762,8 @@ class ArkProxyRouter:
         requested_model = payload.get("model")
         requested_label = str(requested_model) if requested_model else DEFAULT_AUTO_MODEL_NAME
         group_id = self._route_group_id(route)
-        auto_mode = self._is_auto_model(str(requested_model) if requested_model else None)
+        route_group = route.group if isinstance(route, RouteContext) else self.store.find_group(group_id) if group_id else None
+        auto_mode = self._is_auto_model(str(requested_model) if requested_model else None, route_group)
         auto_fallback = auto_mode
         request_id = uuid.uuid4().hex[:12]
         attempt = 0
@@ -2008,8 +2020,8 @@ class RouterHandler(BaseHTTPRequestHandler):
             model for model in self.store.models
             if not visible_group or model.group_id == visible_group.id
         ]
-        # 全局 Key 使用统一的 all-router-auto 模型名，连接组 Key 使用 lin-router-auto
-        auto_model_name = "all-router-auto" if ctx.is_global else DEFAULT_AUTO_MODEL_NAME
+        # 全局 Key 使用统一的 all-router-auto 模型名，连接组 Key 使用组自定义 auto_model_name（默认 lin-router-auto）
+        auto_model_name = "all-router-auto" if ctx.is_global else self.router.group_auto_model_name(group)
         # 成功的 /v1/models 请求不再记录到最近请求，避免客户端频繁拉取模型列表时刷屏
         data = [{
             "id": auto_model_name,
@@ -2570,6 +2582,16 @@ class RouterHandler(BaseHTTPRequestHandler):
                 payload["waf_compatible"] = existing.waf_compatible
             if existing and "waf_accept_policy" not in payload:
                 payload["waf_accept_policy"] = existing.waf_accept_policy
+            if existing and "auto_model_name" not in payload:
+                payload["auto_model_name"] = existing.auto_model_name
+            # 自动路由模型名空值按默认值处理
+            auto_name = str(payload.get("auto_model_name") or "").strip() or DEFAULT_AUTO_MODEL_NAME
+            # 不允许与同组模型 name/id/ep_id 冲突；仅 all-router-auto 为全局保留名
+            group_id_for_check = str(payload.get("id") or existing.id if existing else "").strip()
+            conflict_model = next((m for m in self.store.models if m.group_id == group_id_for_check and auto_name in {m.id, m.name, m.ep_id}), None)
+            if conflict_model or auto_name == "all-router-auto":
+                self._send_json({"ok": False, "message": f"自动路由模型名 '{auto_name}' 与已有模型或保留名称冲突"}, status=400)
+                return
             group = ConnectionGroup.from_dict(payload)
             if group.provider_type == PROVIDER_PROXY and not group.api_key and group.ark_api_key:
                 group.api_key = group.ark_api_key
@@ -2614,6 +2636,11 @@ class RouterHandler(BaseHTTPRequestHandler):
                 model.upstream_model = model.ep_id
             if group.provider_type not in {PROVIDER_RELAY, PROVIDER_PROXY}:
                 model.upstream_model = ""
+            # 模型名/ep_id 不得与所属连接组的自动路由模型名冲突，避免路由歧义
+            auto_name = self.router.group_auto_model_name(group)
+            if auto_name in {model.name, model.ep_id}:
+                self._send_json({"ok": False, "message": f"模型名/ep_id 与连接组自动路由模型名 '{auto_name}' 冲突"}, status=400)
+                return
             self.store.upsert_model(model)
             if group.provider_type in {PROVIDER_RELAY, PROVIDER_PROXY}:
                 group.upstream_models = []
@@ -2624,35 +2651,138 @@ class RouterHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/models/batch":
             payload = self._read_json()
             group_id = str(payload.get("group_id") or "")
-            raw_text = str(payload.get("text") or "")
-            if not group_id or not self.store.find_group(group_id):
+            group = self.store.find_group(group_id)
+            if not group_id or not group:
                 self._send_text("group not found", status=400)
                 return
-            added = 0
-            for line in raw_text.splitlines():
-                item = line.strip()
-                if not item:
-                    continue
-                if "," in item:
-                    name, ep_id = [part.strip() for part in item.split(",", 1)]
+            raw_text = str(payload.get("text") or "")
+            fmt = str(payload.get("format") or "lines").strip().lower()
+            defaults = payload.get("defaults") or {}
+            preview = bool(payload.get("preview", False))
+
+            def _parse_batch_items(text: str, fmt: str) -> List[Dict[str, Any]]:
+                items: List[Dict[str, Any]] = []
+                if fmt == "json":
+                    arr = json.loads(text)
+                    if not isinstance(arr, list):
+                        raise ValueError("JSON 格式必须是数组")
+                    for entry in arr:
+                        if isinstance(entry, dict):
+                            items.append(entry)
+                        elif isinstance(entry, str):
+                            items.append({"ep_id": entry.strip()})
+                elif fmt == "models_response":
+                    obj = json.loads(text)
+                    data = obj.get("data") if isinstance(obj, dict) else None
+                    if not isinstance(data, list):
+                        raise ValueError("/v1/models 响应必须包含 data 数组")
+                    for entry in data:
+                        if isinstance(entry, dict):
+                            items.append({"ep_id": str(entry.get("id") or "").strip()})
+                        elif isinstance(entry, str):
+                            items.append({"ep_id": entry.strip()})
                 else:
-                    name = item
-                    ep_id = item
+                    # lines 格式：每行一个模型名，空行跳过
+                    for line in text.splitlines():
+                        ep = line.strip()
+                        if ep:
+                            items.append({"ep_id": ep})
+                return items
+
+            try:
+                raw_items = _parse_batch_items(raw_text, fmt)
+            except Exception as err:
+                self._send_json({"ok": False, "message": f"解析失败：{err}"}, status=400)
+                return
+
+            existing_ep_ids = {m.ep_id for m in self.store.models if m.group_id == group_id}
+            existing_names = {m.name for m in self.store.models if m.group_id == group_id}
+            is_relay = group.provider_type == PROVIDER_RELAY
+            is_proxy = group.provider_type == PROVIDER_PROXY
+            need_upstream = is_relay or is_proxy
+
+            processed: List[Dict[str, Any]] = []
+            seen_ep_ids: set[str] = set()
+            seen_names: set[str] = set()
+            for item in raw_items:
+                ep_id = str(item.get("ep_id") or item.get("upstream_model") or "").strip()
                 if not ep_id:
                     continue
-                group = self.store.find_group(group_id)
+                name = str(item.get("name") or "").strip() or ep_id
+                upstream_model = str(item.get("upstream_model") or "").strip() or ep_id
+                # 单个模型字段 > 批量统一字段 > 默认值
+                api_key = str(item.get("api_key") if item.get("api_key") is not None else defaults.get("api_key") or "").strip()
+                price_group = str(item.get("price_group") if item.get("price_group") is not None else defaults.get("price_group") or "").strip()
+                usable = item.get("usable") if isinstance(item.get("usable"), bool) else bool(defaults.get("usable", True))
+                price_input = float(item.get("price_input") if item.get("price_input") is not None else defaults.get("price_input") or 0)
+                price_output = float(item.get("price_output") if item.get("price_output") is not None else defaults.get("price_output") or 0)
+
+                status = "new"
+                if ep_id in existing_ep_ids or name in existing_names or ep_id in seen_ep_ids or name in seen_names:
+                    status = "duplicate"
+                elif need_upstream and not upstream_model:
+                    status = "invalid"
+                elif not name:
+                    status = "invalid"
+
+                seen_ep_ids.add(ep_id)
+                seen_names.add(name)
+                processed.append({
+                    "name": name,
+                    "ep_id": ep_id,
+                    "upstream_model": upstream_model if need_upstream else "",
+                    "api_key": api_key if is_relay else "",
+                    "has_api_key": bool(api_key) if is_relay else False,
+                    "price_group": price_group if is_relay else "",
+                    "price_input": price_input,
+                    "price_output": price_output,
+                    "usable": usable,
+                    "status": status,
+                })
+
+            total = len(processed)
+            new_count = sum(1 for p in processed if p["status"] == "new")
+            duplicate_count = sum(1 for p in processed if p["status"] == "duplicate")
+            invalid_count = sum(1 for p in processed if p["status"] == "invalid")
+
+            if preview:
+                self._send_json({
+                    "ok": True,
+                    "preview": True,
+                    "summary": {
+                        "total": total,
+                        "new": new_count,
+                        "duplicate": duplicate_count,
+                        "invalid": invalid_count,
+                    },
+                    "items": processed,
+                })
+                return
+
+            if invalid_count > 0:
+                self._send_json({"ok": False, "message": f"存在 {invalid_count} 条无效记录，请修正后再导入"}, status=400)
+                return
+
+            added = 0
+            skipped = 0
+            for p in processed:
+                if p["status"] == "duplicate":
+                    skipped += 1
+                    continue
                 self.store.upsert_model(ModelConfig(
                     id=uuid.uuid4().hex,
-                    name=name or ep_id,
-                    ep_id=ep_id,
+                    name=p["name"],
+                    ep_id=p["ep_id"],
                     group_id=group_id,
-                    upstream_model=ep_id,
-                    api_key=str(payload.get("api_key") or "") if group and group.provider_type == PROVIDER_RELAY else "",
-                    price_group=str(payload.get("price_group") or "") if group and group.provider_type == PROVIDER_RELAY else "",
-                    usable=True,
+                    upstream_model=p["upstream_model"],
+                    api_key=p["api_key"],
+                    price_group=p["price_group"],
+                    price_input=p["price_input"],
+                    price_output=p["price_output"],
+                    usable=p["usable"],
                 ))
                 added += 1
-            self._send_json({"ok": True, "added": added})
+            self._send_json({"ok": True, "added": added, "skipped": skipped})
             return
         if parsed.path == "/api/models/fetch-upstream":
             payload = self._read_json()

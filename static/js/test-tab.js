@@ -111,11 +111,11 @@ const TestTab = {
     const groupId = document.getElementById('test-group')?.value;
     const group = Store.getGroup(groupId);
     const models = group ? Store.getModelsByGroup(group.id) : [];
-    const autoName = Store.state.auto_model_name || 'lin-router-auto';
+    const autoName = group?.auto_model_name || Store.state.auto_model_name || 'lin-router-auto';
     const selected = document.getElementById('test-model')?.value;
 
     const html = [
-      `<option value="${autoName}">${autoName} - 自动调度</option>`,
+      `<option value="${Utils.escapeHtml(autoName)}">${Utils.escapeHtml(autoName)} - 自动调度</option>`,
       ...models.map(m => `<option value="${Utils.escapeHtml(m.name)}" ${m.name === selected ? 'selected' : ''}>${Utils.escapeHtml(this.modelLabel(m))}</option>`)
     ].join('');
 
@@ -178,7 +178,7 @@ const TestTab = {
     btn.textContent = '发送中...';
     try {
       const payload = JSON.parse(bodyText);
-      const autoName = Store.state.auto_model_name || 'lin-router-auto';
+      const autoName = group?.auto_model_name || Store.state.auto_model_name || 'lin-router-auto';
       if (selectedModel && selectedModel !== autoName) payload.model = selectedModel;
 
       const startedAt = performance.now();

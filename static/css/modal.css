@@ -23,6 +23,14 @@
   overflow: hidden;
 }
 
+.modal-dialog.modal-wide {
+  max-width: 960px;
+}
+
+.modal-dialog.modal-wide .modal-body {
+  padding: 16px 20px;
+}
+
 .modal-header {
   display: flex;
   align-items: center;

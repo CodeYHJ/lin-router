@@ -9,7 +9,7 @@ const Modal = {
    * @param {string} [options.confirmClass='btn-primary']
    * @returns {Promise<boolean>} 点击确定返回 true，取消/关闭返回 false
    */
-  confirm({ title = '确认', message = '', cancelText = '取消', confirmText = '确定', confirmClass = 'btn-primary' }) {
+  confirm({ title = '确认', message = '', cancelText = '取消', confirmText = '确定', confirmClass = 'btn-primary', allowHtml = false, disableConfirm = false, wide = false }) {
     return new Promise(resolve => {
       let overlay = document.getElementById('modal-overlay');
       if (!overlay) {
@@ -19,16 +19,18 @@ const Modal = {
         document.body.appendChild(overlay);
       }
 
+      const bodyHtml = allowHtml ? message : Utils.escapeHtml(message);
+      const dialogClass = wide ? 'modal-dialog modal-wide' : 'modal-dialog';
       overlay.innerHTML = `
-        <div class="modal-dialog">
+        <div class="${dialogClass}">
           <div class="modal-header">
             <h3>${Utils.escapeHtml(title)}</h3>
             <button type="button" class="modal-close" data-action="cancel">×</button>
           </div>
-          <div class="modal-body">${message}</div>
+          <div class="modal-body">${bodyHtml}</div>
           <div class="modal-footer">
             <button type="button" class="btn-secondary" data-action="cancel">${Utils.escapeHtml(cancelText)}</button>
-            <button type="button" class="${confirmClass}" data-action="confirm">${Utils.escapeHtml(confirmText)}</button>
+            <button type="button" class="${confirmClass}" data-action="confirm" ${disableConfirm ? 'disabled' : ''}>${Utils.escapeHtml(confirmText)}</button>
           </div>
         </div>
       `;

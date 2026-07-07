@@ -12,7 +12,14 @@ const ConfigTab = {
   render() {
     const panel = document.getElementById('panel-config');
     const sel = Store.selected;
-    // 重新渲染前保留用户正在编辑的表单值，避免自动刷新导致输入丢失
+    // 清理 pending 的自动保存，避免切换后旧表单的自动保存误写新对象
+    clearTimeout(this._autoSaveTimer);
+    this._autoSaveTimer = null;
+    this.setSaveStatus('');
+    // 重新渲染前保留用户正在编辑的表单值，但只在“同一对象重渲染”时恢复，切换对象不恢复旧值
+    const oldForm = panel?.querySelector('.config-form');
+    const oldSelectedType = oldForm?.dataset.selectedType;
+    const oldSelectedId = oldForm?.dataset.selectedId;
     const formValues = this._captureFormValues();
     this._stopCooldownTimer();
     if (!sel.id) {
@@ -30,14 +37,15 @@ const ConfigTab = {
       </div>
       <div class="config-layout">
         <div class="config-main">
-          ${sel.type === 'group' || sel.type === null ? this.renderGroupSection() : this.renderModelSection()}
+          ${sel.type === 'group' || sel.type === null ? this.renderGroupSection(sel) : this.renderModelSection(sel)}
         </div>
         <div class="config-side">
           ${sel.type === 'group' || sel.type === null ? this.renderGroupSide() : ''}
         </div>
       </div>
     `;
-    this._restoreFormValues(formValues);
+    const sameSelection = oldSelectedType === sel.type && oldSelectedId === sel.id;
+    this._restoreFormValues(sameSelection ? formValues : {});
     this.attachEvents(panel);
     this.syncUIFromState();
     this._startCooldownTimer();
@@ -69,12 +77,11 @@ const ConfigTab = {
     });
   },
 
-  renderGroupSection() {
-    const sel = Store.selected;
+  renderGroupSection(sel = Store.selected) {
     const g = sel.type === 'group' ? Store.getGroup(sel.id) : null;
     const provider = g?.provider_type || 'ark';
     return `
-      <form class="config-form" id="group-form" data-type="group">
+      <form class="config-form" id="group-form" data-type="group" data-selected-type="group" data-selected-id="${g?.id || ''}">
         <input type="hidden" id="group-id" value="${g?.id || ''}">
         <section class="form-card">
           <h3>基础配置</h3>
@@ -138,6 +145,11 @@ const ConfigTab = {
             </div>
           </div>
           <div class="form-row">
+            <label>自动路由模型名</label>
+            <input id="group-auto-model-name" value="${Utils.escapeHtml(g?.auto_model_name || '')}" placeholder="lin-router-auto">
+            <div class="form-hint">客户端 /v1/models 中显示的自动路由模型 ID；留空则使用 lin-router-auto。</div>
+          </div>
+          <div class="form-row">
             <label>模式说明</label>
             <div class="form-hint" id="group-mode-hint"></div>
           </div>
@@ -155,8 +167,7 @@ const ConfigTab = {
     `;
   },
 
-  renderModelSection() {
-    const sel = Store.selected;
+  renderModelSection(sel = Store.selected) {
     const m = sel.type === 'model' ? Store.getModel(sel.id) : null;
     const groupId = m?.group_id || Store.state.groups?.[0]?.id || '';
     const group = Store.getGroup(groupId);
@@ -165,7 +176,7 @@ const ConfigTab = {
     const isProxy = group?.provider_type === 'proxy';
     const needUpstream = isRelay || isProxy;
     return `
-      <form class="config-form" id="model-form" data-type="model">
+      <form class="config-form" id="model-form" data-type="model" data-selected-type="model" data-selected-id="${m?.id || ''}">
         <input type="hidden" id="model-id" value="${m?.id || ''}">
         <div class="form-row model-group-meta">
           <label>连接组</label>
@@ -260,23 +271,85 @@ const ConfigTab = {
   },
 
   renderBatchImport() {
+    const sel = Store.selected;
+    const group = sel.type === 'group' ? Store.getGroup(sel.id) : null;
+    const provider = group?.provider_type || 'ark';
+    const isRelay = provider === 'relay';
     return `
       <section class="form-card batch-import-card">
-        <h3>批量添加模型</h3>
-        <button type="button" id="group-add-model" class="btn-primary batch-add-model-btn">+ 添加模型</button>
-        <div class="form-row batch-models-row">
-          <label>模型列表</label>
-          <textarea id="batch-models" rows="6" placeholder='粘贴模型JSON数组，格式示例：[{&quot;name&quot;:&quot;模型名&quot;,&quot;ep_id&quot;:&quot;端点ID&quot;}]'></textarea>
+        <div class="batch-import-header">
+          <h3>批量添加模型</h3>
+          <button type="button" id="group-add-model" class="btn-secondary batch-add-one-btn" title="添加单个模型">+ 单个添加</button>
         </div>
-        <details class="batch-example">
-          <summary>查看格式示例</summary>
-          <pre>[\n  {&quot;name&quot;: &quot;DeepSeek-V3&quot;, &quot;ep_id&quot;: &quot;deepseek-chat&quot;},\n  {&quot;name&quot;: &quot;GPT-4o&quot;, &quot;ep_id&quot;: &quot;gpt-4o&quot;}\n]</pre>
-        </details>
-        <div class="form-actions" style="justify-content:flex-end">
-          <button type="button" id="batch-import" class="btn-primary">批量导入</button>
+        <div class="batch-import-body">
+          <div class="batch-import-main">
+            <div class="batch-models-field">
+              <label for="batch-models">模型列表</label>
+              <textarea id="batch-models" class="batch-models-textarea" placeholder="${Utils.escapeHtml(this._batchPlaceholder(provider))}"></textarea>
+            </div>
+            <details class="batch-example">
+              <summary>查看格式示例</summary>
+              <pre>${this._batchExample(provider)}</pre>
+            </details>
+          </div>
+          <div class="batch-import-options">
+            <div class="batch-option-grid">
+              <div class="batch-option">
+                <label for="batch-format" title="导入格式">导入格式</label>
+                <select id="batch-format">
+                  <option value="lines">每行一个模型名</option>
+                  <option value="json">JSON 数组</option>
+                  <option value="models_response">/v1/models 响应</option>
+                </select>
+              </div>
+              <div class="batch-option batch-option-checkbox">
+                <label class="checkbox" title="导入后默认可用">
+                  <input id="batch-usable" type="checkbox" checked>
+                  <span>导入后默认可用</span>
+                </label>
+              </div>
+              ${isRelay ? `
+              <div class="batch-option">
+                <label for="batch-api-key" title="批量 API Key">批量 API Key</label>
+                <input id="batch-api-key" type="password" placeholder="sk-xxxx">
+              </div>
+              <div class="batch-option">
+                <label for="batch-price-group" title="批量价格分组">批量价格分组</label>
+                <input id="batch-price-group" placeholder="cheap / standard">
+              </div>
+              ` : ''}
+              <div class="batch-option">
+                <label for="batch-price-input" title="输入单价（元 / 千 Token）">输入单价（元 / 千 Token）</label>
+                <input id="batch-price-input" type="number" step="0.0001" min="0" placeholder="可选">
+              </div>
+              <div class="batch-option">
+                <label for="batch-price-output" title="输出单价（元 / 千 Token）">输出单价（元 / 千 Token）</label>
+                <input id="batch-price-output" type="number" step="0.0001" min="0" placeholder="可选">
+              </div>
+            </div>
+            <div class="batch-import-actions">
+              <button type="button" id="batch-import" class="btn-primary">预览导入</button>
+            </div>
+          </div>
         </div>
       </section>
     `;
+  },
+
+  _batchPlaceholder(provider) {
+    if (provider === 'ark') return '每行一个 EP ID\\nep-xxxx\\nep-yyyy';
+    if (provider === 'relay') return '每行一个上游模型名\\ngpt-5.5\\nclaude-4';
+    return '每行一个模型名\\ngpt-4.1\\nclaude-opus-4';
+  },
+
+  _batchExample(provider) {
+    if (provider === 'ark') {
+      return '[\n  {&quot;name&quot;: &quot;豆包-pro&quot;, &quot;ep_id&quot;: &quot;ep-xxx&quot;, &quot;price_input&quot;: 0, &quot;price_output&quot;: 0, &quot;usable&quot;: true}\n]';
+    }
+    if (provider === 'relay') {
+      return '[\n  {&quot;name&quot;: &quot;福利组&quot;, &quot;upstream_model&quot;: &quot;gpt-5.5&quot;, &quot;ep_id&quot;: &quot;gpt-5.5&quot;, &quot;api_key&quot;: &quot;sk-xxxx&quot;, &quot;price_group&quot;: &quot;0.065&quot;, &quot;usable&quot;: true}\n]';
+    }
+    return '[\n  {&quot;name&quot;: &quot;gpt-4.1&quot;, &quot;upstream_model&quot;: &quot;gpt-4.1&quot;, &quot;ep_id&quot;: &quot;gpt-4.1&quot;, &quot;usable&quot;: true}\n]';
   },
 
   renderConfigTools() {
@@ -639,15 +712,21 @@ const ConfigTab = {
 
   async onGroupSubmit(e) {
     e.preventDefault();
+    const id = document.getElementById('group-id').value;
+    if (Store.selected.type !== 'group' || Store.selected.id !== id) {
+      Toast.error('当前连接组表单状态已过期，请重新选择后再保存');
+      this.render();
+      return;
+    }
     const mode = document.getElementById('group-provider').value;
     const key = document.getElementById('group-key').value.trim();
-    const id = document.getElementById('group-id').value;
     const payload = {
       name: document.getElementById('group-name').value.trim(),
       provider_type: mode,
       base_url: document.getElementById('group-base').value.trim() || undefined,
       ark_api_key: mode === 'ark' ? key : '',
       api_key: mode === 'proxy' ? key : '',
+      auto_model_name: document.getElementById('group-auto-model-name').value.trim(),
       auto_model_cooldown_minutes: Number(document.getElementById('group-cooldown').value || 0),
       stream_idle_timeout: Math.max(0, Math.min(600, Number(document.getElementById('group-stream-timeout').value || 0))),
       waf_compatible: mode === 'relay' ? document.getElementById('group-waf').checked : false,
@@ -716,11 +795,16 @@ const ConfigTab = {
 
   async onModelSubmit(e) {
     e.preventDefault();
+    const id = document.getElementById('model-id').value;
+    if (Store.selected.type !== 'model' || Store.selected.id !== id) {
+      Toast.error('当前模型表单状态已过期，请重新选择后再保存');
+      this.render();
+      return;
+    }
     const groupId = document.getElementById('model-group').value;
     const group = Store.getGroup(groupId);
     const useUpstream = ['relay', 'proxy'].includes(group?.provider_type);
     const upstream = useUpstream ? document.getElementById('model-upstream').value.trim() : document.getElementById('model-ep').value.trim();
-    const id = document.getElementById('model-id').value;
     const payload = {
       name: document.getElementById('model-name').value.trim(),
       ep_id: upstream || document.getElementById('model-ep')?.value?.trim(),
@@ -816,30 +900,90 @@ const ConfigTab = {
       Toast.warning('请先选择一个连接组');
       return;
     }
-    // 优先尝试 JSON 数组格式
-    let text = raw;
-    try {
-      const arr = JSON.parse(raw);
-      if (!Array.isArray(arr)) throw new Error('must be array');
-      text = arr.map(item => `${item.name || item.ep_id || ''},${item.ep_id || item.name || ''}`).join('\n');
-    } catch (jsonErr) {
-      // 不是 JSON 数组则按原有 CSV 格式处理，后续后端也做基础校验
-      if (raw.startsWith('[') || raw.startsWith('{')) {
-        Toast.error('格式错误，请检查 JSON 格式是否正确，参考示例');
-        return;
-      }
+    const group = Store.getGroup(groupId);
+    const format = document.getElementById('batch-format')?.value || 'lines';
+    const defaults = {
+      usable: document.getElementById('batch-usable')?.checked ?? true,
+      price_input: Number(document.getElementById('batch-price-input')?.value || 0) || undefined,
+      price_output: Number(document.getElementById('batch-price-output')?.value || 0) || undefined,
+    };
+    if (group?.provider_type === 'relay') {
+      defaults.api_key = document.getElementById('batch-api-key')?.value?.trim() || undefined;
+      defaults.price_group = document.getElementById('batch-price-group')?.value?.trim() || undefined;
     }
+    // 先请求预览
+    let preview;
     try {
-      await API.req('/api/models/batch', {
+      preview = await API.req('/api/models/batch', {
         method: 'POST',
-        body: JSON.stringify({ group_id: groupId, text })
+        body: JSON.stringify({ group_id: groupId, text: raw, format, defaults, preview: true })
+      });
+    } catch (err) {
+      Toast.error('预览失败：' + err.message);
+      return;
+    }
+    if (!preview.ok) {
+      Toast.error('预览失败：' + (preview.message || '未知错误'));
+      return;
+    }
+    // 展示预览并等待确认
+    const confirmed = await this._showBatchPreview(preview, group);
+    if (!confirmed) return;
+    // 确认导入
+    try {
+      const result = await API.req('/api/models/batch', {
+        method: 'POST',
+        body: JSON.stringify({ group_id: groupId, text: raw, format, defaults, preview: false })
       });
       document.getElementById('batch-models').value = '';
       await Store.load();
-      Toast.success('批量导入完成');
+      Toast.success(`批量导入完成：新增 ${result.added || 0} 个，跳过 ${result.skipped || 0} 个`);
     } catch (err) {
       Toast.error('导入失败：' + err.message);
     }
+  },
+
+  _showBatchPreview(preview, group) {
+    const { summary, items } = preview;
+    const statusMap = {
+      new: '<span class="batch-status batch-status-new">新增</span>',
+      duplicate: '<span class="batch-status batch-status-dup">重复</span>',
+      invalid: '<span class="batch-status batch-status-invalid">无效</span>',
+    };
+    const isRelay = group?.provider_type === 'relay';
+    const rows = items.map(item => `
+      <tr>
+        <td class="wrap-cell" title="${Utils.escapeHtml(item.name)}">${Utils.escapeHtml(item.name)}</td>
+        <td class="wrap-cell" title="${Utils.escapeHtml(item.ep_id)}">${Utils.escapeHtml(item.ep_id)}</td>
+        ${isRelay ? `
+          <td class="wrap-cell" title="${Utils.escapeHtml(item.upstream_model)}">${Utils.escapeHtml(item.upstream_model)}</td>
+          <td>${item.has_api_key ? '已填' : '-'}</td>
+          <td class="wrap-cell" title="${Utils.escapeHtml(item.price_group || '')}">${Utils.escapeHtml(item.price_group || '-')}</td>
+        ` : ''}
+        <td>${statusMap[item.status] || item.status}</td>
+      </tr>
+    `).join('');
+    const header = isRelay
+      ? '<tr><th>名称</th><th>上游模型/EP</th><th>中转模型</th><th>API Key</th><th>价格组</th><th>状态</th></tr>'
+      : '<tr><th>名称</th><th>上游模型/EP</th><th>状态</th></tr>';
+    const summaryText = `将导入 ${summary.total} 个模型：新增 ${summary.new}，跳过重复 ${summary.duplicate}，无效 ${summary.invalid}。`;
+    const tableClass = isRelay ? 'batch-preview-table relay-preview-table' : 'batch-preview-table';
+    const body = `
+      <div class="batch-preview-summary">${summaryText}</div>
+      <div class="batch-preview-table-wrap">
+        <table class="${tableClass}">${header}${rows}</table>
+      </div>
+    `;
+    return Modal.confirm({
+      title: '导入预览',
+      message: body,
+      confirmText: summary.invalid > 0 ? '存在无效记录' : '确认导入',
+      confirmClass: summary.invalid > 0 ? 'btn-secondary' : 'btn-primary',
+      cancelText: '取消',
+      allowHtml: true,
+      disableConfirm: summary.invalid > 0 || summary.total === 0,
+      wide: true,
+    });
   },
 
   async onConfigImport(e) {
