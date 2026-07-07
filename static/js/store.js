@@ -32,9 +32,11 @@ const Store = {
     if (!this.selected.id) return;
     const groups = this.state.groups || [];
     const models = this.state.models || [];
-    const exists = this.selected.type === 'group'
-      ? groups.find(g => g.id === this.selected.id)
-      : models.find(m => m.id === this.selected.id);
+    const aggregates = this.state.aggregate_models || [];
+    let exists = false;
+    if (this.selected.type === 'group') exists = groups.find(g => g.id === this.selected.id);
+    else if (this.selected.type === 'model') exists = models.find(m => m.id === this.selected.id);
+    else if (this.selected.type === 'aggregate') exists = aggregates.find(a => a.id === this.selected.id);
     if (!exists) {
       this.selected = { type: 'group', id: null };
     }
@@ -55,6 +57,16 @@ const Store = {
 
   getModelsByGroup(groupId) {
     return (this.state.models || []).filter(m => m.group_id === groupId);
+  },
+
+  getAggregate(id) {
+    return (this.state.aggregate_models || []).find(a => a.id === id);
+  },
+
+  getAggregateMembers(aggregateId) {
+    return (this.state.aggregate_members || [])
+      .filter(m => m.aggregate_id === aggregateId)
+      .sort((a, b) => (a.priority || 0) - (b.priority || 0));
   },
 
   update(patch) {

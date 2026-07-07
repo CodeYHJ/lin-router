@@ -27,8 +27,8 @@ const ConfigTab = {
       this.attachEmptyEvents(panel);
       return;
     }
-    const item = sel.type === 'group' ? Store.getGroup(sel.id) : Store.getModel(sel.id);
-    const title = item ? Utils.escapeHtml(item.name) : (sel.type === 'group' ? '新建连接组' : '新建模型');
+    const item = sel.type === 'group' ? Store.getGroup(sel.id) : (sel.type === 'model' ? Store.getModel(sel.id) : Store.getAggregate(sel.id));
+    const title = item ? Utils.escapeHtml(item.display_name || item.name) : (sel.type === 'group' ? '新建连接组' : (sel.type === 'model' ? '新建模型' : '新建聚合模型'));
 
     panel.innerHTML = `
       <div class="config-header">
@@ -37,7 +37,7 @@ const ConfigTab = {
       </div>
       <div class="config-layout">
         <div class="config-main">
-          ${sel.type === 'group' || sel.type === null ? this.renderGroupSection(sel) : this.renderModelSection(sel)}
+          ${sel.type === 'aggregate' ? this.renderAggregateSection(sel) : (sel.type === 'group' || sel.type === null ? this.renderGroupSection(sel) : this.renderModelSection(sel))}
         </div>
         <div class="config-side">
           ${sel.type === 'group' || sel.type === null ? this.renderGroupSide() : ''}
@@ -263,6 +263,122 @@ const ConfigTab = {
     `;
   },
 
+  renderAggregateSection(sel = Store.selected) {
+    const a = sel.type === 'aggregate' ? Store.getAggregate(sel.id) : null;
+    const isDefault = a?.is_default_global;
+    return `
+      <form class="config-form" id="aggregate-form" data-type="aggregate" data-selected-type="aggregate" data-selected-id="${a?.id || ''}">
+        <input type="hidden" id="aggregate-id" value="${a?.id || ''}">
+        <section class="form-card">
+          <h3>基础配置</h3>
+          <div class="form-row">
+            <label>模型名<span class="required-mark"> *</span></label>
+            <input id="aggregate-name" value="${Utils.escapeHtml(a?.name || '')}" placeholder="对外暴露的 model id，如 lin-router-gpt-5.5">
+          </div>
+          <div class="form-row">
+            <label>显示名</label>
+            <input id="aggregate-display-name" value="${Utils.escapeHtml(a?.display_name || '')}" placeholder="可选，用于界面展示">
+          </div>
+          <div class="form-row">
+            <label>描述</label>
+            <textarea id="aggregate-description" rows="2" placeholder="可选">${Utils.escapeHtml(a?.description || '')}</textarea>
+          </div>
+          <div class="form-row">
+            <label class="checkbox">
+              <input id="aggregate-enabled" type="checkbox" ${a?.enabled !== false ? 'checked' : ''}>
+              <span>启用</span>
+            </label>
+          </div>
+          <div class="form-row">
+            <label class="checkbox" title="设为默认全局聚合模型后，global key 请求 all-router-auto 将映射到该模型">
+              <input id="aggregate-is-default-global" type="checkbox" ${isDefault ? 'checked' : ''}>
+              <span>默认全局聚合模型（承接 all-router-auto）</span>
+            </label>
+          </div>
+          <div class="form-row">
+            <label>冷却分钟</label>
+            <input id="aggregate-cooldown" type="number" min="0" step="1" value="${a?.cooldown_minutes ?? 5}">
+          </div>
+          <div class="form-row">
+            <label>调度策略</label>
+            <input id="aggregate-strategy" value="priority" readonly title="MVP 仅支持手动优先级排序">
+          </div>
+          <div class="form-actions form-actions-split">
+            <div class="form-actions-left">
+              <button type="submit" class="btn-primary">保存聚合模型</button>
+            </div>
+            <div class="form-actions-right">
+              ${a ? `<button type="button" id="aggregate-delete" class="btn-danger">删除</button>` : ''}
+            </div>
+          </div>
+        </section>
+        ${a ? this.renderAggregateMembers(a) : ''}
+      </form>
+    `;
+  },
+
+  renderAggregateMembers(a) {
+    const members = Store.getAggregateMembers(a.id);
+    return `
+      <section class="form-card aggregate-members-card">
+        <div class="aggregate-members-header">
+          <h3>聚合成员</h3>
+          <button type="button" id="aggregate-add-member" class="btn-secondary btn-sm">+ 添加成员</button>
+        </div>
+        ${members.length ? `
+        <div class="aggregate-members-table-wrap">
+          <table class="aggregate-members-table">
+            <thead>
+              <tr>
+                <th>顺序</th>
+                <th>启用</th>
+                <th>连接组</th>
+                <th>模型</th>
+                <th>上游模型</th>
+                <th>价格组</th>
+                <th>状态</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${members.map((m, idx) => this.renderAggregateMemberRow(m, idx, members.length)).join('')}
+            </tbody>
+          </table>
+        </div>
+        ` : '<div class="form-hint">暂无成员，点击右上角添加。</div>'}
+      </section>
+    `;
+  },
+
+  renderAggregateMemberRow(member, idx, total) {
+    const group = Store.getGroup(member.group_id);
+    const model = Store.getModel(member.model_id);
+    const status = this.aggregateMemberStatus(member);
+    return `
+      <tr data-member-id="${member.id}">
+        <td class="tiny">${idx + 1}</td>
+        <td><input type="checkbox" class="aggregate-member-enabled" data-member-id="${member.id}" ${member.enabled !== false ? 'checked' : ''}></td>
+        <td>${Utils.escapeHtml(group?.name || '-')}</td>
+        <td>${Utils.escapeHtml(model?.name || '-')}</td>
+        <td>${Utils.escapeHtml(model?.upstream_model || model?.ep_id || '-')}</td>
+        <td>${Utils.escapeHtml(model?.price_group || '-')}</td>
+        <td class="tiny"><span class="pill ${status.class}">${status.text}</span></td>
+        <td class="aggregate-member-actions">
+          <button type="button" class="btn-icon" data-action="up" data-member-id="${member.id}" ${idx === 0 ? 'disabled' : ''} title="上移">↑</button>
+          <button type="button" class="btn-icon" data-action="down" data-member-id="${member.id}" ${idx === total - 1 ? 'disabled' : ''} title="下移">↓</button>
+          <button type="button" class="btn-icon btn-danger" data-action="delete" data-member-id="${member.id}" title="删除">×</button>
+        </td>
+      </tr>
+    `;
+  },
+
+  aggregateMemberStatus(member) {
+    if (member.enabled === false) return { class: 'warning', text: '已禁用' };
+    if (member.cooldown_until && member.cooldown_until * 1000 > Date.now()) return { class: 'cooldown', text: '冷却中' };
+    if (member.last_error) return { class: 'warning', text: '最近错误' };
+    return { class: 'success', text: '可用' };
+  },
+
   renderGroupSide() {
     return `
       ${this.renderBatchImport()}
@@ -380,8 +496,18 @@ const ConfigTab = {
 
   syncUIFromState() {
     const sel = Store.selected;
-    if (sel.type === 'group' || sel.type === null) this.syncGroupModeUI();
+    if (sel.type === 'aggregate') this.syncAggregateUI();
+    else if (sel.type === 'group' || sel.type === null) this.syncGroupModeUI();
     else this.syncModelModeUI();
+  },
+
+  syncAggregateUI() {
+    // 聚合模型表单无需动态切换，定时刷新成员状态由 Store 订阅触发 re-render 完成
+    this.updateAggregateCooldownDisplay();
+  },
+
+  updateAggregateCooldownDisplay() {
+    // 可在成员表格中显示冷却倒计时，当前通过重新渲染实现
   },
 
   syncGroupModeUI() {
@@ -595,6 +721,21 @@ const ConfigTab = {
       panel.querySelector('#model-clone')?.addEventListener('click', () => this.onModelClone());
       panel.querySelector('#model-fetch')?.addEventListener('click', () => this.onFetchUpstream());
       this.bindAutoSave(modelForm, () => this.autoSaveModel());
+    }
+
+    // 聚合模型表单
+    const aggregateForm = panel.querySelector('#aggregate-form');
+    if (aggregateForm) {
+      aggregateForm.addEventListener('submit', e => this.onAggregateSubmit(e));
+      panel.querySelector('#aggregate-delete')?.addEventListener('click', () => this.onAggregateDelete());
+      panel.querySelector('#aggregate-add-member')?.addEventListener('click', () => this.onAddAggregateMember());
+      panel.querySelectorAll('.aggregate-member-enabled').forEach(el => {
+        el.addEventListener('change', () => this.onToggleAggregateMember(el.dataset.memberId, el.checked));
+      });
+      panel.querySelectorAll('.aggregate-member-actions button[data-action]').forEach(el => {
+        el.addEventListener('click', () => this.onAggregateMemberAction(el.dataset.action, el.dataset.memberId));
+      });
+      this.bindAutoSave(aggregateForm, () => this.autoSaveAggregate());
     }
 
     // 批量导入
@@ -857,6 +998,189 @@ const ConfigTab = {
       Toast.success('模型已复制');
     } catch (err) {
       Toast.error('复制失败：' + err.message);
+    }
+  },
+
+  autoSaveAggregate() {
+    const id = document.getElementById('aggregate-id')?.value;
+    if (!id) return; // 新建不自动保存
+    clearTimeout(this._autoSaveTimer);
+    this.setSaveStatus('saving');
+    this._autoSaveTimer = setTimeout(() => {
+      const form = document.getElementById('aggregate-form');
+      if (form) form.dispatchEvent(new Event('submit'));
+    }, 500);
+  },
+
+  async onAggregateSubmit(e) {
+    e.preventDefault();
+    const id = document.getElementById('aggregate-id').value;
+    if (Store.selected.type !== 'aggregate' || Store.selected.id !== id) {
+      Toast.error('当前聚合模型表单状态已过期，请重新选择后再保存');
+      this.render();
+      return;
+    }
+    const payload = {
+      name: document.getElementById('aggregate-name').value.trim(),
+      display_name: document.getElementById('aggregate-display-name').value.trim(),
+      description: document.getElementById('aggregate-description').value.trim(),
+      enabled: document.getElementById('aggregate-enabled').checked,
+      is_default_global: document.getElementById('aggregate-is-default-global').checked,
+      cooldown_minutes: Math.max(0, Number(document.getElementById('aggregate-cooldown').value || 0)),
+      strategy: 'priority',
+    };
+    try {
+      this.setSaveStatus('saving');
+      if (id) await API.saveAggregate(id, payload);
+      else await API.createAggregate(payload);
+      await Store.load();
+      this.setSaveStatus('saved');
+    } catch (err) {
+      this.setSaveStatus('error', '保存失败：' + err.message);
+      Toast.error('保存失败：' + err.message);
+    }
+  },
+
+  async onAggregateDelete() {
+    const id = document.getElementById('aggregate-id').value;
+    const aggregate = Store.getAggregate(id);
+    const ok = await Modal.confirm({
+      title: '删除聚合模型',
+      message: `确定删除聚合模型「${Utils.escapeHtml(aggregate?.display_name || aggregate?.name || id)}」吗？其下所有成员也会被删除，此操作不可恢复。`,
+      confirmText: '确定删除',
+      confirmClass: 'btn-danger'
+    });
+    if (!ok) return;
+    try {
+      await API.deleteAggregate(id);
+      await Store.load();
+      Toast.success('聚合模型已删除');
+    } catch (err) {
+      Toast.error('删除失败：' + err.message);
+    }
+  },
+
+  async onAddAggregateMember() {
+    const aggregateId = document.getElementById('aggregate-id')?.value;
+    if (!aggregateId) {
+      Toast.warning('请先保存聚合模型');
+      return;
+    }
+    const groups = (Store.state.groups || []).filter(g => g.provider_type === 'relay');
+    if (!groups.length) {
+      Toast.warning('请先创建 relay 中转站连接组');
+      return;
+    }
+    const groupOptions = groups.map(g => `<option value="${g.id}">${Utils.escapeHtml(g.name)}</option>`).join('');
+    const html = `
+      <div class="form-row">
+        <label>连接组</label>
+        <select id="member-group">${groupOptions}</select>
+      </div>
+      <div class="form-row">
+        <label>模型</label>
+        <select id="member-model"><option value="">请选择模型</option></select>
+      </div>
+      <div class="form-row">
+        <label>预览</label>
+        <div id="member-preview" class="form-hint">-</div>
+      </div>
+    `;
+    const updateModelOptions = (overlay) => {
+      const groupSelect = overlay.querySelector('#member-group');
+      const modelSelect = overlay.querySelector('#member-model');
+      const preview = overlay.querySelector('#member-preview');
+      if (!groupSelect || !modelSelect) return;
+      const refresh = () => {
+        const groupId = groupSelect.value;
+        const group = Store.getGroup(groupId);
+        if (!group || group.provider_type !== 'relay') {
+          modelSelect.innerHTML = '<option value="">请选择 relay 连接组</option>';
+          this._updateMemberPreview('', '', preview);
+          return;
+        }
+        const models = Store.getModelsByGroup(groupId).filter(m => m.usable !== false);
+        const existing = Store.getAggregateMembers(aggregateId).map(m => m.model_id);
+        modelSelect.innerHTML = '<option value="">请选择模型</option>' + models.map(m =>
+          `<option value="${m.id}" ${existing.includes(m.id) ? 'disabled' : ''}>${Utils.escapeHtml(m.name)}${m.upstream_model && m.upstream_model !== m.name ? ` (${Utils.escapeHtml(m.upstream_model)})` : ''}</option>`
+        ).join('');
+        this._updateMemberPreview(groupSelect.value, modelSelect.value, preview);
+      };
+      groupSelect.addEventListener('change', refresh);
+      modelSelect.addEventListener('change', () => this._updateMemberPreview(groupSelect.value, modelSelect.value, preview));
+      refresh();
+    };
+    const values = await Modal.form({
+      title: '添加聚合成员',
+      html,
+      onRender: updateModelOptions,
+      validate: (vals) => {
+        if (!vals['member-group']) return '请选择连接组';
+        if (!vals['member-model']) return '请选择模型';
+        return null;
+      }
+    });
+    if (!values) return;
+    try {
+      await API.createAggregateMember(aggregateId, { group_id: values['member-group'], model_id: values['member-model'] });
+      await Store.load();
+      Toast.success('成员已添加');
+    } catch (err) {
+      Toast.error('添加失败：' + err.message);
+    }
+  },
+
+  _updateMemberPreview(groupId, modelId, previewEl) {
+    if (!previewEl) return;
+    const group = Store.getGroup(groupId);
+    const model = Store.getModel(modelId);
+    if (!group || !model) {
+      previewEl.textContent = '-';
+      return;
+    }
+    const upstream = model.upstream_model || model.ep_id || model.name;
+    previewEl.innerHTML = Utils.escapeHtml(`${group.name} / ${model.name} → ${upstream}${model.price_group ? ' / 价格组 ' + model.price_group : ''}`);
+  },
+
+  onAggregateMemberAction(action, memberId) {
+    if (action === 'delete') return this.onDeleteAggregateMember(memberId);
+    if (['up', 'down', 'top', 'bottom'].includes(action)) return this.onMoveAggregateMember(memberId, action);
+  },
+
+  async onMoveAggregateMember(memberId, direction) {
+    try {
+      await API.saveAggregateMember(memberId, { direction });
+      await Store.load();
+    } catch (err) {
+      Toast.error('排序失败：' + err.message);
+    }
+  },
+
+  async onToggleAggregateMember(memberId, enabled) {
+    const member = Store.state.aggregate_members?.find(m => m.id === memberId);
+    if (!member) return;
+    try {
+      await API.saveAggregateMember(memberId, { enabled });
+      await Store.load();
+    } catch (err) {
+      Toast.error('状态更新失败：' + err.message);
+    }
+  },
+
+  async onDeleteAggregateMember(memberId) {
+    const ok = await Modal.confirm({
+      title: '删除成员',
+      message: '确定从聚合模型中移除该成员吗？',
+      confirmText: '确定删除',
+      confirmClass: 'btn-danger'
+    });
+    if (!ok) return;
+    try {
+      await API.deleteAggregateMember(memberId);
+      await Store.load();
+      Toast.success('成员已删除');
+    } catch (err) {
+      Toast.error('删除失败：' + err.message);
     }
   },
 

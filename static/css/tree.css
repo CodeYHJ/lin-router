@@ -60,6 +60,39 @@
 .tree-status.cooldown { background: var(--warning); }
 .tree-status.error { background: var(--danger); }
 
+.tree-aggregate-section {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.tree-section-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-tertiary);
+  padding: 4px 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.tree-aggregate {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  color: var(--text-primary);
+}
+
+.tree-aggregate:hover { background: var(--bg-hover); }
+.tree-aggregate.active { background: var(--bg-active); }
+
+.tree-badge-default {
+  background: var(--accent) !important;
+  color: #fff !important;
+}
+
 .tree-cooldown {
   font-size: 10px;
   padding: 1px 5px;

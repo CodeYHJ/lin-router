@@ -84,6 +84,13 @@ const API = {
   getSettings() { return this.req('/api/settings'); },
   saveSettings(data) { return this.req('/api/settings', { method: 'PUT', body: JSON.stringify(data) }); },
   exportConfig() { return this.req('/api/config/export'); },
+  getAggregates() { return this.req('/api/aggregates'); },
+  createAggregate(data) { return this.req('/api/aggregates', { method: 'POST', body: JSON.stringify(data) }); },
+  saveAggregate(id, data) { return this.req(`/api/aggregates/${id}`, { method: 'PUT', body: JSON.stringify(data) }); },
+  deleteAggregate(id) { return this.req(`/api/aggregates/${id}`, { method: 'DELETE' }); },
+  createAggregateMember(aggregateId, data) { return this.req(`/api/aggregates/${aggregateId}/members`, { method: 'POST', body: JSON.stringify(data) }); },
+  saveAggregateMember(id, data) { return this.req(`/api/aggregate-members/${id}`, { method: 'PUT', body: JSON.stringify(data) }); },
+  deleteAggregateMember(id) { return this.req(`/api/aggregate-members/${id}`, { method: 'DELETE' }); },
   importConfig(file) {
     const form = new FormData();
     form.append('file', file);

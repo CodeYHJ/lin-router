@@ -45,6 +45,7 @@ const App = {
       </div>
       <div class="topbar-right">
         <button class="icon-btn" id="btn-new-group" title="新建连接组">+</button>
+        <button class="icon-btn" id="btn-new-aggregate" title="新建聚合模型">⊕</button>
         <button class="icon-btn" id="btn-export" title="导出连接组配置">💾</button>
         <button class="icon-btn" id="btn-settings" title="设置">⚙</button>
         <button class="icon-btn" id="btn-theme" title="切换主题">🌓</button>
@@ -74,6 +75,7 @@ const App = {
     topbar.querySelector('#btn-theme').addEventListener('click', () => this.cycleTheme());
 
     topbar.querySelector('#btn-new-group').addEventListener('click', () => this.createGroup());
+    topbar.querySelector('#btn-new-aggregate').addEventListener('click', () => this.createAggregate());
     topbar.querySelector('#btn-export').addEventListener('click', () => this.exportConfig());
     topbar.querySelector('#btn-settings').addEventListener('click', () => this.openSettings());
   },
@@ -181,6 +183,18 @@ const App = {
       Store.select('group', data.group.id);
       Tabs.switch('config');
       Toast.success('已新建连接组，请直接编辑');
+    } catch (err) {
+      Toast.error('创建失败：' + err.message);
+    }
+  },
+
+  async createAggregate() {
+    try {
+      const data = await API.createAggregate({ name: '新聚合模型', display_name: '新聚合模型', enabled: true, cooldown_minutes: 5, strategy: 'priority' });
+      await Store.load();
+      Store.select('aggregate', data.aggregate_model.id);
+      Tabs.switch('config');
+      Toast.success('已新建聚合模型，请直接编辑');
     } catch (err) {
       Toast.error('创建失败：' + err.message);
     }

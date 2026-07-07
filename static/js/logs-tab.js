@@ -317,13 +317,15 @@ const LogsTab = {
         <div class="log-detail-raw">${this.formatJsonBlock(rawDetail)}</div>
       </div>
     ` : '';
-    const routeSteps = [
+    const isAggregate = parsed.resolved_as && parsed.resolved_as.startsWith('aggregate');
+    const routeSteps = isAggregate ? this.aggregateRouteSteps(parsed, item) : [
       parsed.requested ? Utils.escapeHtml(parsed.requested) : (item.model || 'lin-router-auto'),
       parsed.group_name ? Utils.escapeHtml(parsed.group_name) : Utils.escapeHtml(this.groupName(item)),
       parsed.model ? Utils.escapeHtml(parsed.model) : Utils.escapeHtml(item.model),
       parsed.upstream ? Utils.escapeHtml(parsed.upstream) : '-',
       parsed.channel ? Utils.escapeHtml(parsed.channel) : '-',
     ];
+    const aggregateChain = isAggregate ? this.renderAggregateChain(parsed) : '';
     return `
       ${rawBlock}
       <div class="log-detail-grid">
@@ -337,12 +339,13 @@ const LogsTab = {
           </dl>
         </div>
         <div class="log-detail-block">
-          <h4>路由路径</h4>
+          <h4>${isAggregate ? '聚合调度路径' : '路由路径'}</h4>
           <div class="log-route-path">${routeSteps.map((s, i) => i === 0 ? `<span>${s}</span>` : `<span class="arrow">→</span><span>${s}</span>`).join('')}</div>
+          ${isAggregate ? `<dl style="margin-top:10px;"><dt>selection_reason</dt><dd>${Utils.escapeHtml(parsed.selection_reason || '-')}</dd><dt>fallback_index</dt><dd>${Utils.escapeHtml(parsed.fallback_index || '0')}</dd></dl>` : `
           <dl style="margin-top:10px;">
             <dt>模式</dt><dd>${Utils.escapeHtml(parsed.provider || item.provider_type || '-')}</dd>
             <dt>Mode</dt><dd>${Utils.escapeHtml(parsed.mode || '-')}</dd>
-          </dl>
+          </dl>`}
         </div>
         <div class="log-detail-block">
           <h4>诊断信息</h4>
@@ -361,6 +364,7 @@ const LogsTab = {
           </dl>
         </div>
       </div>
+      ${aggregateChain}
       <details style="margin-top:10px;">
         <summary style="font-size:12px; color:var(--text-tertiary); cursor:pointer;">技术细节</summary>
         <div class="log-detail-grid" style="margin-top:8px;">
@@ -379,6 +383,49 @@ const LogsTab = {
           </div>
         </div>
       </details>
+    `;
+  },
+
+  aggregateRouteSteps(parsed, item) {
+    return [
+      Utils.escapeHtml(parsed.requested || item.model || 'lin-router-auto'),
+      `<span class="pill">${Utils.escapeHtml(parsed.resolved_as)}</span>`,
+      Utils.escapeHtml(parsed.aggregate_model || parsed.aggregate || item.model || '-'),
+      Utils.escapeHtml(parsed.selected_group || this.groupName(item)),
+      Utils.escapeHtml(parsed.selected_model || item.model || '-'),
+      Utils.escapeHtml(parsed.selected_upstream_model || parsed.upstream || '-'),
+    ];
+  },
+
+  renderAggregateChain(parsed) {
+    if (!parsed.fallback_chain) return '';
+    let chain;
+    try {
+      chain = JSON.parse(parsed.fallback_chain);
+    } catch (_) {
+      return '';
+    }
+    if (!Array.isArray(chain) || !chain.length) return '';
+    const rows = chain.map((step, idx) => `
+      <tr>
+        <td class="tiny">${idx + 1}</td>
+        <td>${Utils.escapeHtml(step.member_id || '-')}</td>
+        <td>${Utils.escapeHtml(step.group || '-')}</td>
+        <td>${Utils.escapeHtml(step.model || '-')}</td>
+        <td class="tiny">${Utils.escapeHtml(String(step.status || '-'))}</td>
+        <td>${Utils.escapeHtml(step.reason || '-')}</td>
+      </tr>
+    `).join('');
+    return `
+      <div class="log-detail-block" style="margin-top:10px;">
+        <h4>Fallback 链路</h4>
+        <div class="aggregate-members-table-wrap">
+          <table class="aggregate-members-table">
+            <thead><tr><th>顺序</th><th>成员 ID</th><th>连接组</th><th>模型</th><th>状态</th><th>原因</th></tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>
+      </div>
     `;
   },
 

@@ -54,9 +54,53 @@ const Tree = {
   buildTreeHtml() {
     const groups = Store.state.groups || [];
     const models = Store.state.models || [];
-    if (!groups.length) return '<div class="config-placeholder">暂无连接组，点击右上角 + 新建</div>';
+    const aggregates = Store.state.aggregate_models || [];
+    const aggregateMembers = Store.state.aggregate_members || [];
+    if (!groups.length && !aggregates.length) return '<div class="config-placeholder">暂无连接组，点击右上角 + 新建</div>';
 
-    return `<div class="tree-root">${groups.map(g => this.buildGroupHtml(g, models)).join('')}</div>`;
+    const groupsHtml = groups.map(g => this.buildGroupHtml(g, models)).join('');
+    const aggregatesHtml = aggregates.length ? this.buildAggregatesSection(aggregates, aggregateMembers) : '';
+    return `<div class="tree-root">${groupsHtml}${aggregatesHtml}</div>`;
+  },
+
+  buildAggregatesSection(aggregates, members) {
+    const filtered = this.search
+      ? aggregates.filter(a => a.name.toLowerCase().includes(this.search) || (a.display_name || '').toLowerCase().includes(this.search))
+      : aggregates;
+    if (this.search && !filtered.length) return '';
+    const itemsHtml = filtered.map(a => this.buildAggregateHtml(a, members)).join('');
+    return `
+      <div class="tree-aggregate-section">
+        <div class="tree-section-title">聚合模型</div>
+        ${itemsHtml}
+      </div>
+    `;
+  },
+
+  buildAggregateHtml(a, members) {
+    const status = this.aggregateStatus(a, members);
+    const active = Store.selected.type === 'aggregate' && Store.selected.id === a.id ? 'active' : '';
+    const memberCount = members.filter(m => m.aggregate_id === a.id).length;
+    const defaultBadge = a.is_default_global ? '<span class="tree-badge tree-badge-default">默认</span>' : '';
+    return `
+      <div class="tree-aggregate ${active}" data-type="aggregate" data-id="${a.id}" data-context="aggregate" title="${Utils.escapeHtml(a.description || '')}">
+        <span class="tree-status ${status}"></span>
+        <span class="tree-label">${this.highlight(Utils.escapeHtml(a.display_name || a.name))}</span>
+        ${defaultBadge}
+        <span class="tree-meta">${memberCount}成员</span>
+      </div>
+    `;
+  },
+
+  aggregateStatus(a, members) {
+    if (!a.enabled) return 'error';
+    const myMembers = members.filter(m => m.aggregate_id === a.id && m.enabled);
+    if (!myMembers.length) return 'error';
+    const now = Math.floor(Date.now() / 1000);
+    const available = myMembers.filter(m => !m.cooldown_until || m.cooldown_until <= now).length;
+    if (available === 0) return 'error';
+    if (available < myMembers.length) return 'warning';
+    return 'ok';
   },
 
   buildGroupHtml(g, models) {
@@ -254,7 +298,7 @@ const Tree = {
 
   showMenu(e, context, id) {
     const menu = document.getElementById('context-menu');
-    menu.innerHTML = context === 'group' ? this.groupMenuHtml(id) : this.modelMenuHtml(id);
+    menu.innerHTML = context === 'group' ? this.groupMenuHtml(id) : (context === 'aggregate' ? this.aggregateMenuHtml(id) : this.modelMenuHtml(id));
     menu.classList.remove('hidden');
     menu.style.left = `${Math.min(e.clientX, window.innerWidth - 180)}px`;
     menu.style.top = `${Math.min(e.clientY, window.innerHeight - 200)}px`;
@@ -264,6 +308,9 @@ const Tree = {
   showGlobalMenu(e) {
     const menu = document.getElementById('context-menu');
     menu.innerHTML = `
+      <div class="context-item" data-action="new-group">新建连接组</div>
+      <div class="context-item" data-action="new-aggregate">新建聚合模型</div>
+      <div class="context-separator"></div>
       <div class="context-item" data-action="expand-all">全部展开</div>
       <div class="context-item" data-action="collapse-all">全部折叠</div>
       <div class="context-separator"></div>
@@ -294,6 +341,15 @@ const Tree = {
       <div class="context-item" data-action="collapse-all" data-id="${id}">全部折叠</div>
       <div class="context-separator"></div>
       <div class="context-item danger" data-action="delete-group" data-id="${id}">删除组</div>
+    `;
+  },
+
+  aggregateMenuHtml(id) {
+    const a = Store.getAggregate(id);
+    return `
+      <div class="context-item" data-action="edit-aggregate" data-id="${id}">编辑</div>
+      <div class="context-separator"></div>
+      <div class="context-item danger" data-action="delete-aggregate" data-id="${id}">删除</div>
     `;
   },
 
@@ -338,6 +394,29 @@ const Tree = {
 
   async handleMenuAction(action, id, target) {
     switch (action) {
+      case 'new-group':
+        App.createGroup();
+        break;
+      case 'new-aggregate':
+        App.createAggregate();
+        break;
+      case 'edit-aggregate':
+        Store.select('aggregate', id);
+        Tabs.switch('config');
+        break;
+      case 'delete-aggregate': {
+        const a = Store.getAggregate(id);
+        const ok = await Modal.confirm({
+          title: '删除聚合模型',
+          message: `确定删除聚合模型「${Utils.escapeHtml(a?.display_name || a?.name || id)}」吗？其下所有成员也会被删除，此操作不可恢复。`,
+          confirmText: '确定删除',
+          confirmClass: 'btn-danger'
+        });
+        if (!ok) return;
+        try { await API.deleteAggregate(id); await Store.load(); Toast.success('聚合模型已删除'); }
+        catch (err) { Toast.error(err.message); }
+        break;
+      }
       case 'test':
         Store.select('group', id);
         Tabs.switch('test');

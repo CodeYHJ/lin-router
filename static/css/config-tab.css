@@ -578,3 +578,109 @@
     flex: 1 1 280px;
   }
 }
+
+/* 聚合模型成员表 */
+.aggregate-members-card {
+  padding: 16px;
+}
+
+.aggregate-members-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.aggregate-members-header h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.aggregate-members-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+}
+
+.aggregate-members-table {
+  width: 100%;
+  min-width: 560px;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.aggregate-members-table th,
+.aggregate-members-table td {
+  padding: 8px 10px;
+  text-align: left;
+  border-bottom: 1px solid var(--border-color);
+  vertical-align: middle;
+}
+
+.aggregate-members-table th {
+  background: var(--bg-secondary);
+  font-weight: 500;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.aggregate-members-table tr:last-child td {
+  border-bottom: none;
+}
+
+.aggregate-members-table td.tiny {
+  white-space: nowrap;
+}
+
+.aggregate-member-actions {
+  display: flex;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+.btn-sm {
+  padding: 5px 10px;
+  font-size: 12px;
+}
+
+.btn-icon {
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+}
+
+.btn-icon:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+.btn-icon:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.btn-icon.btn-danger {
+  color: var(--danger);
+  border-color: var(--danger);
+  background: #fff;
+}
+
+.btn-icon.btn-danger:hover:not(:disabled) {
+  background: #fff0f0;
+}
+
+.pill.cooldown {
+  background: rgba(234, 179, 8, 0.16);
+  color: #a16207;
+}
