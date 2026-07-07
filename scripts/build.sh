@@ -9,6 +9,7 @@ set -e
 
 TARGET=""
 BUILD_DMG=0
+COPY_TO_DESKTOP=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -20,9 +21,13 @@ while [[ $# -gt 0 ]]; do
       BUILD_DMG=1
       shift
       ;;
+    --desktop)
+      COPY_TO_DESKTOP=1
+      shift
+      ;;
     *)
       echo "未知选项：$1" >&2
-      echo "用法：$0 --target {win32|darwin} [--dmg]" >&2
+      echo "用法：$0 --target {win32|darwin} [--dmg] [--desktop]" >&2
       exit 1
       ;;
   esac
@@ -30,7 +35,7 @@ done
 
 if [[ -z "$TARGET" ]]; then
   echo "必须指定 --target {win32|darwin}" >&2
-  echo "用法：$0 --target {win32|darwin} [--dmg]" >&2
+  echo "用法：$0 --target {win32|darwin} [--dmg] [--desktop]" >&2
   exit 1
 fi
 
@@ -40,6 +45,23 @@ DIST_DIR="$PROJECT_ROOT/dist"
 
 generate_icon() {
   python "$PROJECT_ROOT/scripts/generate_icon.py" "$1" "$2"
+}
+
+copy_to_desktop() {
+  local src="$1"
+  local name="$(basename "$src")"
+  local desktop
+  desktop="$(python -c 'from pathlib import Path; print(Path.home() / "Desktop")')"
+  if [[ ! -d "$desktop" ]]; then
+    echo "桌面目录不存在：$desktop" >&2
+    return 1
+  fi
+  local dest="$desktop/$name"
+  if [[ -e "$dest" ]]; then
+    rm -rf "$dest"
+  fi
+  cp -R "$src" "$dest"
+  echo "已复制到桌面：$dest"
 }
 
 case "$TARGET" in
@@ -54,6 +76,9 @@ case "$TARGET" in
     rm -f "$DIST_DIR/LinRouter_windows.exe"
     mv "$DIST_DIR/LinRouter.exe" "$DIST_DIR/LinRouter_windows.exe"
     echo "Windows 构建完成：$DIST_DIR/LinRouter_windows.exe"
+    if [[ "$COPY_TO_DESKTOP" == "1" ]]; then
+      copy_to_desktop "$DIST_DIR/LinRouter_windows.exe" || exit 1
+    fi
     ;;
 
   darwin)
@@ -80,12 +105,17 @@ case "$TARGET" in
         hdiutil create -srcfolder "$APP_PATH" -volname "LinRouter" -fs HFS+ -format UDZO "$DMG_PATH"
       fi
       echo "macOS DMG 构建完成：$DMG_PATH"
+      if [[ "$COPY_TO_DESKTOP" == "1" ]]; then
+        copy_to_desktop "$DMG_PATH" || exit 1
+      fi
+    elif [[ "$COPY_TO_DESKTOP" == "1" ]]; then
+      copy_to_desktop "$DIST_DIR/LinRouter.app" || exit 1
     fi
     ;;
 
   *)
     echo "不支持的目标平台：$TARGET" >&2
-    echo "用法：$0 --target {win32|darwin} [--dmg]" >&2
+    echo "用法：$0 --target {win32|darwin} [--dmg] [--desktop]" >&2
     exit 1
     ;;
 esac

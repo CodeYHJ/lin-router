@@ -60,6 +60,40 @@
 .tree-status.cooldown { background: var(--warning); }
 .tree-status.error { background: var(--danger); }
 
+.tree-aggregate-empty {
+  padding: 12px;
+  margin: 0 8px 8px;
+  background: var(--bg-secondary);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-md);
+  text-align: center;
+}
+
+.tree-empty-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 6px;
+}
+
+.tree-empty-desc,
+.tree-empty-tip {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  margin-bottom: 10px;
+}
+
+.tree-empty-tip {
+  color: var(--text-tertiary);
+  margin-bottom: 12px;
+}
+
+.tree-empty-tip strong {
+  color: var(--accent);
+  font-weight: 600;
+}
+
 .tree-aggregate-section {
   margin-top: 12px;
   padding-top: 12px;

@@ -59,7 +59,7 @@ const Tree = {
     if (!groups.length && !aggregates.length) return '<div class="config-placeholder">暂无连接组，点击右上角 + 新建</div>';
 
     const groupsHtml = groups.map(g => this.buildGroupHtml(g, models)).join('');
-    const aggregatesHtml = aggregates.length ? this.buildAggregatesSection(aggregates, aggregateMembers) : '';
+    const aggregatesHtml = this.buildAggregatesSection(aggregates, aggregateMembers);
     return `<div class="tree-root">${groupsHtml}${aggregatesHtml}</div>`;
   },
 
@@ -69,10 +69,19 @@ const Tree = {
       : aggregates;
     if (this.search && !filtered.length) return '';
     const itemsHtml = filtered.map(a => this.buildAggregateHtml(a, members)).join('');
+    const emptyHtml = !aggregates.length ? `
+      <div class="tree-aggregate-empty">
+        <div class="tree-empty-title">暂无聚合模型</div>
+        <div class="tree-empty-desc">聚合模型用于替代 all-router-auto，实现多中转站 fallback 调度。</div>
+        <div class="tree-empty-tip">建议先创建 <strong>lin-router-gpt-5.5</strong>，并设为默认全局聚合模型，用于承接 all-router-auto。</div>
+        <button type="button" class="btn-primary btn-sm" id="tree-new-aggregate">新建聚合模型</button>
+      </div>
+    ` : '';
     return `
       <div class="tree-aggregate-section">
         <div class="tree-section-title">聚合模型</div>
         ${itemsHtml}
+        ${emptyHtml}
       </div>
     `;
   },
@@ -183,6 +192,11 @@ const Tree = {
   },
 
   attachEvents(root) {
+    const newAggregateBtn = root.querySelector('#tree-new-aggregate');
+    if (newAggregateBtn) {
+      newAggregateBtn.addEventListener('click', () => App.createAggregate());
+    }
+
     root.querySelectorAll('[data-type]').forEach(node => {
       node.addEventListener('click', e => {
         const action = e.target.dataset.action;

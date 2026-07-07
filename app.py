@@ -229,6 +229,7 @@ class ModelConfig:
     price_input: float = 0.0
     price_output: float = 0.0
     usable: bool = True
+    disabled_by_user: bool = False
     last_error: str = ""
     last_success_at: str = ""
     last_checked_at: str = ""
@@ -248,6 +249,7 @@ class ModelConfig:
             price_input=float(data.get("price_input") or 0),
             price_output=float(data.get("price_output") or 0),
             usable=bool(data.get("usable", True)),
+            disabled_by_user=bool(data.get("disabled_by_user", False)),
             last_error=str(data.get("last_error", "")),
             last_success_at=str(data.get("last_success_at", "")),
             last_checked_at=str(data.get("last_checked_at", "")),
@@ -715,7 +717,8 @@ class ConfigStore:
                 if model.cooldown_until and model.cooldown_until <= now:
                     model.cooldown_until = 0
                     model.cooldown_reason = ""
-                    model.usable = True
+                    if not model.disabled_by_user:
+                        model.usable = True
                     model.last_error = ""
                     model.last_checked_at = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now))
                     changed = True
@@ -802,8 +805,9 @@ class ConfigStore:
         with self._lock:
             changed = False
             for model in self.models:
-                if not model.usable or model.last_error:
+                if not model.usable or model.last_error or model.disabled_by_user:
                     model.usable = True
+                    model.disabled_by_user = False
                     model.last_error = ""
                     model.cooldown_until = 0
                     model.cooldown_reason = ""
@@ -817,11 +821,17 @@ class ConfigStore:
             group_models = [m for m in self.models if m.group_id == group_id]
             if not group_models:
                 return False
-            all_usable = all(m.usable for m in group_models)
+            all_usable = all(m.usable and not m.disabled_by_user for m in group_models)
             changed = False
             for model in group_models:
-                if model.usable == all_usable:
-                    model.usable = not all_usable
+                target = not all_usable
+                if model.usable != target or model.disabled_by_user == target:
+                    model.usable = target
+                    model.disabled_by_user = not target
+                    if target:
+                        model.cooldown_until = 0
+                        model.cooldown_reason = ""
+                        model.last_error = ""
                     changed = True
             if changed:
                 self.save()
@@ -1348,11 +1358,12 @@ class ArkProxyRouter:
             if model.cooldown_until and model.cooldown_until <= int(time.time()):
                 model.cooldown_until = 0
                 model.cooldown_reason = ""
-                model.usable = True
+                if not model.disabled_by_user:
+                    model.usable = True
                 model.last_error = ""
                 model.last_checked_at = self._now()
                 self.store.save()
-            if not model.usable:
+            if model.disabled_by_user or not model.usable:
                 continue
             if group_id and model.group_id != group_id:
                 continue
@@ -2895,6 +2906,7 @@ class RouterHandler(BaseHTTPRequestHandler):
                 api_key=model.api_key,
                 price_group=model.price_group,
                 usable=model.usable,
+                disabled_by_user=model.disabled_by_user,
                 last_error=model.last_error,
                 last_success_at=model.last_success_at,
                 last_checked_at=model.last_checked_at,
@@ -3666,21 +3678,27 @@ class RouterHandler(BaseHTTPRequestHandler):
                 self._send_text("model not found", status=404)
                 return
             if model.cooldown_until:
+                # 恢复冷却视为用户手动启用
                 model.usable = True
+                model.disabled_by_user = False
                 model.cooldown_until = 0
                 model.cooldown_reason = ""
                 model.last_error = ""
                 model.last_checked_at = self.router._now()
             elif model.usable:
+                # 当前可用 -> 用户手动禁用
                 model.usable = False
+                model.disabled_by_user = True
             else:
+                # 当前不可用（用户禁用或冷却已过期） -> 用户手动启用
                 model.usable = True
+                model.disabled_by_user = False
                 model.cooldown_until = 0
                 model.cooldown_reason = ""
                 model.last_error = ""
                 model.last_checked_at = self.router._now()
             self.store.save()
-            self._send_json({"ok": True, "usable": model.usable})
+            self._send_json({"ok": True, "usable": model.usable, "disabled_by_user": model.disabled_by_user})
             return
         if parsed.path.endswith("/usable") and parsed.path.startswith("/api/models/"):
             model_id = parsed.path.split("/")[3]
@@ -3689,14 +3707,16 @@ class RouterHandler(BaseHTTPRequestHandler):
                 self._send_text("model not found", status=404)
                 return
             payload = self._read_json()
-            model.usable = bool(payload.get("usable", True))
-            if model.usable:
+            usable = bool(payload.get("usable", True))
+            model.usable = usable
+            model.disabled_by_user = not usable
+            if usable:
                 model.cooldown_until = 0
                 model.cooldown_reason = ""
                 model.last_error = ""
             model.last_checked_at = self.router._now()
             self.store.save()
-            self._send_json({"ok": True, "usable": model.usable})
+            self._send_json({"ok": True, "usable": model.usable, "disabled_by_user": model.disabled_by_user})
             return
         if parsed.path == "/api/models/usable/all":
             payload = self._read_json()
@@ -3707,6 +3727,7 @@ class RouterHandler(BaseHTTPRequestHandler):
                     if model.usable != usable:
                         model.usable = usable
                         changed = True
+                    model.disabled_by_user = not usable
                     if usable:
                         model.cooldown_until = 0
                         model.cooldown_reason = ""
@@ -3739,6 +3760,7 @@ class RouterHandler(BaseHTTPRequestHandler):
                     if model.usable != usable:
                         model.usable = usable
                         changed = True
+                    model.disabled_by_user = not usable
                     if usable:
                         model.cooldown_until = 0
                         model.cooldown_reason = ""
@@ -4071,7 +4093,7 @@ def create_server(
     config_path = Path(config)
     ensure_sample_config(config_path)
     store = ConfigStore(config_path)
-    store.reset_usable()
+    store.refresh_expired_cooldowns()
     settings_store = SettingsStore(config_path)
     router = ArkProxyRouter(store, settings_store)
     selected_port = pick_port(port, host)

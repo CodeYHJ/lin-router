@@ -44,8 +44,8 @@ const App = {
         <input type="text" class="global-search" id="global-search" placeholder="搜索连接组或模型...">
       </div>
       <div class="topbar-right">
-        <button class="icon-btn" id="btn-new-group" title="新建连接组">+</button>
-        <button class="icon-btn" id="btn-new-aggregate" title="新建聚合模型">⊕</button>
+        <button class="btn-primary btn-sm" id="btn-new-group" title="新建连接组">+ 连接组</button>
+        <button class="btn-primary btn-sm" id="btn-new-aggregate" title="新建聚合模型">+ 聚合模型</button>
         <button class="icon-btn" id="btn-export" title="导出连接组配置">💾</button>
         <button class="icon-btn" id="btn-settings" title="设置">⚙</button>
         <button class="icon-btn" id="btn-theme" title="切换主题">🌓</button>
