@@ -8,4 +8,6 @@ __pycache__/
 build/
 dist/
 *.spec
-PRD/
+PRD/lin-router-config-test.json
+*config-test*.json
+*.tmp.json
