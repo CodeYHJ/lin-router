@@ -11,3 +11,7 @@ dist/
 PRD/lin-router-config-test.json
 *config-test*.json
 *.tmp.json
+*.bak
+*.bak-*
+*.backup
+PRD/

@@ -361,16 +361,25 @@ const ConfigTab = {
     const group = Store.getGroup(member.group_id);
     const model = Store.getModel(member.model_id);
     const status = this.aggregateMemberStatus(member);
+    const isCooling = member.cooldown_until && member.cooldown_until * 1000 > Date.now();
+    const underlyingDisabled = !model || model.usable === false || (model.cooldown_until && model.cooldown_until * 1000 > Date.now());
+    const warningBadge = underlyingDisabled
+      ? '<span class="pill warning" title="底层真实模型不可用或处于冷却">底层不可用</span>'
+      : '';
+    const recoverBtn = isCooling
+      ? `<button type="button" class="btn-recover btn-sm" data-action="recover" data-member-id="${member.id}">恢复/启用</button>`
+      : '';
     return `
       <tr data-member-id="${member.id}">
         <td class="tiny">${idx + 1}</td>
         <td><input type="checkbox" class="aggregate-member-enabled" data-member-id="${member.id}" ${member.enabled !== false ? 'checked' : ''}></td>
-        <td>${Utils.escapeHtml(group?.name || '-')}</td>
+        <td>${Utils.escapeHtml(group?.name || '-')}${warningBadge}</td>
         <td>${Utils.escapeHtml(model?.name || '-')}</td>
         <td>${Utils.escapeHtml(model?.upstream_model || model?.ep_id || '-')}</td>
         <td><input type="number" class="aggregate-member-price" data-member-id="${member.id}" value="${member.manual_price != null ? member.manual_price : ''}" step="0.001" placeholder="未填"></td>
         <td class="tiny"><span class="pill ${status.class}">${status.text}</span></td>
         <td class="aggregate-member-actions">
+          ${recoverBtn}
           <button type="button" class="btn-icon" data-action="up" data-member-id="${member.id}" ${idx === 0 ? 'disabled' : ''} title="上移">↑</button>
           <button type="button" class="btn-icon" data-action="down" data-member-id="${member.id}" ${idx === total - 1 ? 'disabled' : ''} title="下移">↓</button>
           <button type="button" class="btn-icon btn-danger" data-action="delete" data-member-id="${member.id}" title="删除">×</button>
@@ -381,7 +390,12 @@ const ConfigTab = {
 
   aggregateMemberStatus(member) {
     if (member.enabled === false) return { class: 'warning', text: '已禁用' };
-    if (member.cooldown_until && member.cooldown_until * 1000 > Date.now()) return { class: 'cooldown', text: '冷却中' };
+    if (member.cooldown_until && member.cooldown_until * 1000 > Date.now()) {
+      const remainSec = Math.max(0, Math.ceil((member.cooldown_until * 1000 - Date.now()) / 1000));
+      const mm = Math.floor(remainSec / 60).toString().padStart(2, '0');
+      const ss = (remainSec % 60).toString().padStart(2, '0');
+      return { class: 'cooldown', text: `冷却中（剩 ${mm}:${ss}）` };
+    }
     if (member.last_error) return { class: 'warning', text: '最近错误' };
     return { class: 'success', text: '可用' };
   },
@@ -1169,7 +1183,18 @@ const ConfigTab = {
 
   onAggregateMemberAction(action, memberId) {
     if (action === 'delete') return this.onDeleteAggregateMember(memberId);
+    if (action === 'recover') return this.onRecoverAggregateMember(memberId);
     if (['up', 'down', 'top', 'bottom'].includes(action)) return this.onMoveAggregateMember(memberId, action);
+  },
+
+  async onRecoverAggregateMember(memberId) {
+    try {
+      await API.clearAggregateMemberCooldown(memberId);
+      await Store.load();
+      Toast.success('成员已恢复并启用');
+    } catch (err) {
+      Toast.error('恢复失败：' + err.message);
+    }
   },
 
   async onMoveAggregateMember(memberId, direction) {

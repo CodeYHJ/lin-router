@@ -308,6 +308,23 @@ const LogsTab = {
     return formatted;
   },
 
+  renderWafHint(parsed) {
+    if (parsed.waf_blocked !== 'true') return '';
+    const message = parsed.message || '上游中转站拦截了请求';
+    const suggestion = parsed.suggestion || '';
+    const wafOn = parsed.waf_compatible === 'true';
+    const typeClass = wafOn ? 'log-waf-hint-open' : 'log-waf-hint-closed';
+    const icon = wafOn ? '⚠️' : '🛡️';
+    const title = wafOn ? 'WAF 已开启但仍被拦截' : 'WAF 兼容未开启';
+    return `
+      <div class="log-waf-hint ${typeClass}">
+        <div class="log-waf-hint-title">${icon} ${Utils.escapeHtml(title)}</div>
+        <div class="log-waf-hint-message">${Utils.escapeHtml(message)}</div>
+        ${suggestion ? `<div class="log-waf-hint-suggestion"><strong>建议：</strong>${Utils.escapeHtml(suggestion)}</div>` : ''}
+      </div>
+    `;
+  },
+
   detailHtml(item) {
     const parsed = this.parseDetail(item.detail);
     const rawDetail = item.detail ? String(item.detail) : '';
@@ -317,6 +334,7 @@ const LogsTab = {
         <div class="log-detail-raw">${this.formatJsonBlock(rawDetail)}</div>
       </div>
     ` : '';
+    const wafHint = this.renderWafHint(parsed);
     const isAggregate = parsed.resolved_as && parsed.resolved_as.startsWith('aggregate');
     const routeSteps = isAggregate ? this.aggregateRouteSteps(parsed, item) : [
       parsed.requested ? Utils.escapeHtml(parsed.requested) : (item.model || 'lin-router-auto'),
@@ -328,6 +346,7 @@ const LogsTab = {
     const aggregateChain = isAggregate ? this.renderAggregateChain(parsed) : '';
     return `
       ${rawBlock}
+      ${wafHint}
       <div class="log-detail-grid">
         <div class="log-detail-block">
           <h4>基础信息</h4>

@@ -193,8 +193,17 @@ const TestTab = {
       });
       const text = await resp.text();
       const elapsed = Math.round(performance.now() - startedAt);
+      const isWafBlocked = resp.status === 403 && /your request was blocked|waf blocked|blocked by waf|风控/i.test(text);
+      let wafHint = '';
+      if (isWafBlocked) {
+        if (group?.provider_type === 'relay' && group?.waf_compatible) {
+          wafHint = '\n\n【WAF 拦截提示】上游中转站返回 403：Your request was blocked。该连接组已开启 WAF，可能是中转站账号、渠道权限、频率限制或服务商风控导致，请检查中转站后台。';
+        } else {
+          wafHint = '\n\n【WAF 拦截提示】上游中转站返回 403：Your request was blocked。该连接组未开启 WAF 兼容，建议开启「仅中转站 WAF 兼容」后重试。';
+        }
+      }
       statusEl.textContent = `HTTP ${resp.status} - ${elapsed} ms`;
-      respEl.textContent = this.formatResponse(text);
+      respEl.textContent = this.formatResponse(text) + wafHint;
       this.lastResponse = text;
 
       // 保存到历史记录（最近 10 条）

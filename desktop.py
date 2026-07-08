@@ -124,7 +124,6 @@ class LinRouterTray:
             Menu.SEPARATOR,
             MenuItem("复制本地地址", lambda icon, item: copy_to_clipboard(self.ui_url)),
             MenuItem("复制 Base URL", lambda icon, item: copy_to_clipboard(self.base_url)),
-            MenuItem(f"复制全局 Key（{DEFAULT_PUBLIC_API_KEY}）", lambda icon, item: copy_to_clipboard(DEFAULT_PUBLIC_API_KEY)),
             Menu.SEPARATOR,
             MenuItem("开机自启", toggle_auto_start, checked=lambda item: get_platform().is_autostart_enabled()),
             MenuItem("启动后最小化到托盘/状态栏", toggle_start_minimized, checked=lambda item: self._load_start_minimized()),

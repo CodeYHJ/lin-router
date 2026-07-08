@@ -90,6 +90,7 @@ const API = {
   deleteAggregate(id) { return this.req(`/api/aggregates/${id}`, { method: 'DELETE' }); },
   createAggregateMember(aggregateId, data) { return this.req(`/api/aggregates/${aggregateId}/members`, { method: 'POST', body: JSON.stringify(data) }); },
   saveAggregateMember(id, data) { return this.req(`/api/aggregate-members/${id}`, { method: 'PUT', body: JSON.stringify(data) }); },
+  clearAggregateMemberCooldown(id) { return this.req(`/api/aggregate-members/${id}/clear-cooldown`, { method: 'POST' }); },
   deleteAggregateMember(id) { return this.req(`/api/aggregate-members/${id}`, { method: 'DELETE' }); },
   importConfig(file) {
     const form = new FormData();

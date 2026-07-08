@@ -6,11 +6,11 @@ set -e
 #   scripts/build.sh --target win32
 #   scripts/build.sh --target darwin
 #   scripts/build.sh --target darwin --dmg
-# 构建完成后默认复制产物到桌面；--desktop 保留为兼容参数。
+# 默认只输出到 dist/；如需同时复制到桌面，请加 --desktop。
 
 TARGET=""
 BUILD_DMG=0
-COPY_TO_DESKTOP=1
+COPY_TO_DESKTOP=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -29,6 +29,7 @@ while [[ $# -gt 0 ]]; do
     *)
       echo "未知选项：$1" >&2
       echo "用法：$0 --target {win32|darwin} [--dmg] [--desktop]" >&2
+      echo "注意：--desktop 显式指定后才会复制产物到桌面" >&2
       exit 1
       ;;
   esac
@@ -37,6 +38,7 @@ done
 if [[ -z "$TARGET" ]]; then
   echo "必须指定 --target {win32|darwin}" >&2
   echo "用法：$0 --target {win32|darwin} [--dmg] [--desktop]" >&2
+  echo "注意：--desktop 显式指定后才会复制产物到桌面" >&2
   exit 1
 fi
 
@@ -117,6 +119,7 @@ case "$TARGET" in
   *)
     echo "不支持的目标平台：$TARGET" >&2
     echo "用法：$0 --target {win32|darwin} [--dmg] [--desktop]" >&2
+    echo "注意：--desktop 显式指定后才会复制产物到桌面" >&2
     exit 1
     ;;
 esac

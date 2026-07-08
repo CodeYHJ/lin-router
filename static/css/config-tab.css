@@ -680,7 +680,50 @@
   background: #fff0f0;
 }
 
+.pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 44px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.3;
+  margin-left: 6px;
+}
+
+.pill.success {
+  background: rgba(34, 197, 94, 0.14);
+  color: #15803d;
+}
+
+.pill.warning {
+  background: rgba(245, 158, 11, 0.16);
+  color: #a16207;
+}
+
 .pill.cooldown {
   background: rgba(234, 179, 8, 0.16);
   color: #a16207;
+}
+
+.btn-recover {
+  padding: 6px 12px;
+  border-radius: var(--radius-sm);
+  font-weight: 500;
+  border: 1px solid transparent;
+  font-size: 13px;
+  cursor: pointer;
+  background: var(--success);
+  color: #fff;
+}
+
+.btn-recover:hover {
+  background: #16a34a;
+}
+
+.btn-recover.btn-sm {
+  padding: 5px 10px;
+  font-size: 12px;
 }

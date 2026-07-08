@@ -54,7 +54,7 @@ http://127.0.0.1:18400/v1
 启动后程序会驻留在系统托盘（Windows）或菜单栏（macOS）：
 
 - 左键/单击图标：打开管理面板
-- 右键图标：打开主页 / 查看日志 / 编辑配置 / 复制地址 / 复制全局 Key / 开机自启 / 启动最小化 / 退出
+- 右键图标：打开主页 / 查看日志 / 编辑配置 / 复制地址 / 开机自启 / 启动最小化 / 退出（Key 请从管理面板的连接组或聚合模型处复制）
 - 开机自启：
   - Windows：写入 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`
   - macOS：写入 `~/Library/LaunchAgents/com.linrouter.launcher.plist` 并通过 `launchctl` 加载

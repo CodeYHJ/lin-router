@@ -184,6 +184,19 @@ def parse_bearer_key(auth_header: str) -> str:
     return auth_header.split(" ", 1)[1].strip()
 
 
+REQUEST_LEVEL_ERROR_TYPES = {
+    "invalid_request_error",
+    "unsupported_parameter_error",
+    "unsupported_parameter",
+    "content_policy",
+    "content_policy_violation",
+    "request_format_error",
+    "invalid_message_format",
+    "authentication_error",
+    "permission_error",
+}
+
+
 @dataclass
 class ConnectionGroup:
     id: str
@@ -368,6 +381,8 @@ class RequestLog:
     fallback_index: int = 0
     fallback_chain: str = ""
     member_cooled_down: bool = False
+    cooldown_applied: bool = False
+    failure_scope: str = ""
 
 
 @dataclass
@@ -646,6 +661,14 @@ class ConfigStore:
             if not self.find_model(member.model_id):
                 return False, "模型不存在"
             existing = next((m for m in self.aggregate_members if m.id == member.id), None)
+            # 手动启用聚合成员时自动清冷却：避免 checkbox 启用后仍被 _aggregate_member_usable 跳过
+            if existing and member.enabled:
+                now_ts = int(time.time())
+                if not existing.enabled or (existing.cooldown_until and existing.cooldown_until > now_ts):
+                    member.cooldown_until = 0
+                    member.cooldown_reason = ""
+                    member.last_error = ""
+                    member.last_checked_at = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
             # 同一聚合模型内 (group_id, model_id) 不重复
             duplicate = next(
                 (m for m in self.aggregate_members
@@ -708,6 +731,19 @@ class ConfigStore:
             siblings[idx], siblings[new_idx] = siblings[new_idx], siblings[idx]
             for i, m in enumerate(siblings):
                 m.priority = i + 1
+            self.save()
+            return True
+
+    def clear_aggregate_member_cooldown(self, member_id: str, now_str: Optional[str] = None) -> bool:
+        with self._lock:
+            member = next((m for m in self.aggregate_members if m.id == member_id), None)
+            if not member:
+                return False
+            member.enabled = True
+            member.cooldown_until = 0
+            member.cooldown_reason = ""
+            member.last_error = ""
+            member.last_checked_at = now_str or time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
             self.save()
             return True
 
@@ -971,6 +1007,8 @@ class ArkProxyRouter:
         request_id: str = "",
         attempt: int = 0,
         usage_source: str = "",
+        cooldown_applied: bool = False,
+        failure_scope: str = "",
     ) -> None:
         detail = self._sanitize_detail(detail)
         group_id = group.id if group else self._detail_value(detail, "group_id")
@@ -1007,6 +1045,8 @@ class ArkProxyRouter:
             fallback_index=int(self._detail_value(detail, "fallback_index") or 0),
             fallback_chain=self._detail_value(detail, "fallback_chain"),
             member_cooled_down=self._detail_value(detail, "member_cooled_down") == "true",
+            cooldown_applied=cooldown_applied or self._detail_value(detail, "cooldown_applied") == "true",
+            failure_scope=failure_scope or self._detail_value(detail, "failure_scope") or "",
         )
         self.logs.insert(0, item)
         self._append_log_file(item)
@@ -1098,6 +1138,8 @@ class ArkProxyRouter:
             fallback_index=int(row.get("fallback_index") or 0),
             fallback_chain=str(row.get("fallback_chain") or ""),
             member_cooled_down=bool(row.get("member_cooled_down")),
+            cooldown_applied=bool(row.get("cooldown_applied")),
+            failure_scope=str(row.get("failure_scope") or ""),
         )
 
     def _load_log_file(self) -> None:
@@ -1233,7 +1275,7 @@ class ArkProxyRouter:
     def export_logs_csv(self) -> str:
         output = io.StringIO()
         writer = csv.writer(output)
-        writer.writerow(["time", "path", "request_id", "attempt", "group_name", "provider_type", "model", "status", "event", "duration_ms", "prompt_tokens", "completion_tokens", "total_tokens", "cached_tokens", "reasoning_tokens", "usage_source", "detail"])
+        writer.writerow(["time", "path", "request_id", "attempt", "group_name", "provider_type", "model", "status", "event", "duration_ms", "prompt_tokens", "completion_tokens", "total_tokens", "cached_tokens", "reasoning_tokens", "usage_source", "cooldown_applied", "failure_scope", "detail"])
         for item in self.all_logs():
             writer.writerow([
                 item.time,
@@ -1252,6 +1294,8 @@ class ArkProxyRouter:
                 item.cached_tokens,
                 item.reasoning_tokens,
                 item.usage_source,
+                item.cooldown_applied,
+                item.failure_scope,
                 item.detail,
             ])
         return output.getvalue()
@@ -1289,6 +1333,106 @@ class ArkProxyRouter:
     @staticmethod
     def _is_server_error(status_code: Optional[int]) -> bool:
         return status_code is not None and status_code >= 500
+
+    @staticmethod
+    def _upstream_error_type(raw: str) -> Optional[str]:
+        """从上游 JSON 错误体中提取 error.type。"""
+        try:
+            data = json.loads(raw)
+            err = data.get("error")
+            if isinstance(err, dict):
+                return str(err.get("type") or "").strip() or None
+        except Exception:
+            pass
+        return None
+
+    @staticmethod
+    def _is_request_level_error(status_code: Optional[int], raw: str) -> bool:
+        """判断是否为不应触发 cooldown 的请求级/鉴权错误。"""
+        if status_code in (401, 403):
+            return True
+        if status_code == 400:
+            err_type = ArkProxyRouter._upstream_error_type(raw)
+            if err_type in REQUEST_LEVEL_ERROR_TYPES:
+                return True
+            lower = raw.lower()
+            if any(k in lower for k in ("invalid request", "unsupported parameter", "content policy", "bad request")):
+                return True
+        if status_code is not None and 400 <= status_code < 500 and status_code != 429:
+            return True
+        return False
+
+    @staticmethod
+    def _is_waf_blocked_error(status_code: Optional[int], raw: str) -> bool:
+        """识别上游中转站 WAF/风控拦截类 403 错误。"""
+        if status_code != 403:
+            return False
+        lower = raw.lower()
+        markers = (
+            "your request was blocked",
+            "request was blocked",
+            "blocked by waf",
+            "waf blocked",
+            "access denied",
+            "blocked",
+            "waf",
+            "风控",
+        )
+        return any(marker in lower for marker in markers)
+
+    @classmethod
+    def _classify_candidate_error(cls, status_code: Optional[int], raw: str, error_kind: str = "http") -> Dict[str, Any]:
+        """
+        error_kind: 'http' | 'network' | 'stream_timeout'
+        返回 {
+            should_cooldown: bool,
+            is_request_level: bool,
+            category: str,
+            log_reason: str,
+            failure_scope: str,  # request | candidate | upstream
+        }
+        """
+        if error_kind in ("network", "stream_timeout"):
+            return {"should_cooldown": True, "is_request_level": False, "category": error_kind, "log_reason": error_kind, "failure_scope": "upstream"}
+        if status_code is None:
+            return {"should_cooldown": True, "is_request_level": False, "category": "network", "log_reason": "network", "failure_scope": "upstream"}
+        if status_code >= 500:
+            return {"should_cooldown": True, "is_request_level": False, "category": "server_error", "log_reason": f"server_error_{status_code}", "failure_scope": "upstream"}
+        if status_code == 429:
+            if cls._is_rate_limited(status_code, raw):
+                return {"should_cooldown": True, "is_request_level": False, "category": "rate_limit", "log_reason": "rate_limit", "failure_scope": "upstream"}
+            if cls._is_quota_exhausted(status_code, raw):
+                return {"should_cooldown": True, "is_request_level": False, "category": "quota_exhausted", "log_reason": "quota_exhausted", "failure_scope": "upstream"}
+            return {"should_cooldown": True, "is_request_level": False, "category": "rate_limit", "log_reason": "rate_limit_429", "failure_scope": "upstream"}
+        if cls._is_waf_blocked_error(status_code, raw):
+            return {"should_cooldown": False, "is_request_level": True, "category": "waf_blocked", "log_reason": "waf_blocked", "failure_scope": "candidate"}
+        if cls._is_request_level_error(status_code, raw):
+            if status_code in (401, 403):
+                return {"should_cooldown": False, "is_request_level": True, "category": "auth_error", "log_reason": "auth_error", "failure_scope": "candidate"}
+            return {"should_cooldown": False, "is_request_level": True, "category": "request_level", "log_reason": "request_level", "failure_scope": "request"}
+        return {"should_cooldown": False, "is_request_level": False, "category": "unknown", "log_reason": f"http_{status_code}", "failure_scope": "upstream"}
+
+    @staticmethod
+    def _waf_blocked_suffix(classification: Dict[str, Any], group: ConnectionGroup) -> str:
+        """为 WAF 拦截类 403 错误生成中文提示后缀，供日志 detail 使用。"""
+        if classification.get("category") != "waf_blocked":
+            return ""
+        if group.provider_type == PROVIDER_RELAY and group.waf_compatible:
+            return "; waf_blocked=true; message=上游中转站拦截了请求，可能是中转站账号、渠道权限、频率限制或服务商风控导致; suggestion=该连接组已开启 WAF，仍被拦截，请检查中转站后台"
+        return "; waf_blocked=true; message=上游中转站拦截了请求，通常需要开启 WAF 兼容模式或调整中转站风控配置; suggestion=请在该连接组设置中开启「仅中转站 WAF 兼容」后重试"
+
+    @staticmethod
+    def _waf_blocked_hint(fallback_chain: List[Dict[str, Any]]) -> str:
+        """根据 fallback_chain 判断是否存在 WAF 拦截错误，并返回中文提示。"""
+        if not fallback_chain:
+            return ""
+        waf_items = [item for item in fallback_chain if str(item.get("category")) == "waf_blocked"]
+        if not waf_items:
+            return ""
+        # 如果任一失败成员所属连接组已开启 WAF，则提示检查中转站后台
+        if any(item.get("waf_compatible") for item in waf_items):
+            return " 上游中转站返回 403：Your request was blocked。该连接组已开启 WAF，可能是中转站账号、渠道权限、频率限制或服务商风控导致，请检查中转站后台。"
+        return " 上游中转站返回 403：Your request was blocked。该连接组未开启 WAF 兼容，建议开启「仅中转站 WAF 兼容」后重试。"
 
     @staticmethod
     def _resolve_url(base_url: str, path: str) -> str:
@@ -2146,6 +2290,8 @@ class ArkProxyRouter:
         request_id = uuid.uuid4().hex[:12]
         attempt = 0
         last_error: Optional[Exception] = None
+        saw_cooldown = False
+        saw_request_level = False
 
         # 聚合模型解析
         aggregate_info = self._resolve_aggregate(
@@ -2261,10 +2407,20 @@ class ArkProxyRouter:
                 duration_ms = int((time.perf_counter() - started_at) * 1000)
                 raw = err.read().decode("utf-8", "ignore") if hasattr(err, "read") else str(err)
                 last_error = err
-                # 聚合成员失败：cooldown 聚合成员本身并记录 fallback 链路
+                classification = self._classify_candidate_error(err.code, raw, "http")
+                cooldown_applied = classification["should_cooldown"]
+                is_request_level = classification["is_request_level"]
+                if cooldown_applied:
+                    saw_cooldown = True
+                if is_request_level:
+                    saw_request_level = True
+
+                # 聚合成员失败：仅冷却类错误才写入 cooldown
                 if is_aggregate_candidate and aggregate_model and candidate.aggregate_member_id:
-                    cooldown_seconds = self._aggregate_cooldown_seconds(aggregate_model)
-                    self._set_aggregate_member_cooldown(candidate.aggregate_member_id, raw or str(err), cooldown_seconds, f"http_{err.code}")
+                    if cooldown_applied:
+                        cooldown_seconds = self._aggregate_cooldown_seconds(aggregate_model)
+                        self._set_aggregate_member_cooldown(candidate.aggregate_member_id, raw or str(err), cooldown_seconds, classification["log_reason"])
+                    failure_scope = classification["failure_scope"]
                     fallback_chain.append({
                         "member_id": candidate.aggregate_member_id,
                         "group": group.name,
@@ -2272,22 +2428,18 @@ class ArkProxyRouter:
                         "manual_price": candidate.manual_price,
                         "status": err.code,
                         "reason": self._short_error(raw),
+                        "cooldown_applied": cooldown_applied,
+                        "failure_scope": failure_scope,
+                        "category": classification["category"],
+                        "waf_compatible": group.waf_compatible,
                     })
                     fallback_index += 1
-                    detail = f"cooldown {cooldown_seconds // 60 or 0}m, try next; error={self._short_error(raw)}"
-                    self.add_log(path, candidate.label, str(err.code), self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, detail, lock_wait_ms=lock_wait_ms, lock_release_reason="http_error", aggregate_suffix=aggregate_suffix), duration_ms, group=group, request_id=request_id, attempt=attempt, event="cooldown")
+                    detail = f"cooldown_applied={str(cooldown_applied).lower()}; failure_scope={failure_scope}; {classification['log_reason']}; try next; error={self._short_error(raw)}{self._waf_blocked_suffix(classification, group)}"
+                    self.add_log(path, candidate.label, str(err.code), self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, detail, lock_wait_ms=lock_wait_ms, lock_release_reason="http_error", aggregate_suffix=aggregate_suffix), duration_ms, group=group, request_id=request_id, attempt=attempt, event="cooldown" if cooldown_applied else "fallback", cooldown_applied=cooldown_applied, failure_scope=failure_scope)
                     continue
-                if auto_fallback and candidate.group.provider_type == PROVIDER_RELAY:
-                    cooldown_seconds = self._auto_cooldown_seconds(group)
-                    self._set_cooldown(candidate.idx, raw or str(err), cooldown_seconds, f"http_{err.code}")
-                    detail = f"cooldown {cooldown_seconds // 60 or 0}m, try next; error={self._short_error(raw)}"
-                    self.add_log(path, candidate.label, str(err.code), self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, detail, lock_wait_ms=lock_wait_ms, lock_release_reason="http_error"), duration_ms, group=group, request_id=request_id, attempt=attempt, event="cooldown")
-                    continue
-                if self._is_quota_exhausted(err.code, raw):
-                    self._mark_unusable(candidate, raw)
-                    self.add_log(path, candidate.label, str(err.code), self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, "quota exhausted, try next", lock_wait_ms=lock_wait_ms, lock_release_reason="http_error"), duration_ms, group=group, request_id=request_id, attempt=attempt, event="fallback")
-                    continue
-                if self._is_rate_limited(err.code, raw):
+
+                # 429 立即重试一次（非聚合路径保持原有行为）
+                if classification["category"] == "rate_limit" and not is_aggregate_candidate:
                     try:
                         retry_started_at = time.perf_counter()
                         with self._upstream_client.request("POST", target_url, outbound_headers, body, stream=False, timeout=120) as resp:
@@ -2308,33 +2460,64 @@ class ArkProxyRouter:
                                 reasoning_tokens,
                                 group=group,
                                 event="retry_ok",
+                                cooldown_applied=False,
                             )
                             return resp.status, dict(resp.headers.items()), data
                     except Exception as retry_err:
                         last_error = retry_err
                         retry_duration_ms = int((time.perf_counter() - started_at) * 1000)
-                        self.add_log(path, candidate.label, "retry failed", self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, str(retry_err), lock_wait_ms=lock_wait_ms, lock_release_reason="retry_failed"), retry_duration_ms, group=group, request_id=request_id, attempt=attempt, event="error")
-                        continue
-                if self._is_server_error(err.code):
-                    self.add_log(path, candidate.label, str(err.code), self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, "server error, try next", lock_wait_ms=lock_wait_ms, lock_release_reason="http_error"), duration_ms, group=group, request_id=request_id, attempt=attempt, event="fallback")
-                    continue
-                # 自动调度/全局 Key 模式下，任何 HTTP 错误都应尝试下一个候选，而不是把单次错误直接返回给客户端
+                        self.add_log(path, candidate.label, "retry failed", self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, str(retry_err), lock_wait_ms=lock_wait_ms, lock_release_reason="retry_failed"), retry_duration_ms, group=group, request_id=request_id, attempt=attempt, event="error", cooldown_applied=False)
+
+                # 自动 fallback（组级 auto 或聚合模型）
                 if auto_fallback:
+                    if cooldown_applied:
+                        if candidate.group.provider_type == PROVIDER_RELAY and candidate.idx is not None:
+                            self._set_cooldown(candidate.idx, raw or str(err), self._auto_cooldown_seconds(group), classification["log_reason"])
+                        elif candidate.idx is not None:
+                            self._set_unusable(candidate.idx, raw or str(err))
+                        saw_cooldown = True
+                    failure_scope = classification["failure_scope"]
+                    if not is_aggregate_candidate:
+                        fallback_chain.append({
+                            "member_id": "",
+                            "group": group.name,
+                            "model": candidate.model.name if candidate.model else candidate.label,
+                            "manual_price": candidate.manual_price,
+                            "status": err.code,
+                            "reason": self._short_error(raw),
+                            "cooldown_applied": cooldown_applied,
+                            "failure_scope": failure_scope,
+                            "category": classification["category"],
+                            "waf_compatible": group.waf_compatible,
+                        })
+                        fallback_index += 1
+                    detail = f"cooldown_applied={str(cooldown_applied).lower()}; failure_scope={failure_scope}; {classification['log_reason']}; try next; error={self._short_error(raw)}{self._waf_blocked_suffix(classification, group)}"
+                    self.add_log(path, candidate.label, str(err.code), self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, detail, lock_wait_ms=lock_wait_ms, lock_release_reason="http_error"), duration_ms, group=group, request_id=request_id, attempt=attempt, event="cooldown" if cooldown_applied else "fallback", cooldown_applied=cooldown_applied, failure_scope=failure_scope)
+                    continue
+
+                # 非自动 fallback：保留原有显式模型处理逻辑
+                if self._is_quota_exhausted(err.code, raw):
                     self._mark_unusable(candidate, raw)
-                    detail = f"upstream error, try next; error={self._short_error(raw)}"
-                    self.add_log(path, candidate.label, str(err.code), self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, detail, lock_wait_ms=lock_wait_ms, lock_release_reason="http_error"), duration_ms, group=group, request_id=request_id, attempt=attempt, event="fallback")
+                    self.add_log(path, candidate.label, str(err.code), self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, "quota exhausted, try next", lock_wait_ms=lock_wait_ms, lock_release_reason="http_error"), duration_ms, group=group, request_id=request_id, attempt=attempt, event="fallback", cooldown_applied=False, failure_scope="upstream")
+                    continue
+                if self._is_server_error(err.code):
+                    self.add_log(path, candidate.label, str(err.code), self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, "server error, try next", lock_wait_ms=lock_wait_ms, lock_release_reason="http_error"), duration_ms, group=group, request_id=request_id, attempt=attempt, event="fallback", cooldown_applied=False, failure_scope="upstream")
                     continue
                 headers = dict(getattr(err, "headers", {}) or {})
                 detail = f"error={self._short_error(raw)}"
-                self.add_log(path, candidate.label, str(err.code), self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, detail, lock_wait_ms=lock_wait_ms, lock_release_reason="http_error"), duration_ms, group=group, request_id=request_id, attempt=attempt, event="error")
+                self.add_log(path, candidate.label, str(err.code), self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, detail, lock_wait_ms=lock_wait_ms, lock_release_reason="http_error"), duration_ms, group=group, request_id=request_id, attempt=attempt, event="error", cooldown_applied=False)
                 return err.code, headers, raw.encode("utf-8")
             except (URLError, TimeoutError, OSError) as err:
                 duration_ms = int((time.perf_counter() - started_at) * 1000)
                 last_error = err
+                classification = self._classify_candidate_error(None, str(err), "network")
+                saw_cooldown = True
+
                 # 聚合成员网络失败：cooldown 聚合成员本身并记录 fallback 链路
                 if is_aggregate_candidate and aggregate_model and candidate.aggregate_member_id:
                     cooldown_seconds = self._aggregate_cooldown_seconds(aggregate_model)
-                    self._set_aggregate_member_cooldown(candidate.aggregate_member_id, str(err), cooldown_seconds, "network")
+                    self._set_aggregate_member_cooldown(candidate.aggregate_member_id, str(err), cooldown_seconds, classification["log_reason"])
+                    failure_scope = classification["failure_scope"]
                     fallback_chain.append({
                         "member_id": candidate.aggregate_member_id,
                         "group": group.name,
@@ -2342,24 +2525,54 @@ class ArkProxyRouter:
                         "manual_price": candidate.manual_price,
                         "status": "network",
                         "reason": self._short_error(str(err)),
+                        "cooldown_applied": True,
+                        "failure_scope": failure_scope,
+                        "category": classification["category"],
+                        "waf_compatible": group.waf_compatible,
                     })
                     fallback_index += 1
-                    detail = f"cooldown {cooldown_seconds // 60 or 0}m, try next; error={self._short_error(str(err))}"
-                    self.add_log(path, candidate.label, "network", self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, detail, lock_wait_ms=lock_wait_ms, lock_release_reason="network_error", aggregate_suffix=aggregate_suffix), duration_ms, group=group, request_id=request_id, attempt=attempt, event="network")
+                    detail = f"cooldown_applied=true; failure_scope={failure_scope}; {classification['log_reason']}; try next; error={self._short_error(str(err))}"
+                    self.add_log(path, candidate.label, "network", self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, detail, lock_wait_ms=lock_wait_ms, lock_release_reason="network_error", aggregate_suffix=aggregate_suffix), duration_ms, group=group, request_id=request_id, attempt=attempt, event="network", cooldown_applied=True, failure_scope=failure_scope)
                     continue
-                if auto_fallback and candidate.group.provider_type == PROVIDER_RELAY:
-                    cooldown_seconds = self._auto_cooldown_seconds(group)
-                    self._set_cooldown(candidate.idx, str(err), cooldown_seconds, "network")
-                    detail = f"cooldown {cooldown_seconds // 60 or 0}m, try next; error={self._short_error(str(err))}"
-                    self.add_log(path, candidate.label, "network", self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, detail, lock_wait_ms=lock_wait_ms, lock_release_reason="network_error"), duration_ms, group=group, request_id=request_id, attempt=attempt, event="network")
+                if auto_fallback:
+                    if candidate.group.provider_type == PROVIDER_RELAY and candidate.idx is not None:
+                        self._set_cooldown(candidate.idx, str(err), self._auto_cooldown_seconds(group), classification["log_reason"])
+                    elif candidate.idx is not None:
+                        self._set_unusable(candidate.idx, str(err))
+                    failure_scope = classification["failure_scope"]
+                    if not is_aggregate_candidate:
+                        fallback_chain.append({
+                            "member_id": "",
+                            "group": group.name,
+                            "model": candidate.model.name if candidate.model else candidate.label,
+                            "manual_price": candidate.manual_price,
+                            "status": "network",
+                            "reason": self._short_error(str(err)),
+                            "cooldown_applied": True,
+                            "failure_scope": failure_scope,
+                            "category": classification["category"],
+                            "waf_compatible": group.waf_compatible,
+                        })
+                        fallback_index += 1
+                    detail = f"cooldown_applied=true; failure_scope={failure_scope}; {classification['log_reason']}; try next; error={self._short_error(str(err))}"
+                    self.add_log(path, candidate.label, "network", self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, detail, lock_wait_ms=lock_wait_ms, lock_release_reason="network_error"), duration_ms, group=group, request_id=request_id, attempt=attempt, event="network", cooldown_applied=True, failure_scope=failure_scope)
                     continue
-                detail = f"error={self._short_error(str(err))}"
-                self.add_log(path, candidate.label, "network", self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, detail, lock_wait_ms=lock_wait_ms, lock_release_reason="network_error"), duration_ms, group=group, request_id=request_id, attempt=attempt, event="network")
+                failure_scope = classification["failure_scope"]
+                detail = f"cooldown_applied=false; failure_scope={failure_scope}; {classification['log_reason']}; error={self._short_error(str(err))}"
+                self.add_log(path, candidate.label, "network", self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, detail, lock_wait_ms=lock_wait_ms, lock_release_reason="network_error"), duration_ms, group=group, request_id=request_id, attempt=attempt, event="network", cooldown_applied=False, failure_scope=failure_scope)
                 continue
             finally:
                 self._release_lock(upstream_lock)
 
         if aggregate_model:
+            if not saw_cooldown and saw_request_level:
+                raise AllModelsFailedError(
+                    f"聚合模型 {aggregate_model.name} 的所有成员均因请求级错误被拒绝{self._waf_blocked_hint(fallback_chain)}",
+                    attempted=attempt,
+                    error_code="upstream_request_rejected",
+                    fallback_chain=fallback_chain,
+                    aggregate_name=aggregate_model.name,
+                )
             raise AllModelsFailedError(
                 f"聚合模型 {aggregate_model.name} 的所有成员均不可用",
                 attempted=attempt,
@@ -2369,6 +2582,12 @@ class ArkProxyRouter:
             )
         if last_error is None:
             raise AllModelsFailedError("没有可用模型", attempted=attempt, error_code="no_usable_models")
+        if not saw_cooldown and saw_request_level:
+            raise AllModelsFailedError(
+                f"所有候选均因请求级错误被拒绝{self._waf_blocked_hint(fallback_chain)}",
+                attempted=attempt,
+                error_code="upstream_request_rejected",
+            )
         raise AllModelsFailedError(
             f"所有可用模型均请求失败，共尝试 {attempt} 个上游",
             attempted=attempt,
@@ -2397,6 +2616,8 @@ class ArkProxyRouter:
         attempt = 0
         last_error: Optional[Exception] = None
         saw_stream_timeout = False
+        saw_cooldown = False
+        saw_request_level = False
 
         # 聚合模型解析
         aggregate_info = self._resolve_aggregate(
@@ -2575,6 +2796,7 @@ class ArkProxyRouter:
                 return 200, dict(resp.headers.items()), iterator(), request_id
             except StreamIdleTimeoutError as err:
                 saw_stream_timeout = True
+                saw_cooldown = True
                 last_error = err
                 duration_ms = int((time.perf_counter() - started_at) * 1000)
                 if resp:
@@ -2591,10 +2813,14 @@ class ArkProxyRouter:
                         "manual_price": candidate.manual_price,
                         "status": "stream_idle_timeout",
                         "reason": "stream_idle_timeout",
+                        "cooldown_applied": True,
+                        "failure_scope": "upstream",
+                        "category": "stream_idle_timeout",
+                        "waf_compatible": group.waf_compatible,
                     })
                     fallback_index += 1
-                    detail = f"reason=stream_idle_timeout; idle_timeout_seconds={idle_timeout}; chunks_received=0; bytes_received=0; cooldown_minutes={cooldown_seconds // 60}; fallback_next=true; final_result=timeout"
-                    self.add_log(path, candidate.label, "timeout", self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, detail, lock_wait_ms=lock_wait_ms, lock_release_reason="stream_idle_timeout", aggregate_suffix=aggregate_suffix), duration_ms, group=group, request_id=request_id, attempt=attempt, event="stream_timeout", usage_source="stream_incomplete")
+                    detail = f"cooldown_applied=true; failure_scope=upstream; reason=stream_idle_timeout; idle_timeout_seconds={idle_timeout}; chunks_received=0; bytes_received=0; cooldown_minutes={cooldown_seconds // 60}; fallback_next=true; final_result=timeout"
+                    self.add_log(path, candidate.label, "timeout", self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, detail, lock_wait_ms=lock_wait_ms, lock_release_reason="stream_idle_timeout", aggregate_suffix=aggregate_suffix), duration_ms, group=group, request_id=request_id, attempt=attempt, event="stream_timeout", usage_source="stream_incomplete", cooldown_applied=True, failure_scope="upstream")
                     continue
                 cooldown_seconds = self._mark_stream_timeout(candidate, "stream_idle_timeout")
                 detail = self._debug_detail(
@@ -2605,13 +2831,13 @@ class ArkProxyRouter:
                     body,
                     payload,
                     outbound_headers,
-                    f"reason=stream_idle_timeout; idle_timeout_seconds={idle_timeout}; chunks_received=0; bytes_received=0; cooldown_minutes={cooldown_seconds // 60}; fallback_next={str(auto_fallback).lower()}; final_result=timeout",
+                    f"cooldown_applied=true; reason=stream_idle_timeout; idle_timeout_seconds={idle_timeout}; chunks_received=0; bytes_received=0; cooldown_minutes={cooldown_seconds // 60}; fallback_next={str(auto_fallback).lower()}; final_result=timeout",
                     lock_wait_ms=lock_wait_ms,
                     lock_release_reason="stream_idle_timeout",
                 )
-                self.add_log(path, candidate.label, "timeout", detail, duration_ms, group=group, request_id=request_id, attempt=attempt, event="stream_timeout", usage_source="stream_incomplete")
+                self.add_log(path, candidate.label, "timeout", detail, duration_ms, group=group, request_id=request_id, attempt=attempt, event="stream_timeout", usage_source="stream_incomplete", cooldown_applied=True, failure_scope="upstream")
                 if auto_fallback:
-                    self.add_log(path, candidate.label, "fallback", self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, "reason=stream_idle_timeout; fallback_next=true", lock_wait_ms=lock_wait_ms), duration_ms, group=group, request_id=request_id, attempt=attempt, event="fallback")
+                    self.add_log(path, candidate.label, "fallback", self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, "reason=stream_idle_timeout; fallback_next=true", lock_wait_ms=lock_wait_ms), duration_ms, group=group, request_id=request_id, attempt=attempt, event="fallback", cooldown_applied=True, failure_scope="upstream")
                     continue
                 error_body = json.dumps({"error": {"message": "流式响应空闲超时，请稍后重试", "type": "timeout", "code": "stream_idle_timeout", "request_id": request_id}}, ensure_ascii=False).encode("utf-8")
                 return 504, {"Content-Type": "application/json; charset=utf-8"}, [error_body], request_id
@@ -2622,10 +2848,20 @@ class ArkProxyRouter:
                 duration_ms = int((time.perf_counter() - started_at) * 1000)
                 raw = err.read().decode("utf-8", "ignore") if hasattr(err, "read") else str(err)
                 last_error = err
-                # 聚合成员 HTTP 失败：cooldown 聚合成员本身并记录 fallback 链路
+                classification = self._classify_candidate_error(err.code, raw, "http")
+                cooldown_applied = classification["should_cooldown"]
+                is_request_level = classification["is_request_level"]
+                if cooldown_applied:
+                    saw_cooldown = True
+                if is_request_level:
+                    saw_request_level = True
+
+                # 聚合成员 HTTP 失败：仅冷却类错误才写入 cooldown
                 if is_aggregate_candidate and aggregate_model and candidate.aggregate_member_id:
-                    cooldown_seconds = self._aggregate_cooldown_seconds(aggregate_model)
-                    self._set_aggregate_member_cooldown(candidate.aggregate_member_id, raw or str(err), cooldown_seconds, f"http_{err.code}")
+                    if cooldown_applied:
+                        cooldown_seconds = self._aggregate_cooldown_seconds(aggregate_model)
+                        self._set_aggregate_member_cooldown(candidate.aggregate_member_id, raw or str(err), cooldown_seconds, classification["log_reason"])
+                    failure_scope = classification["failure_scope"]
                     fallback_chain.append({
                         "member_id": candidate.aggregate_member_id,
                         "group": group.name,
@@ -2633,35 +2869,54 @@ class ArkProxyRouter:
                         "manual_price": candidate.manual_price,
                         "status": err.code,
                         "reason": self._short_error(raw),
+                        "cooldown_applied": cooldown_applied,
+                        "failure_scope": failure_scope,
+                        "category": classification["category"],
+                        "waf_compatible": group.waf_compatible,
                     })
                     fallback_index += 1
-                    detail = f"cooldown {cooldown_seconds // 60 or 0}m, try next; error={self._short_error(raw)}"
-                    self.add_log(path, candidate.label, str(err.code), self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, detail, lock_wait_ms=lock_wait_ms, lock_release_reason="http_error", aggregate_suffix=aggregate_suffix), duration_ms, group=group, request_id=request_id, attempt=attempt, event="cooldown")
+                    detail = f"cooldown_applied={str(cooldown_applied).lower()}; failure_scope={failure_scope}; {classification['log_reason']}; try next; error={self._short_error(raw)}{self._waf_blocked_suffix(classification, group)}"
+                    self.add_log(path, candidate.label, str(err.code), self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, detail, lock_wait_ms=lock_wait_ms, lock_release_reason="http_error", aggregate_suffix=aggregate_suffix), duration_ms, group=group, request_id=request_id, attempt=attempt, event="cooldown" if cooldown_applied else "fallback", cooldown_applied=cooldown_applied, failure_scope=failure_scope)
                     continue
-                if auto_fallback and candidate.group.provider_type == PROVIDER_RELAY:
-                    cooldown_seconds = self._auto_cooldown_seconds(group)
-                    self._set_cooldown(candidate.idx, raw or str(err), cooldown_seconds, f"http_{err.code}")
-                    detail = f"cooldown {cooldown_seconds // 60 or 0}m, try next; error={self._short_error(raw)}"
-                    self.add_log(path, candidate.label, str(err.code), self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, detail, lock_wait_ms=lock_wait_ms, lock_release_reason="http_error"), duration_ms, group=group, request_id=request_id, attempt=attempt, event="cooldown")
+
+                # 自动 fallback（组级 auto 或聚合模型）
+                if auto_fallback:
+                    if cooldown_applied:
+                        if candidate.group.provider_type == PROVIDER_RELAY and candidate.idx is not None:
+                            self._set_cooldown(candidate.idx, raw or str(err), self._auto_cooldown_seconds(group), classification["log_reason"])
+                        elif candidate.idx is not None:
+                            self._set_unusable(candidate.idx, raw or str(err))
+                        saw_cooldown = True
+                    failure_scope = classification["failure_scope"]
+                    if not is_aggregate_candidate:
+                        fallback_chain.append({
+                            "member_id": "",
+                            "group": group.name,
+                            "model": candidate.model.name if candidate.model else candidate.label,
+                            "manual_price": candidate.manual_price,
+                            "status": err.code,
+                            "reason": self._short_error(raw),
+                            "cooldown_applied": cooldown_applied,
+                            "failure_scope": failure_scope,
+                            "category": classification["category"],
+                            "waf_compatible": group.waf_compatible,
+                        })
+                        fallback_index += 1
+                    detail = f"cooldown_applied={str(cooldown_applied).lower()}; failure_scope={failure_scope}; {classification['log_reason']}; try next; error={self._short_error(raw)}{self._waf_blocked_suffix(classification, group)}"
+                    self.add_log(path, candidate.label, str(err.code), self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, detail, lock_wait_ms=lock_wait_ms, lock_release_reason="http_error"), duration_ms, group=group, request_id=request_id, attempt=attempt, event="cooldown" if cooldown_applied else "fallback", cooldown_applied=cooldown_applied, failure_scope=failure_scope)
                     continue
+
+                # 非自动 fallback：保留原有显式模型处理逻辑
                 if self._is_quota_exhausted(err.code, raw):
                     self._mark_unusable(candidate, raw)
-                    self.add_log(path, candidate.label, str(err.code), self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, "quota exhausted, try next", lock_wait_ms=lock_wait_ms, lock_release_reason="http_error"), duration_ms, group=group, request_id=request_id, attempt=attempt, event="fallback")
-                    continue
-                if self._is_rate_limited(err.code, raw):
-                    self.add_log(path, candidate.label, str(err.code), self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, "rate limited, try next", lock_wait_ms=lock_wait_ms, lock_release_reason="http_error"), duration_ms, group=group, request_id=request_id, attempt=attempt, event="fallback")
+                    self.add_log(path, candidate.label, str(err.code), self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, "quota exhausted, try next", lock_wait_ms=lock_wait_ms, lock_release_reason="http_error"), duration_ms, group=group, request_id=request_id, attempt=attempt, event="fallback", cooldown_applied=False, failure_scope="upstream")
                     continue
                 if self._is_server_error(err.code):
-                    self.add_log(path, candidate.label, str(err.code), self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, "server error, try next", lock_wait_ms=lock_wait_ms, lock_release_reason="http_error"), duration_ms, group=group, request_id=request_id, attempt=attempt, event="fallback")
-                    continue
-                if auto_fallback:
-                    self._mark_unusable(candidate, raw)
-                    detail = f"upstream error, try next; error={self._short_error(raw)}"
-                    self.add_log(path, candidate.label, str(err.code), self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, detail, lock_wait_ms=lock_wait_ms, lock_release_reason="http_error"), duration_ms, group=group, request_id=request_id, attempt=attempt, event="fallback")
+                    self.add_log(path, candidate.label, str(err.code), self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, "server error, try next", lock_wait_ms=lock_wait_ms, lock_release_reason="http_error"), duration_ms, group=group, request_id=request_id, attempt=attempt, event="fallback", cooldown_applied=False, failure_scope="upstream")
                     continue
                 headers = dict(getattr(err, "headers", {}) or {})
                 detail = f"error={self._short_error(raw)}"
-                self.add_log(path, candidate.label, str(err.code), self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, detail, lock_wait_ms=lock_wait_ms, lock_release_reason="http_error"), duration_ms, group=group, request_id=request_id, attempt=attempt, event="error")
+                self.add_log(path, candidate.label, str(err.code), self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, detail, lock_wait_ms=lock_wait_ms, lock_release_reason="http_error"), duration_ms, group=group, request_id=request_id, attempt=attempt, event="error", cooldown_applied=False)
                 return err.code, headers, [raw.encode("utf-8")], request_id
             except (URLError, TimeoutError, OSError) as err:
                 if resp:
@@ -2669,10 +2924,14 @@ class ArkProxyRouter:
                 self._release_lock(upstream_lock)
                 duration_ms = int((time.perf_counter() - started_at) * 1000)
                 last_error = err
+                classification = self._classify_candidate_error(None, str(err), "network")
+                saw_cooldown = True
+
                 # 聚合成员网络失败：cooldown 聚合成员本身并记录 fallback 链路
                 if is_aggregate_candidate and aggregate_model and candidate.aggregate_member_id:
                     cooldown_seconds = self._aggregate_cooldown_seconds(aggregate_model)
-                    self._set_aggregate_member_cooldown(candidate.aggregate_member_id, str(err), cooldown_seconds, "network")
+                    self._set_aggregate_member_cooldown(candidate.aggregate_member_id, str(err), cooldown_seconds, classification["log_reason"])
+                    failure_scope = classification["failure_scope"]
                     fallback_chain.append({
                         "member_id": candidate.aggregate_member_id,
                         "group": group.name,
@@ -2680,22 +2939,53 @@ class ArkProxyRouter:
                         "manual_price": candidate.manual_price,
                         "status": "network",
                         "reason": self._short_error(str(err)),
+                        "cooldown_applied": True,
+                        "failure_scope": failure_scope,
+                        "category": classification["category"],
+                        "waf_compatible": group.waf_compatible,
                     })
                     fallback_index += 1
-                    detail = f"cooldown {cooldown_seconds // 60 or 0}m, try next; error={self._short_error(str(err))}"
-                    self.add_log(path, candidate.label, "network", self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, detail, lock_wait_ms=lock_wait_ms, lock_release_reason="network_error", aggregate_suffix=aggregate_suffix), duration_ms, group=group, request_id=request_id, attempt=attempt, event="network")
+                    detail = f"cooldown_applied=true; failure_scope={failure_scope}; {classification['log_reason']}; try next; error={self._short_error(str(err))}"
+                    self.add_log(path, candidate.label, "network", self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, detail, lock_wait_ms=lock_wait_ms, lock_release_reason="network_error", aggregate_suffix=aggregate_suffix), duration_ms, group=group, request_id=request_id, attempt=attempt, event="network", cooldown_applied=True, failure_scope=failure_scope)
                     continue
-                if auto_fallback and candidate.group.provider_type == PROVIDER_RELAY:
-                    cooldown_seconds = self._auto_cooldown_seconds(group)
-                    self._set_cooldown(candidate.idx, str(err), cooldown_seconds, "network")
-                    detail = f"cooldown {cooldown_seconds // 60 or 0}m, try next; error={self._short_error(str(err))}"
-                    self.add_log(path, candidate.label, "network", self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, detail, lock_wait_ms=lock_wait_ms, lock_release_reason="network_error"), duration_ms, group=group, request_id=request_id, attempt=attempt, event="network")
+                if auto_fallback:
+                    if candidate.group.provider_type == PROVIDER_RELAY and candidate.idx is not None:
+                        self._set_cooldown(candidate.idx, str(err), self._auto_cooldown_seconds(group), classification["log_reason"])
+                    elif candidate.idx is not None:
+                        self._set_unusable(candidate.idx, str(err))
+                    failure_scope = classification["failure_scope"]
+                    if not is_aggregate_candidate:
+                        fallback_chain.append({
+                            "member_id": "",
+                            "group": group.name,
+                            "model": candidate.model.name if candidate.model else candidate.label,
+                            "manual_price": candidate.manual_price,
+                            "status": "network",
+                            "reason": self._short_error(str(err)),
+                            "cooldown_applied": True,
+                            "failure_scope": failure_scope,
+                            "category": classification["category"],
+                            "waf_compatible": group.waf_compatible,
+                        })
+                        fallback_index += 1
+                    detail = f"cooldown_applied=true; failure_scope={failure_scope}; {classification['log_reason']}; try next; error={self._short_error(str(err))}"
+                    self.add_log(path, candidate.label, "network", self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, detail, lock_wait_ms=lock_wait_ms, lock_release_reason="network_error"), duration_ms, group=group, request_id=request_id, attempt=attempt, event="network", cooldown_applied=True, failure_scope=failure_scope)
                     continue
-                detail = f"error={self._short_error(str(err))}"
-                self.add_log(path, candidate.label, "network", self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, detail, lock_wait_ms=lock_wait_ms, lock_release_reason="network_error"), duration_ms, group=group, request_id=request_id, attempt=attempt, event="network")
+                failure_scope = classification["failure_scope"]
+                detail = f"cooldown_applied=false; failure_scope={failure_scope}; {classification['log_reason']}; error={self._short_error(str(err))}"
+                self.add_log(path, candidate.label, "network", self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, detail, lock_wait_ms=lock_wait_ms, lock_release_reason="network_error"), duration_ms, group=group, request_id=request_id, attempt=attempt, event="network", cooldown_applied=False, failure_scope=failure_scope)
                 continue
 
         if aggregate_model:
+            if not saw_cooldown and saw_request_level:
+                raise AllModelsFailedError(
+                    f"聚合模型 {aggregate_model.name} 的所有成员均因请求级错误被拒绝{self._waf_blocked_hint(fallback_chain)}",
+                    attempted=attempt,
+                    stream_timeout=saw_stream_timeout,
+                    error_code="upstream_request_rejected",
+                    fallback_chain=fallback_chain,
+                    aggregate_name=aggregate_model.name,
+                )
             raise AllModelsFailedError(
                 f"聚合模型 {aggregate_model.name} 的所有成员均不可用",
                 attempted=attempt,
@@ -2710,6 +3000,13 @@ class ArkProxyRouter:
                 attempted=attempt,
                 stream_timeout=saw_stream_timeout,
                 error_code="no_usable_models",
+            )
+        if not saw_cooldown and saw_request_level:
+            raise AllModelsFailedError(
+                f"所有候选均因请求级错误被拒绝{self._waf_blocked_hint(fallback_chain)}",
+                attempted=attempt,
+                stream_timeout=saw_stream_timeout,
+                error_code="upstream_request_rejected",
             )
         raise AllModelsFailedError(
             f"所有可用模型均请求失败，共尝试 {attempt} 个上游",
@@ -2747,9 +3044,26 @@ class RouterHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _send_all_models_failed_error(self, err: AllModelsFailedError) -> None:
-        """统一 AllModelsFailedError 错误响应：message 中文，type/code 英文机器码。"""
-        status = 504 if getattr(err, "stream_timeout", False) else 503
+        """统一 AllModelsFailedError 错误响应：message 中文，type/code 英文机器码。
+
+        状态码按错误语义区分：
+        - 客户端请求错误（模型不存在、已退役、已禁用）使用 4xx；
+        - 仅「所有聚合成员都不可用」或「无可用模型」才返回 503；
+        - 流式空闲超时返回 504。
+        """
         err_code = getattr(err, "error_code", "") or ""
+        if err_code == "model_not_found":
+            status = 400
+        elif err_code == "upstream_request_rejected":
+            status = 400
+        elif err_code == "global_auto_deprecated":
+            status = 410
+        elif err_code == "aggregate_disabled":
+            status = 403
+        elif getattr(err, "stream_timeout", False):
+            status = 504
+        else:
+            status = 503
         err_type = "all_models_failed"
         code = "stream_idle_timeout" if status == 504 else "service_unavailable"
         message = str(err)
@@ -2763,6 +3077,24 @@ class RouterHandler(BaseHTTPRequestHandler):
         elif err_code == "model_not_found":
             err_type = "model_not_found"
             code = "model_not_found"
+        elif err_code == "upstream_request_rejected":
+            err_type = "upstream_request_rejected"
+            code = "upstream_request_rejected"
+            details = {
+                "attempted": err.attempted,
+                "cooldown_applied": False,
+                "fallback_chain": [],
+            }
+            for item in err.fallback_chain:
+                details["fallback_chain"].append({
+                    "member_id": item.get("member_id", ""),
+                    "group": item.get("group", ""),
+                    "model": item.get("model", ""),
+                    "manual_price": item.get("manual_price"),
+                    "status": item.get("status", ""),
+                    "reason": item.get("reason", ""),
+                    "cooldown_applied": item.get("cooldown_applied", False),
+                })
         elif err_code == "aggregate_members_unavailable":
             err_type = "all_aggregate_members_failed"
             code = "aggregate_members_unavailable"
@@ -2992,7 +3324,7 @@ class RouterHandler(BaseHTTPRequestHandler):
                 group=group,
                 event="fetch_models_failed",
             )
-            raise RuntimeError(body or f"upstream error {err.code}") from err
+            raise RuntimeError(body or f"获取上游模型失败：HTTP {err.code}") from err
         except Exception as err:
             duration_ms = int((time.perf_counter() - started_at) * 1000)
             self.router.add_log(
@@ -3008,7 +3340,7 @@ class RouterHandler(BaseHTTPRequestHandler):
         payload = json.loads(raw.decode("utf-8"))
         data = payload.get("data") if isinstance(payload, dict) else None
         if not isinstance(data, list):
-            raise RuntimeError("Invalid upstream model list")
+            raise RuntimeError("上游模型列表格式无效")
         return [item for item in data if isinstance(item, dict)]
 
     def _clone_group(self, group_id: str) -> Optional[Dict[str, Any]]:
@@ -4029,6 +4361,17 @@ class RouterHandler(BaseHTTPRequestHandler):
                 self.store.move_aggregate_member(member.id, direction)
             self._send_json({"ok": True, "member": asdict(self.store.find_aggregate_member(member.id) or member)})
             return
+        if parsed.path.startswith("/api/aggregate-members/") and parsed.path.endswith("/clear-cooldown"):
+            parts = parsed.path.split("/")
+            if len(parts) >= 5:
+                member_id = parts[3]
+                member = self.store.find_aggregate_member(member_id)
+                if not member:
+                    self._send_json({"error": {"message": "成员不存在", "type": "invalid_request_error", "code": "aggregate_member_not_found"}}, status=404)
+                    return
+                self.store.clear_aggregate_member_cooldown(member_id, self.router._now())
+                self._send_json({"ok": True, "member": asdict(self.store.find_aggregate_member(member.id) or member)})
+                return
         if parsed.path == "/api/test":
             ctx = self._require_route_context()
             if not ctx:
