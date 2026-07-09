@@ -16,11 +16,14 @@ const Store = {
 
   async load() {
     try {
-      const data = await API.getState();
-      this.state = data;
+      const [data, settings] = await Promise.all([
+        API.getState(),
+        API.getSettings(),
+      ]);
+      this.state = { ...data, settings: settings || data.settings || {} };
       this.ensureSelection();
       this.emit();
-      return data;
+      return this.state;
     } catch (err) {
       Toast.error('加载状态失败：' + err.message);
       throw err;

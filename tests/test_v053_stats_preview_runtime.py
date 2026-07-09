@@ -189,3 +189,34 @@ def test_aggregate_stats_runtime_state_and_delete_preview():
         finally:
             server.shutdown()
             server.server_close()
+
+
+
+def test_frontend_settings_and_log_detail_contracts():
+    root = Path(__file__).resolve().parent.parent
+    store_js = (root / "static/js/store.js").read_text(encoding="utf-8")
+    logs_js = (root / "static/js/logs-tab.js").read_text(encoding="utf-8")
+    utils_js = (root / "static/js/utils.js").read_text(encoding="utf-8")
+
+    assert "API.getState()" in store_js
+    settings_js = (root / "static/js/settings-panel.js").read_text(encoding="utf-8")
+
+    assert "API.getSettings()" in store_js
+    assert "settings: settings || data.settings || {}" in store_js
+    assert "updateCheckboxSetting(event, key)" in settings_js
+    assert "#setting-debug-mode')?.addEventListener('change'" in settings_js
+    assert "this.updateSetting(key, !!input.checked)" in settings_js
+    assert "input.dataset.beforeChecked" not in settings_js
+    assert "Store.update({ settings: { ...previousSettings, [key]: value } })" in settings_js
+    assert "refreshOpenPanelControls()" in settings_js
+    assert "applySettingSideEffects(key, value)" in settings_js
+
+    assert "开启调试模式后显示" not in logs_js
+    assert "脱敏详情摘要" in logs_js
+    assert "this.detailSummary(item.detail, 500)" in logs_js
+    assert "完整 Request ID" in logs_js
+    assert "debugMode ?" in logs_js
+    assert "Utils.redactSensitive" in logs_js
+    assert "redactSensitive(value)" in utils_js
+    assert "Authorization" in utils_js
+    assert "[REDACTED_BODY]" in utils_js

@@ -329,7 +329,7 @@ const LogsTab = {
   },
 
   rowSignature(item) {
-    return [this.rowKey(item), item.time, item.status, item.event, item.duration_ms, item.detail, item.prompt_tokens, item.completion_tokens, item.cached_tokens, item.total_tokens].join('|');
+    return [this.rowKey(item), item.time, item.status, item.event, item.duration_ms, item.detail, item.prompt_tokens, item.completion_tokens, item.cached_tokens, item.total_tokens, Store.state.settings?.debug_mode === true ? 'debug' : 'normal'].join('|');
   },
 
   rowHtml(item, idx, key = this.rowKey(item)) {
@@ -377,6 +377,31 @@ const LogsTab = {
     formatted = formatted.replace(/(requested|group_name|model|upstream|channel|mode|error)=/g, '<strong>$1=</strong>');
     return formatted;
   },
+
+  shortId(value, len = 8) {
+    const text = String(value || '-');
+    if (text === '-') return text;
+    return text.length > len ? text.slice(0, len) : text;
+  },
+
+  detailSummary(detail, maxLen = 500) {
+    if (!detail) return '-';
+    const text = Utils.redactSensitive(String(detail)).replace(/;/g, '; ');
+    const clipped = text.length > maxLen ? text.slice(0, maxLen) + '…' : text;
+    return Utils.escapeHtml(clipped);
+  },
+
+  firstValue(...values) {
+    for (const value of values) {
+      if (value !== undefined && value !== null && value !== '') return value;
+    }
+    return '-';
+  },
+
+  fallbackChainValue(parsed, item) {
+    return parsed.fallback_chain || item.fallback_chain || parsed.selection_trace || item.selection_trace || '-';
+  },
+
 
   skipReasonLabel(reason) {
     const map = {
@@ -456,26 +481,39 @@ const LogsTab = {
   detailHtml(item) {
     const parsed = this.parseDetail(item.detail);
     const debugMode = Store.state.settings?.debug_mode === true;
-    const rawDetail = item.detail ? Utils.redactSensitive(String(item.detail)) : '';
-    const rawBlock = debugMode && rawDetail ? `
-      <div class="log-detail-block log-detail-raw-block">
-        <h4>调试模式：详情原文（已脱敏）</h4>
-        <div class="log-detail-raw">${this.formatJsonBlock(rawDetail)}</div>
-      </div>
-    ` : '';
+    const safeDetail = item.detail ? Utils.redactSensitive(String(item.detail)) : '';
     const wafHint = this.renderWafHint(parsed);
     const isAggregate = parsed.resolved_as && parsed.resolved_as.startsWith('aggregate');
     const routeSteps = isAggregate ? this.aggregateRouteSteps(parsed, item) : [
-      parsed.requested ? Utils.escapeHtml(parsed.requested) : (item.model || 'lin-router-auto'),
+      parsed.requested ? Utils.escapeHtml(parsed.requested) : Utils.escapeHtml(item.requested_model || item.model || 'lin-router-auto'),
       parsed.group_name ? Utils.escapeHtml(parsed.group_name) : Utils.escapeHtml(this.groupName(item)),
-      parsed.model ? Utils.escapeHtml(parsed.model) : Utils.escapeHtml(item.model),
-      parsed.upstream ? Utils.escapeHtml(parsed.upstream) : '-',
-      parsed.channel ? Utils.escapeHtml(parsed.channel) : '-',
+      parsed.model ? Utils.escapeHtml(parsed.model) : Utils.escapeHtml(item.selected_model || item.model || '-'),
+      parsed.upstream ? Utils.escapeHtml(parsed.upstream) : Utils.escapeHtml(parsed.selected_upstream_model || '-'),
     ];
     const aggregateChain = isAggregate ? this.renderAggregateChain(parsed) : '';
     const candidateFilterDetails = this.renderCandidateFilterDetails(item);
+    const requestIdDisplay = debugMode ? (item.request_id || '-') : this.shortId(item.request_id || '-');
+    const memberIdDisplay = debugMode ? this.firstValue(item.aggregate_member_id, parsed.aggregate_member_id) : this.shortId(this.firstValue(item.aggregate_member_id, parsed.aggregate_member_id));
+    const errorReason = this.firstValue(parsed.error, parsed.error_reason, parsed.message, parsed.skip_reason, parsed.cooldown_reason, item.error, item.status);
+    const fallbackReason = this.firstValue(parsed.fallback_reason, parsed.selection_reason, parsed.skip_reason);
+    const cooldownApplied = this.firstValue(item.cooldown_applied, parsed.cooldown_applied, parsed.cooldown_reason ? 'true' : 'false');
+    const deepDiagnostics = debugMode ? `
+      <div class="log-detail-block log-detail-raw-block">
+        <h4>调试模式：深度诊断（已脱敏）</h4>
+        <dl>
+          <dt>完整 Request ID</dt><dd>${Utils.escapeHtml(item.request_id || '-')}</dd>
+          <dt>完整 Member ID</dt><dd>${Utils.escapeHtml(this.firstValue(item.aggregate_member_id, parsed.aggregate_member_id))}</dd>
+          <dt>Fallback Chain</dt><dd class="log-detail-raw">${this.formatJsonBlock(this.fallbackChainValue(parsed, item))}</dd>
+          <dt>详情原文</dt><dd class="log-detail-raw">${this.formatJsonBlock(safeDetail || '-')}</dd>
+          <dt>上游 HTTP 版本</dt><dd>${Utils.escapeHtml(parsed.upstream_http_version || '-')}</dd>
+          <dt>Header Policy</dt><dd>${Utils.escapeHtml(parsed.header_policy || '-')}</dd>
+          <dt>Body Fingerprint</dt><dd>${Utils.escapeHtml(this.firstValue(parsed.fingerprint, parsed.body_fingerprint))}</dd>
+          <dt>HTTP 客户端</dt><dd>${Utils.escapeHtml(parsed.http_client || '-')}</dd>
+          <dt>Tools 排序</dt><dd>${Utils.escapeHtml(parsed.tools_normalized || '-')}</dd>
+        </dl>
+      </div>
+    ` : '';
     return `
-      ${rawBlock}
       ${wafHint}
       <div class="log-detail-grid">
         <div class="log-detail-block">
@@ -484,62 +522,41 @@ const LogsTab = {
             <dt>时间</dt><dd>${Utils.escapeHtml(item.time)}</dd>
             <dt>耗时</dt><dd>${Number(item.duration_ms || 0) ? `${Number(item.duration_ms)} ms` : '-'}</dd>
             <dt>状态</dt><dd><span class="pill ${this.statusClass(item.status, item)}">${Utils.escapeHtml(item.status)}</span> ${Utils.escapeHtml(this.eventLabel(item.event, item))}</dd>
-            <dt>请求 ID / 次</dt><dd>${Utils.escapeHtml(item.request_id || '-')} / ${Number(item.attempt || 0) || 1}</dd>
+            <dt>请求 ID / 次</dt><dd>${Utils.escapeHtml(requestIdDisplay)} / ${Number(item.attempt || 0) || 1}</dd>
+            <dt>成员 ID</dt><dd>${Utils.escapeHtml(memberIdDisplay)}</dd>
           </dl>
         </div>
         <div class="log-detail-block">
           <h4>${isAggregate ? '聚合调度路径' : '路由路径'}</h4>
-          <div class="log-route-path">${routeSteps.map((s, i) => i === 0 ? `<span>${s}</span>` : `<span class="arrow">→</span><span>${s}</span>`).join('')}</div>
-          ${isAggregate ? `<dl style="margin-top:10px;"><dt>selection_reason</dt><dd>${Utils.escapeHtml(parsed.selection_reason || '-')}</dd><dt>fallback_index</dt><dd>${Utils.escapeHtml(parsed.fallback_index || '0')}</dd></dl>` : `
+          <div class="log-route-path">${routeSteps.map((step, i) => i === 0 ? `<span>${step}</span>` : `<span class="arrow">→</span><span>${step}</span>`).join('')}</div>
           <dl style="margin-top:10px;">
-            <dt>模式</dt><dd>${Utils.escapeHtml(parsed.provider || item.provider_type || '-')}</dd>
-            <dt>Mode</dt><dd>${Utils.escapeHtml(parsed.mode || '-')}</dd>
-          </dl>`}
+            <dt>请求模型</dt><dd>${Utils.escapeHtml(this.firstValue(parsed.requested, item.requested_model, item.model))}</dd>
+            <dt>连接组</dt><dd>${Utils.escapeHtml(this.firstValue(parsed.group_name, parsed.selected_group, this.groupName(item)))}</dd>
+            <dt>实际模型</dt><dd>${Utils.escapeHtml(this.firstValue(parsed.selected_model, parsed.model, item.selected_model, item.model))}</dd>
+            <dt>上游地址</dt><dd>${Utils.escapeHtml(this.firstValue(parsed.selected_upstream_model, parsed.upstream))}</dd>
+          </dl>
         </div>
         <div class="log-detail-block">
           <h4>诊断信息</h4>
           <dl>
-            <dt>Usage 来源</dt><dd>${Utils.escapeHtml(parsed.usage_source || item.usage_source || '-')}</dd>
-            <dt>Header 策略</dt><dd>${Utils.escapeHtml(parsed.header_policy || '-')}</dd>
-            <dt>Accept</dt><dd>${Utils.escapeHtml(parsed.accept || '-')}</dd>
-            <dt>Content-Type</dt><dd>${Utils.escapeHtml(parsed.content_type || '-')}</dd>
-            <dt>UA 类型</dt><dd>${Utils.escapeHtml(parsed.user_agent_family || '-')}</dd>
+            <dt>错误原因</dt><dd>${Utils.escapeHtml(errorReason)}</dd>
+            <dt>Fallback 原因</dt><dd>${Utils.escapeHtml(fallbackReason)}</dd>
+            <dt>Failure Scope</dt><dd>${Utils.escapeHtml(this.firstValue(item.failure_scope, parsed.failure_scope))}</dd>
+            <dt>Cooldown Applied</dt><dd>${Utils.escapeHtml(String(cooldownApplied))}</dd>
             <dt>WAF 兼容</dt><dd>${Utils.escapeHtml(parsed.waf_compatible || '-')}</dd>
             <dt>WAF 锁</dt><dd>${Utils.escapeHtml(parsed.waf_lock_enabled || '-')}</dd>
             <dt>等待锁</dt><dd>${Utils.escapeHtml(parsed.lock_wait_ms ? parsed.lock_wait_ms + ' ms' : '-')}</dd>
-            <dt>Fallback 原因</dt><dd>${Utils.escapeHtml(parsed.fallback_reason || parsed.selection_reason || '-')}</dd>
-            <dt>Failure Scope</dt><dd>${Utils.escapeHtml(item.failure_scope || parsed.failure_scope || '-')}</dd>
-            <dt>HTTP 客户端</dt><dd>${Utils.escapeHtml(parsed.http_client || '-')}</dd>
-            <dt>HTTP 版本</dt><dd>${Utils.escapeHtml(parsed.upstream_http_version || '-')}</dd>
-            <dt>Tools 排序</dt><dd>${Utils.escapeHtml(parsed.tools_normalized || '-')}</dd>
             <dt>Payload 预警</dt><dd>${this.renderPayloadWarnings(parsed)}</dd>
           </dl>
         </div>
       </div>
       ${aggregateChain}
       ${candidateFilterDetails}
-      <details style="margin-top:10px;">
-        <summary style="font-size:12px; color:var(--text-tertiary); cursor:pointer;">${debugMode ? '调试字段' : '技术细节'}</summary>
-        <div class="log-detail-grid" style="margin-top:8px;">
-          <div class="log-detail-block">
-            <dl>
-              <dt>上游地址</dt><dd>${Utils.escapeHtml(parsed.upstream || '-')}</dd>
-              <dt>Body 模式</dt><dd>${Utils.escapeHtml(parsed.body || '-')}</dd>
-              <dt>Fingerprint</dt><dd>${Utils.escapeHtml(parsed.fingerprint || '-')}</dd>
-              <dt>Request ID</dt><dd>${debugMode ? Utils.escapeHtml(item.request_id || '-') : '开启调试模式后显示'}</dd>
-              <dt>Member ID</dt><dd>${debugMode ? Utils.escapeHtml(item.aggregate_member_id || parsed.aggregate_member_id || '-') : '开启调试模式后显示'}</dd>
-              <dt>Cooldown Applied</dt><dd>${debugMode ? Utils.escapeHtml(String(item.cooldown_applied || parsed.cooldown_applied || false)) : '开启调试模式后显示'}</dd>
-            </dl>
-          </div>
-          <div class="log-detail-block">
-            <dl>
-              <dt>Tokens</dt><dd>${Utils.escapeHtml(this.tokenSummary(item))}</dd>
-              <dt>Fallback Chain</dt><dd class="log-detail-raw">${debugMode ? this.formatJsonBlock(parsed.fallback_chain || item.fallback_chain || '-') : '开启调试模式后显示'}</dd>
-              <dt>详情原文</dt><dd class="log-detail-raw">${debugMode ? this.formatJsonBlock(item.detail) : '开启调试模式后显示脱敏原文'}</dd>
-            </dl>
-          </div>
-        </div>
-      </details>
+      <div class="log-detail-block log-detail-raw-block" style="margin-top:10px;">
+        <h4>脱敏详情摘要</h4>
+        <div class="log-detail-raw">${this.detailSummary(item.detail, 500)}</div>
+      </div>
+      ${deepDiagnostics}
     `;
   },
 

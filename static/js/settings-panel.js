@@ -149,16 +149,15 @@ const SettingsPanel = {
     panel.querySelector('.settings-backdrop')?.addEventListener('click', () => this.close());
     panel.querySelector('#settings-close')?.addEventListener('click', () => this.close());
 
-    panel.querySelector('#setting-auto-start')?.addEventListener('change', e => this.updateSetting('auto_start', e.target.checked));
-    panel.querySelector('#setting-start-minimized')?.addEventListener('change', e => this.updateSetting('start_minimized', e.target.checked));
-    panel.querySelector('#setting-auto-refresh-logs')?.addEventListener('change', e => this.updateSetting('auto_refresh_logs', e.target.checked));
-    panel.querySelector('#setting-debug-mode')?.addEventListener('change', e => this.updateSetting('debug_mode', e.target.checked));
+    panel.querySelector('#setting-auto-start')?.addEventListener('change', e => this.updateCheckboxSetting(e, 'auto_start'));
+    panel.querySelector('#setting-start-minimized')?.addEventListener('change', e => this.updateCheckboxSetting(e, 'start_minimized'));
+    panel.querySelector('#setting-auto-refresh-logs')?.addEventListener('change', e => this.updateCheckboxSetting(e, 'auto_refresh_logs'));
+    panel.querySelector('#setting-debug-mode')?.addEventListener('change', e => this.updateCheckboxSetting(e, 'debug_mode'));
 
     panel.querySelectorAll('input[name="setting-theme"]').forEach(radio => {
       radio.addEventListener('change', e => {
         if (e.target.checked) {
           this.updateSetting('theme', e.target.value);
-          App.setTheme(e.target.value);
         }
       });
     });
@@ -172,17 +171,16 @@ const SettingsPanel = {
       this.updateSetting('upstream_http_client', e.target.value);
       this.syncExperimentalUI(panel);
     });
-    panel.querySelector('#setting-upstream-http2')?.addEventListener('change', e => this.updateSetting('upstream_http2', e.target.checked));
-    panel.querySelector('#setting-upstream-keepalive')?.addEventListener('change', e => this.updateSetting('upstream_keepalive', e.target.checked));
-    panel.querySelector('#setting-normalize-tools-order')?.addEventListener('change', e => this.updateSetting('normalize_tools_order', e.target.checked));
+    panel.querySelector('#setting-upstream-http2')?.addEventListener('change', e => this.updateCheckboxSetting(e, 'upstream_http2'));
+    panel.querySelector('#setting-upstream-keepalive')?.addEventListener('change', e => this.updateCheckboxSetting(e, 'upstream_keepalive'));
+    panel.querySelector('#setting-normalize-tools-order')?.addEventListener('change', e => this.updateCheckboxSetting(e, 'normalize_tools_order'));
 
     // 诊断工具
     panel.querySelector('#setting-debug-capture-enabled')?.addEventListener('change', e => {
-      this.updateSetting('debug_capture_enabled', e.target.checked);
+      this.updateCheckboxSetting(e, 'debug_capture_enabled');
       this.syncExperimentalUI(panel);
     });
-    panel.querySelector('#setting-debug-capture-last-body')?.addEventListener('change', e => this.updateSetting('debug_capture_last_body', e.target.checked));
-    panel.querySelector('#debug-replay-btn')?.addEventListener('click', () => this.runReplay());
+    panel.querySelector('#setting-debug-capture-last-body')?.addEventListener('change', e => this.updateCheckboxSetting(e, 'debug_capture_last_body'));
 
     this.syncExperimentalUI(panel);
   },
@@ -234,18 +232,66 @@ const SettingsPanel = {
     return `<div class="settings-hint">平均命中率：${avg}%</div>${rows}`;
   },
 
+  updateCheckboxSetting(event, key) {
+    event.stopPropagation();
+    const input = event.currentTarget || event.target;
+    if (!input || input.disabled) return;
+    this.updateSetting(key, !!input.checked);
+  },
+
+  applySettingSideEffects(key, value) {
+    if (key === 'auto_refresh_logs') {
+      LogsTab.setAutoRefresh(value);
+    }
+    if (key === 'debug_mode' && Tabs.current === 'logs') {
+      LogsTab._lastRenderSignature = '';
+      LogsTab.renderRows(true);
+    }
+    if (key === 'theme') {
+      App.setTheme(value || 'system');
+    }
+  },
+
+  refreshOpenPanelControls() {
+    const panel = document.getElementById('settings-panel');
+    if (!panel || panel.classList.contains('hidden')) return;
+    const s = Store.state.settings || {};
+    const controls = {
+      'setting-auto-start': !!s.auto_start,
+      'setting-start-minimized': !!s.start_minimized,
+      'setting-auto-refresh-logs': s.auto_refresh_logs !== false,
+      'setting-debug-mode': !!s.debug_mode,
+      'setting-upstream-http2': !!s.upstream_http2,
+      'setting-upstream-keepalive': !!s.upstream_keepalive,
+      'setting-normalize-tools-order': !!s.normalize_tools_order,
+      'setting-debug-capture-enabled': !!s.debug_capture_enabled,
+      'setting-debug-capture-last-body': !!s.debug_capture_last_body,
+    };
+    Object.entries(controls).forEach(([id, checked]) => {
+      const el = panel.querySelector(`#${id}`);
+      if (el) el.checked = checked;
+    });
+    const client = panel.querySelector('#setting-upstream-http-client');
+    if (client && s.upstream_http_client) client.value = s.upstream_http_client;
+    const theme = panel.querySelector(`input[name="setting-theme"][value="${s.theme || 'system'}"]`);
+    if (theme) theme.checked = true;
+    this.syncExperimentalUI(panel);
+  },
+
   async updateSetting(key, value) {
+    const previousSettings = { ...(Store.state.settings || {}) };
+    Store.update({ settings: { ...previousSettings, [key]: value } });
+    this.applySettingSideEffects(key, value);
     try {
-      await API.saveSettings({ [key]: value });
-      await Store.load();
-      // 日志自动刷新开关修改后立即同步到日志页
-      if (key === 'auto_refresh_logs') {
-        LogsTab.setAutoRefresh(value);
-      }
+      const updated = await API.saveSettings({ [key]: value });
+      Store.update({ settings: { ...(Store.state.settings || {}), ...(updated || {}) } });
+      this.refreshOpenPanelControls();
       Toast.success('设置已保存');
     } catch (err) {
+      Store.update({ settings: previousSettings });
+      this.refreshOpenPanelControls();
+      this.applySettingSideEffects(key, previousSettings[key]);
       Toast.error('保存设置失败：' + err.message);
-      await Store.load();
     }
   },
 
