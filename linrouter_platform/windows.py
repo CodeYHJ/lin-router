@@ -47,15 +47,36 @@ class WindowsPlatform(PlatformBase):
 
     def get_project_root(self) -> Path:
         if self.is_frozen:
-            # PyInstaller 打包后 exe 位于 dist/，项目根目录是其父目录
+            # PyInstaller 打包后 exe 位于安装目录的 dist/ 子目录，资源根目录是其父目录。
             return Path(sys.executable).resolve().parent.parent
         return Path(__file__).resolve().parent.parent
 
+    def get_user_data_dir(self) -> Path:
+        """返回 Windows 用户数据目录，供安装包用户在无本地配置时兜底使用。"""
+        base = Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming")
+        path = base / self.APP_NAME
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def _local_data_dir(self) -> Path:
+        """返回开发者优先使用的数据目录。打包后为 exe 父级目录，开发时为项目根目录。"""
+        return self.get_project_root()
+
     def get_config_path(self, filename: str = "lin-router-config.json") -> Path:
-        return self.get_project_root() / filename
+        local_path = self._local_data_dir() / filename
+        if local_path.exists():
+            return local_path
+        if self.is_frozen:
+            return self.get_user_data_dir() / filename
+        return local_path
 
     def get_log_dir(self) -> Path:
-        # 保持与现有 Windows 行为一致：日志放在配置文件所在目录
+        local_dir = self._local_data_dir()
+        if (local_dir / "lin-router-logs.jsonl").exists() or (local_dir / "lin-router-config.json").exists():
+            return local_dir
+        if self.is_frozen:
+            return self.get_user_data_dir()
+        # 开发模式保持与现有 Windows 行为一致：日志放在配置文件所在目录。
         return self.get_config_path().parent
 
     def get_executable_path(self) -> Path:

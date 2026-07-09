@@ -944,6 +944,7 @@ class ArkProxyRouter:
         self.log_file = self._resolve_log_file()
         self.log_write_error = ""
         self.upstream_locks: Dict[str, threading.Lock] = {}
+        self.upstream_active_streams: Dict[str, int] = {}
         self.upstream_locks_guard = threading.Lock()
         self._upstream_client = self._create_upstream_client()
         self.debug_capture = DebugCapture(self, settings_store)
@@ -1996,6 +1997,32 @@ class ArkProxyRouter:
                 self.upstream_locks[key] = lock
             return lock
 
+    def _candidate_lock_key(self, candidate: UpstreamCandidate) -> str:
+        return f"{candidate.group.id}:{candidate.target_model}:{candidate.channel}"
+
+    def _active_stream_count(self, candidate: UpstreamCandidate) -> int:
+        key = self._candidate_lock_key(candidate)
+        with self.upstream_locks_guard:
+            return int(self.upstream_active_streams.get(key, 0))
+
+    def _mark_stream_active(self, candidate: UpstreamCandidate, delta: int) -> None:
+        key = self._candidate_lock_key(candidate)
+        with self.upstream_locks_guard:
+            next_value = max(0, int(self.upstream_active_streams.get(key, 0)) + delta)
+            if next_value:
+                self.upstream_active_streams[key] = next_value
+            else:
+                self.upstream_active_streams.pop(key, None)
+
+    def _waf_lock_busy_detail(self, candidate: UpstreamCandidate, body: bytes, lock_wait_ms: int) -> str:
+        active_streams = self._active_stream_count(candidate)
+        fallback_reason = "large_task_in_progress" if active_streams or len(body) > 131072 else "candidate_busy"
+        return (
+            f"waf_lock_wait_timeout; fallback_reason={fallback_reason}; "
+            f"failure_scope=busy; cooldown_applied=false; active_streams={active_streams}; "
+            f"lock_wait_ms={lock_wait_ms}; busy_hint=candidate_busy"
+        )
+
     @staticmethod
     def _candidate_lock_enabled(candidate: UpstreamCandidate) -> bool:
         return candidate.group.provider_type == PROVIDER_RELAY and candidate.group.waf_compatible
@@ -2088,21 +2115,76 @@ class ArkProxyRouter:
             )
         return None
 
+    def _aggregate_member_skip_reason(self, member: AggregateMember) -> Tuple[str, str, Optional[ConnectionGroup], Optional[ModelConfig]]:
+        """返回聚合成员跳过原因；空 reason 表示可参与调度。"""
+        group = self.store.find_group(member.group_id)
+        model = self.store.find_model(member.model_id)
+        now_ts = int(time.time())
+        if not member.enabled:
+            return "member_disabled", "该聚合成员已手动停用，不参与本次调度。", group, model
+        if member.cooldown_until and member.cooldown_until > now_ts:
+            return "member_cooling", "该聚合成员正在冷却中，本次直接跳过。", group, model
+        if not group:
+            return "underlying_group_missing", "底层连接组不存在，请检查聚合成员配置。", group, model
+        if not model:
+            return "underlying_model_missing", "底层真实模型不存在，请检查聚合成员配置。", group, model
+        if not model.usable or getattr(model, "disabled_by_user", False):
+            return "underlying_model_disabled", "底层真实模型已停用，请先启用真实模型。", group, model
+        if model.cooldown_until and model.cooldown_until > now_ts:
+            return "underlying_model_cooling", "底层真实模型冷却中，本次直接跳过。", group, model
+        return "", "", group, model
+
     def _aggregate_member_usable(self, member: AggregateMember) -> bool:
         """检查聚合成员是否可用（存在、启用、未 cooldown、真实模型未被用户手动禁用）。"""
-        if not member.enabled:
-            return False
-        group = self.store.find_group(member.group_id)
-        if not group:
-            return False
-        model = self.store.find_model(member.model_id)
-        if not model or not model.usable or getattr(model, "disabled_by_user", False):
-            return False
-        if member.cooldown_until and member.cooldown_until > int(time.time()):
-            return False
-        return True
+        reason, _, _, _ = self._aggregate_member_skip_reason(member)
+        return not reason
 
-    def _iter_aggregate_candidates(self, aggregate: AggregateModel) -> Iterator[UpstreamCandidate]:
+    def _log_aggregate_member_skip(
+        self,
+        path: str,
+        aggregate: AggregateModel,
+        member: AggregateMember,
+        reason: str,
+        message: str,
+        group: Optional[ConnectionGroup],
+        model: Optional[ModelConfig],
+        requested_label: str,
+        request_id: str,
+        resolved_as: str,
+    ) -> None:
+        selected_group = group.name if group else member.group_id
+        selected_model = model.name if model else member.model_id
+        selected_upstream_model = (model.upstream_model or model.ep_id) if model else ""
+        suffix = self._aggregate_log_suffix(
+            resolved_as=resolved_as,
+            aggregate_model=aggregate.name,
+            aggregate_id=aggregate.id,
+            selected_group=selected_group,
+            selected_model=selected_model,
+            selected_upstream_model=selected_upstream_model,
+            selection_reason=f"skip_{reason}",
+            fallback_index=0,
+            fallback_chain=[],
+            strategy=aggregate.strategy or "priority",
+            manual_price=member.manual_price,
+        )
+        detail = (
+            f"requested={requested_label}; skip_reason={reason}; aggregate_member_id={member.id}; "
+            f"cooldown_applied=false; failure_scope=skip; {message}; {suffix}"
+        )
+        label = selected_model or member.model_id or member.id
+        self.add_log(path, label, "skip", detail, group=group, event="skip", request_id=request_id, attempt=0, cooldown_applied=False, failure_scope="skip")
+
+    def _iter_aggregate_candidates(
+        self,
+        aggregate: AggregateModel,
+        *,
+        log_skips: bool = False,
+        path: str = "",
+        requested_label: str = "",
+        request_id: str = "",
+        resolved_as: str = "",
+    ) -> Iterator[UpstreamCandidate]:
         """按聚合模型策略产出候选成员。"""
         self.store.refresh_expired_cooldowns()
         members = self.store.get_aggregate_members(aggregate.id)
@@ -2119,10 +2201,11 @@ class ArkProxyRouter:
         else:
             members = sorted(members, key=lambda m: m.priority)
         for member in members:
-            if not self._aggregate_member_usable(member):
+            reason, message, group, model = self._aggregate_member_skip_reason(member)
+            if reason:
+                if log_skips:
+                    self._log_aggregate_member_skip(path, aggregate, member, reason, message, group, model, requested_label, request_id, resolved_as)
                 continue
-            group = self.store.find_group(member.group_id)
-            model = self.store.find_model(member.model_id)
             if not group or not model:
                 continue
             candidate = self._candidate_from_model(self.store.models.index(model), model, group)
@@ -2305,7 +2388,7 @@ class ArkProxyRouter:
         if aggregate_info:
             aggregate_model, resolved_as = aggregate_info
             auto_fallback = True
-            candidates_iter: Iterator[UpstreamCandidate] = self._iter_aggregate_candidates(aggregate_model)
+            candidates_iter: Iterator[UpstreamCandidate] = self._iter_aggregate_candidates(aggregate_model, log_skips=True, path=path, requested_label=requested_label, request_id=request_id, resolved_as=resolved_as)
         else:
             candidates_iter = self._iter_upstream_candidates(str(requested_model) if requested_model else None, group_id)
 
@@ -2352,16 +2435,18 @@ class ArkProxyRouter:
                     path,
                     candidate.label,
                     "timeout",
-                    self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, "waf_lock_wait_timeout", lock_wait_ms=lock_wait_ms),
+                    self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, self._waf_lock_busy_detail(candidate, body, lock_wait_ms), lock_wait_ms=lock_wait_ms),
                     duration_ms,
                     group=group,
                     request_id=request_id,
                     attempt=attempt,
                     event="waf_lock_timeout",
+                    cooldown_applied=False,
+                    failure_scope="busy",
                 )
                 if auto_fallback:
                     continue
-                return 503, {"Content-Type": "application/json; charset=utf-8"}, [json.dumps({"error": {"message": "获取 WAF 锁超时，请稍后重试", "type": "timeout", "code": "waf_lock_wait_timeout", "request_id": request_id}}, ensure_ascii=False).encode("utf-8")]
+                return 503, {"Content-Type": "application/json; charset=utf-8"}, [json.dumps({"error": {"message": "候选正在处理大上下文请求，已临时切换到下一个候选", "type": "timeout", "code": "waf_lock_wait_timeout", "request_id": request_id}}, ensure_ascii=False).encode("utf-8")]
             try:
                 resp = self._upstream_client.request("POST", target_url, outbound_headers, body, stream=False, timeout=120)
                 with resp:
@@ -2631,7 +2716,7 @@ class ArkProxyRouter:
         if aggregate_info:
             aggregate_model, resolved_as = aggregate_info
             auto_fallback = True
-            candidates_iter = self._iter_aggregate_candidates(aggregate_model)
+            candidates_iter = self._iter_aggregate_candidates(aggregate_model, log_skips=True, path=path, requested_label=requested_label, request_id=request_id, resolved_as=resolved_as)
         else:
             candidates_iter = self._iter_upstream_candidates(str(requested_model) if requested_model else None, group_id)
 
@@ -2680,16 +2765,18 @@ class ArkProxyRouter:
                     path,
                     candidate.label,
                     "timeout",
-                    self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, "waf_lock_wait_timeout", lock_wait_ms=lock_wait_ms, aggregate_suffix=aggregate_suffix),
+                    self._debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, self._waf_lock_busy_detail(candidate, body, lock_wait_ms), lock_wait_ms=lock_wait_ms, aggregate_suffix=aggregate_suffix),
                     duration_ms,
                     group=group,
                     request_id=request_id,
                     attempt=attempt,
                     event="waf_lock_timeout",
+                    cooldown_applied=False,
+                    failure_scope="busy",
                 )
                 if auto_fallback:
                     continue
-                error_body = json.dumps({"error": {"message": "获取 WAF 锁超时，请稍后重试", "type": "timeout", "code": "waf_lock_wait_timeout", "request_id": request_id}}, ensure_ascii=False).encode("utf-8")
+                error_body = json.dumps({"error": {"message": "候选正在处理大上下文请求，已临时切换到下一个候选", "type": "timeout", "code": "waf_lock_wait_timeout", "request_id": request_id}}, ensure_ascii=False).encode("utf-8")
                 return 503, {"Content-Type": "application/json; charset=utf-8"}, [error_body], request_id
             try:
                 resp = self._upstream_client.request("POST", target_url, outbound_headers, body, stream=True, timeout=120)
@@ -2716,6 +2803,7 @@ class ArkProxyRouter:
                     aggregate_suffix=aggregate_suffix,
                 )
                 self.add_log(path, candidate.label, "200", detail, duration_ms, *latest_usage, group=group, request_id=request_id, attempt=attempt, event="stream_ok")
+                self._mark_stream_active(candidate, 1)
                 try:
                     self.debug_capture.capture(
                         path=path,
@@ -2786,11 +2874,35 @@ class ArkProxyRouter:
                             resp.close()
                         if stream_state["timeout"]:
                             usage_source = "stream_incomplete"
+                            lifecycle_event = "stream_idle_timeout"
+                            lifecycle_status = "timeout"
+                            lifecycle_result = "stream_idle_timeout"
                         elif stream_state["completed_normally"]:
                             usage_source = "stream_final" if any(usage_total) else "missing"
+                            lifecycle_event = "stream_done"
+                            lifecycle_status = "200"
+                            lifecycle_result = "stream_done"
                         else:
                             usage_source = "stream_incomplete"
+                            lifecycle_event = "client_disconnected"
+                            lifecycle_status = "client_disconnected"
+                            lifecycle_result = "client_disconnected"
                         self.update_latest_stream_usage(request_id, usage_total, usage_source, lock_wait_ms=lock_wait_ms, lock_release_reason=release_reason)
+                        lifecycle_detail = self._debug_detail(
+                            candidate,
+                            requested_label,
+                            target_url,
+                            body_mode,
+                            body,
+                            payload_for_upstream,
+                            outbound_headers,
+                            f"stream_finalized=true; final_result={lifecycle_result}; chunks_received={chunks_received}; bytes_received={bytes_received}",
+                            lock_wait_ms=lock_wait_ms,
+                            lock_release_reason=release_reason,
+                            aggregate_suffix=aggregate_suffix,
+                        )
+                        self.add_log(path, candidate.label, lifecycle_status, lifecycle_detail, int((time.perf_counter() - started_at) * 1000), *usage_total, group=group, request_id=request_id, attempt=attempt, event=lifecycle_event, usage_source=usage_source)
+                        self._mark_stream_active(candidate, -1)
                         self._release_lock(upstream_lock)
 
                 return 200, dict(resp.headers.items()), iterator(), request_id
@@ -4355,6 +4467,8 @@ class RouterHandler(BaseHTTPRequestHandler):
             if not ok:
                 self._send_json({"ok": False, "message": msg}, status=400)
                 return
+            if bool(payload.get("clear_cooldown")):
+                self.store.clear_aggregate_member_cooldown(member.id, self.router._now())
             # 支持在同一请求中调整排序（direction: up/down/top/bottom）
             direction = str(payload.get("direction") or "").strip()
             if direction:
@@ -4604,4 +4718,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

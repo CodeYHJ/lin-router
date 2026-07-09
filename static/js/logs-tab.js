@@ -153,7 +153,18 @@ const LogsTab = {
 
   filterLogs() {
     const logs = Store.state.logs || [];
-    return logs.filter(item => this.matches(item));
+    return logs.filter(item => this.matches(item) && !this.isStableConfigSkip(item));
+  },
+
+  isStableConfigSkip(item) {
+    if (!item || item.event !== 'skip') return false;
+    const parsed = this.parseDetail(item.detail);
+    return parsed.skip_reason === 'member_disabled';
+  },
+
+  requestRelatedLogs(item) {
+    if (!item?.request_id) return [];
+    return (Store.state.logs || []).filter(log => log.request_id === item.request_id && log !== item);
   },
 
   resetFilters() {
@@ -188,8 +199,12 @@ const LogsTab = {
     return item.group_name || Store.getGroup(item.group_id)?.name || '-';
   },
 
-  eventLabel(event) {
-    const map = { ok:'成功', stream_ok:'流式成功', retry_ok:'重试成功', cooldown:'冷却切换', fallback:'自动切换', skip:'跳过', network:'网络错误', error:'错误', system:'系统', stream_timeout:'流式超时' };
+  eventLabel(event, item = null) {
+    if (event === 'skip' && item) {
+      const parsed = this.parseDetail(item.detail);
+      if (parsed.skip_reason === 'member_disabled') return '已停用成员未参与';
+    }
+    const map = { ok:'成功', stream_ok:'首包成功', retry_ok:'重试成功', cooldown:'冷却切换', fallback:'自动切换', skip:'跳过', network:'网络错误', error:'错误', system:'系统', stream_timeout:'流式超时', waf_lock_timeout:'候选忙', stream_done:'流式完成', stream_idle_timeout:'流式空闲超时', client_disconnected:'客户端断开' };
     return map[event] || event || '-';
   },
 
@@ -208,7 +223,8 @@ const LogsTab = {
     return warnings.length ? `<span class="pill warning">${Utils.escapeHtml(warnings.join(' / '))}</span>` : '-';
   },
 
-  statusClass(status) {
+  statusClass(status, item = null) {
+    if (item && this.isStableConfigSkip(item)) return 'info';
     const text = String(status || '');
     if (text === '200' || text.startsWith('2')) return 'success';
     if (text === 'network' || text.includes('failed') || text.startsWith('5')) return 'error';
@@ -276,8 +292,8 @@ const LogsTab = {
         <td class="tiny">${Utils.escapeHtml(item.time)}</td>
         <td class="tiny">${Utils.escapeHtml(this.groupName(item))}</td>
         <td>${Utils.escapeHtml(item.model || '-')}</td>
-        <td><span class="pill ${this.statusClass(item.status)}">${Utils.escapeHtml(item.status)}</span></td>
-        <td class="tiny">${Utils.escapeHtml(this.eventLabel(item.event))}</td>
+        <td><span class="pill ${this.statusClass(item.status, item)}">${Utils.escapeHtml(item.status)}</span></td>
+        <td class="tiny">${Utils.escapeHtml(this.eventLabel(item.event, item))}</td>
         <td class="tiny">${Number(item.attempt || 0) || 1}</td>
         <td class="tiny">${Number(item.duration_ms || 0) ? `${Number(item.duration_ms)} ms` : '-'}</td>
         <td class="tiny">${Utils.escapeHtml(this.tokenSummary(item))}</td>
@@ -306,6 +322,64 @@ const LogsTab = {
     // 如果有 model=... 这类键值对，高亮关键 key
     formatted = formatted.replace(/(requested|group_name|model|upstream|channel|mode|error)=/g, '<strong>$1=</strong>');
     return formatted;
+  },
+
+  skipReasonLabel(reason) {
+    const map = {
+      member_disabled: '已停用成员，信息级',
+      member_cooling: '成员冷却中，健康过滤',
+      underlying_model_disabled: '底层模型停用，配置过滤',
+      underlying_model_cooling: '底层模型冷却中，健康过滤',
+      underlying_model_missing: '底层模型不存在，配置异常',
+      underlying_group_missing: '底层连接组不存在，配置异常'
+    };
+    return map[reason] || reason || '-';
+  },
+
+  runtimeReasonLabel(parsed, item) {
+    const reason = parsed.fallback_reason || parsed.skip_reason || parsed.reason || '';
+    if (reason === 'large_task_in_progress') return '候选正在处理大上下文请求，调度切换';
+    if (reason === 'candidate_busy') return '候选忙/等待锁超时，调度切换';
+    if (reason === 'stream_idle_timeout') return '上游流式空闲超时，健康失败';
+    if (String(item.event || '') === 'waf_lock_timeout') return '候选忙/等待锁超时，调度切换';
+    if (String(item.failure_scope || parsed.failure_scope || '') === 'upstream') return '上游超时/错误，健康失败';
+    return this.skipReasonLabel(reason);
+  },
+
+  renderCandidateFilterDetails(item) {
+    const related = this.requestRelatedLogs(item)
+      .map(log => ({ log, parsed: this.parseDetail(log.detail) }))
+      .filter(entry => {
+        const event = String(entry.log.event || '');
+        return event === 'skip' || event === 'waf_lock_timeout' || event === 'stream_timeout' || event === 'cooldown' || event === 'fallback' || event === 'network';
+      });
+    if (!related.length) return '';
+    const rows = related.map(({ log, parsed }) => {
+      const isStable = parsed.skip_reason === 'member_disabled';
+      const severity = isStable ? 'info' : (log.cooldown_applied || log.failure_scope === 'upstream' ? 'warning' : 'info');
+      const reason = parsed.skip_reason ? this.skipReasonLabel(parsed.skip_reason) : this.runtimeReasonLabel(parsed, log);
+      return `
+        <tr>
+          <td class="tiny"><span class="pill ${severity}">${Utils.escapeHtml(severity === 'info' ? '信息' : '调度')}</span></td>
+          <td>${Utils.escapeHtml(log.model || parsed.selected_model || '-')}</td>
+          <td>${Utils.escapeHtml(this.eventLabel(log.event, log))}</td>
+          <td>${Utils.escapeHtml(reason)}</td>
+          <td class="tiny">${Utils.escapeHtml(log.failure_scope || parsed.failure_scope || '-')}</td>
+          <td class="tiny">${log.cooldown_applied ? '是' : '否'}</td>
+        </tr>
+      `;
+    }).join('');
+    return `
+      <div class="log-detail-block" style="margin-top:10px;">
+        <h4>候选过滤详情</h4>
+        <div class="aggregate-members-table-wrap">
+          <table class="aggregate-members-table">
+            <thead><tr><th>级别</th><th>候选</th><th>事件</th><th>原因</th><th>Scope</th><th>冷却</th></tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>
+      </div>
+    `;
   },
 
   renderWafHint(parsed) {
@@ -344,6 +418,7 @@ const LogsTab = {
       parsed.channel ? Utils.escapeHtml(parsed.channel) : '-',
     ];
     const aggregateChain = isAggregate ? this.renderAggregateChain(parsed) : '';
+    const candidateFilterDetails = this.renderCandidateFilterDetails(item);
     return `
       ${rawBlock}
       ${wafHint}
@@ -353,7 +428,7 @@ const LogsTab = {
           <dl>
             <dt>时间</dt><dd>${Utils.escapeHtml(item.time)}</dd>
             <dt>耗时</dt><dd>${Number(item.duration_ms || 0) ? `${Number(item.duration_ms)} ms` : '-'}</dd>
-            <dt>状态</dt><dd><span class="pill ${this.statusClass(item.status)}">${Utils.escapeHtml(item.status)}</span> ${Utils.escapeHtml(this.eventLabel(item.event))}</dd>
+            <dt>状态</dt><dd><span class="pill ${this.statusClass(item.status, item)}">${Utils.escapeHtml(item.status)}</span> ${Utils.escapeHtml(this.eventLabel(item.event, item))}</dd>
             <dt>请求 ID / 次</dt><dd>${Utils.escapeHtml(item.request_id || '-')} / ${Number(item.attempt || 0) || 1}</dd>
           </dl>
         </div>
@@ -376,6 +451,9 @@ const LogsTab = {
             <dt>UA 类型</dt><dd>${Utils.escapeHtml(parsed.user_agent_family || '-')}</dd>
             <dt>WAF 兼容</dt><dd>${Utils.escapeHtml(parsed.waf_compatible || '-')}</dd>
             <dt>WAF 锁</dt><dd>${Utils.escapeHtml(parsed.waf_lock_enabled || '-')}</dd>
+            <dt>等待锁</dt><dd>${Utils.escapeHtml(parsed.lock_wait_ms ? parsed.lock_wait_ms + ' ms' : '-')}</dd>
+            <dt>Fallback 原因</dt><dd>${Utils.escapeHtml(parsed.fallback_reason || parsed.selection_reason || '-')}</dd>
+            <dt>Failure Scope</dt><dd>${Utils.escapeHtml(item.failure_scope || parsed.failure_scope || '-')}</dd>
             <dt>HTTP 客户端</dt><dd>${Utils.escapeHtml(parsed.http_client || '-')}</dd>
             <dt>HTTP 版本</dt><dd>${Utils.escapeHtml(parsed.upstream_http_version || '-')}</dd>
             <dt>Tools 排序</dt><dd>${Utils.escapeHtml(parsed.tools_normalized || '-')}</dd>
@@ -384,6 +462,7 @@ const LogsTab = {
         </div>
       </div>
       ${aggregateChain}
+      ${candidateFilterDetails}
       <details style="margin-top:10px;">
         <summary style="font-size:12px; color:var(--text-tertiary); cursor:pointer;">技术细节</summary>
         <div class="log-detail-grid" style="margin-top:8px;">

@@ -223,9 +223,52 @@ def test_underlying_model_unusable():
         Path(config_path).unlink(missing_ok=True)
 
 
+def test_aggregate_member_skip_reason_logged():
+    port = get_free_port()
+    server = start_server(FailOnce500Handler, port)
+
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as f:
+        config_path = f.name
+        cfg = build_config(port)
+        member_id = cfg["aggregate_members"][0]["id"]
+        json.dump(cfg, f, ensure_ascii=False, indent=2)
+
+    try:
+        store = ConfigStore(config_path)
+        router = Router(store, settings_store=None)
+        ctx = aggregate_route_ctx(store, "lr-ag-single")
+        payload = {"model": "agg-single", "messages": [{"role": "user", "content": "hi"}]}
+
+        member = store.find_aggregate_member(member_id)
+        member.enabled = False
+        store.save()
+        try:
+            router.call("/v1/chat/completions", payload, ctx)
+            raise AssertionError("成员停用时应无可用候选")
+        except Exception as err:
+            assert getattr(err, "error_code", "") == "aggregate_members_unavailable"
+        assert any(log.event == "skip" and "skip_reason=member_disabled" in log.detail for log in router.logs)
+
+        member.enabled = True
+        model = store.find_model(member.model_id)
+        model.usable = False
+        model.disabled_by_user = True
+        store.save()
+        try:
+            router.call("/v1/chat/completions", payload, ctx)
+            raise AssertionError("底层模型停用时应无可用候选")
+        except Exception as err:
+            assert getattr(err, "error_code", "") == "aggregate_members_unavailable"
+        assert any(log.event == "skip" and "skip_reason=underlying_model_disabled" in log.detail for log in router.logs)
+    finally:
+        server.shutdown()
+        Path(config_path).unlink(missing_ok=True)
+
+
 def main():
     test_clear_cooldown_restores_member()
     test_underlying_model_unusable()
+    test_aggregate_member_skip_reason_logged()
     print("\nAll aggregate clear-cooldown tests passed.")
 
 
