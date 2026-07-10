@@ -118,9 +118,32 @@ def test_v054_live_diagnose_and_recover_contracts():
             assert failed_probe["code"] == "probe_failed"
             assert server.store.find_model("m1").cooldown_until > 0
             assert server.store.find_model("m1").usable is False
+            probe_log = router.logs[0]
+            assert probe_log.event == "manual_probe"
+            assert probe_log.group_id == "g1"
+            assert probe_log.request_id.startswith("manual-probe-")
+            assert "upstream still timed out" not in probe_log.detail
+            assert "summary=连接或等待上游响应超时" in probe_log.detail
+
+            model.cooldown_until = 9999999999
+            model.usable = False
+            server.store.save()
+            router._manual_probe_candidate = lambda candidate: (False, "waf_lock_wait_timeout", "raw upstream body must not be logged")
+            status, busy_probe = post_json(port, "/api/models/m1/recover")
+            assert status == 400
+            assert busy_probe["code"] == "probe_failed"
+            assert server.store.find_model("m1").cooldown_until == 9999999999
+            assert router.logs[0].failure_scope == "local_lock"
+            assert router.logs[0].cooldown_applied is False
+            assert "raw upstream body" not in router.logs[0].detail
 
             router._manual_probe_candidate = lambda candidate: (True, "probe_ok", "ok")
-
+            status, default_logs = get_json(port, "/api/logs")
+            assert status == 200
+            assert all(item.get("usage_source") != "manual_probe" for item in default_logs["logs"])
+            status, debug_logs = get_json(port, "/api/logs?debug=true")
+            assert status == 200
+            assert any(item.get("usage_source") == "manual_probe" for item in debug_logs["logs"])
             member = server.store.find_aggregate_member("am1")
             assert member is not None
             member.cooldown_until = 9999999999
@@ -167,8 +190,20 @@ def test_v054_frontend_contracts():
     assert "最小探测未通过，候选保持冷却" in logs_js
     assert "probe_failed: '探测失败'" in logs_js
     assert "manual_probe:'人工探测'" in logs_js
+    assert "当前中转渠道未确认支持推理强度" in logs_js
+    assert "requested_reasoning_effort" in logs_js
+    assert "reasoningPreservedLabel" in logs_js
+    assert "group-reasoning-support" in config_js
+    assert "panel.querySelector('#group-waf')?.addEventListener('change'" in config_js
     assert "API.recoverModel" in config_js
     assert "API.recoverAggregateMember" in config_js
     assert "reloadAfterAggregateMemberChange" in config_js
+    assert "冷却中（剩 ${mm}:${ss}）" in config_js
+    assert "底层冷却中（剩 ${mm}:${ss}）" in config_js
+    assert "data-aggregate-member-status" in config_js
+    assert "恢复/启用" not in config_js
+    assert "_openDetailKey" in logs_js
+    assert "tbody.addEventListener('click'" in logs_js
+    assert "item.usage_source !== 'manual_probe'" in logs_js
     assert "previewAggregateMemberSort" not in config_js
     assert "排序变更预览" not in config_js

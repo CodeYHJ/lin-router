@@ -122,11 +122,28 @@ const ConfigTab = {
             <label>流式空闲超时秒</label>
             <input id="group-stream-timeout" type="number" min="0" max="600" step="1" value="${g?.stream_idle_timeout ?? 120}">
           </div>
+          <div class="form-row" id="group-reasoning-support-row">
+            <label>推理强度支持</label>
+            <select id="group-reasoning-support">
+              <option value="unknown" ${(g?.reasoning_support || 'unknown') === 'unknown' ? 'selected' : ''}>未知（尚未验证）</option>
+              <option value="supported" ${g?.reasoning_support === 'supported' ? 'selected' : ''}>已验证支持</option>
+              <option value="unsupported" ${g?.reasoning_support === 'unsupported' ? 'selected' : ''}>不支持</option>
+            </select>
+            <div class="form-hint">仅标记渠道能力，不会改写 Hermes 的推理强度字段。</div>
+          </div>
           <div class="form-row" id="group-waf-row">
             <label class="checkbox">
               <input id="group-waf" type="checkbox" ${g?.waf_compatible ? 'checked' : ''}>
               <span>仅中转站 WAF 兼容</span>
             </label>
+          </div>
+          <div class="form-row hidden" id="group-waf-client-mode-row">
+            <label>WAF 客户端策略</label>
+            <select id="group-waf-client-mode">
+              <option value="always" ${(g?.waf_client_mode || 'always') === 'always' ? 'selected' : ''}>始终使用 WAF 兼容</option>
+              <option value="auto_bypass_codex" ${g?.waf_client_mode === 'auto_bypass_codex' ? 'selected' : ''}>智能兼容（Codex 直连 Header）</option>
+            </select>
+            <div class="form-hint">智能模式会识别 Codex UA 或 x-codex-* Header；仅跳过 Header 改写和 WAF 锁，不改请求体。</div>
           </div>
           <div class="form-row hidden" id="group-waf-policy-row">
             <label>Accept 策略</label>
@@ -432,7 +449,7 @@ const ConfigTab = {
       ? '<span class="pill warning" title="底层真实模型不可用或处于冷却">底层不可用</span>'
       : '';
     const recoverBtn = isCooling
-      ? `<button type="button" class="btn-recover btn-sm" data-action="recover" data-member-id="${member.id}">恢复/启用</button>`
+      ? `<button type="button" class="btn-recover btn-sm" data-action="recover" data-member-id="${member.id}">重试恢复</button>`
       : '';
     const toggleBtn = member.enabled === false
       ? `<button type="button" class="btn-secondary btn-sm" data-action="enable" data-member-id="${member.id}">启用</button>`
@@ -445,7 +462,7 @@ const ConfigTab = {
         <td class="truncate-cell" title="${Utils.escapeHtml(model?.upstream_model || model?.ep_id || '-')}">${Utils.escapeHtml(model?.upstream_model || model?.ep_id || '-')}</td>
         <td class="tiny">${idx + 1}</td>
         <td class="price-col"><input type="number" class="aggregate-member-price" data-member-id="${member.id}" value="${member.manual_price != null ? member.manual_price : ''}" step="0.001" placeholder="继承"></td>
-        <td class="tiny" data-member-status-cell="${member.id}"><span class="pill ${status.class}" title="${Utils.escapeHtml(status.title)}">${status.text}</span></td>
+        <td class="tiny" data-member-status-cell="${member.id}"><span data-aggregate-member-status="${member.id}" class="pill ${status.class}" title="${Utils.escapeHtml(status.title)}">${status.text}</span></td>
         <td class="aggregate-member-actions">
           ${toggleBtn}
           ${recoverBtn}
@@ -467,7 +484,6 @@ const ConfigTab = {
       warning: { class: 'warning', text: '最近错误', title: member.derived_reason || member.last_error || '最近发生错误' },
       healthy: { class: 'success', text: '正常', title: member.derived_reason || '该成员可参与聚合调度' },
     };
-    if (member.derived_status && derivedMap[member.derived_status]) return derivedMap[member.derived_status];
     if (member.enabled === false) return { class: 'warning', text: '已停用', title: '该聚合成员已手动停用，不参与调度' };
     if (member.cooldown_until && member.cooldown_until * 1000 > Date.now()) {
       const remainSec = Math.max(0, Math.ceil((member.cooldown_until * 1000 - Date.now()) / 1000));
@@ -475,9 +491,15 @@ const ConfigTab = {
       const ss = (remainSec % 60).toString().padStart(2, '0');
       return { class: 'cooldown', text: `冷却中（剩 ${mm}:${ss}）`, title: member.cooldown_reason || '该聚合成员因上游健康失败进入短期冷却' };
     }
+    if (model?.cooldown_until && model.cooldown_until * 1000 > Date.now()) {
+      const remainSec = Math.max(0, Math.ceil((model.cooldown_until * 1000 - Date.now()) / 1000));
+      const mm = Math.floor(remainSec / 60).toString().padStart(2, '0');
+      const ss = (remainSec % 60).toString().padStart(2, '0');
+      return { class: 'cooldown', text: `底层冷却中（剩 ${mm}:${ss}）`, title: model.cooldown_reason || '底层真实模型正在冷却' };
+    }
+    if (member.derived_status && derivedMap[member.derived_status]) return derivedMap[member.derived_status];
     if (!model) return { class: 'danger', text: '底层模型不存在', title: '底层真实模型已删除或配置异常' };
     if (model.usable === false) return { class: 'warning', text: '底层模型已停用', title: '请先启用底层真实模型' };
-    if (model.cooldown_until && model.cooldown_until * 1000 > Date.now()) return { class: 'cooldown', text: '底层模型冷却中', title: model.cooldown_reason || '底层真实模型正在冷却' };
     if (member.last_error) return { class: 'warning', text: '最近错误', title: member.last_error };
     return { class: 'success', text: '正常', title: '该成员可参与聚合调度' };
   },
@@ -621,6 +643,7 @@ const ConfigTab = {
     const cooldownRow = document.getElementById('group-cooldown-row');
     const streamTimeoutRow = document.getElementById('group-stream-timeout-row');
     const wafRow = document.getElementById('group-waf-row');
+    const wafClientModeRow = document.getElementById('group-waf-client-mode-row');
     const wafPolicyRow = document.getElementById('group-waf-policy-row');
     const hint = document.getElementById('group-mode-hint');
     const label = document.getElementById('group-key-label');
@@ -630,10 +653,9 @@ const ConfigTab = {
     if (cooldownRow) cooldownRow.classList.remove('hidden');
     if (streamTimeoutRow) streamTimeoutRow.classList.remove('hidden');
     if (wafRow) wafRow.classList.toggle('hidden', mode !== 'relay');
-    if (wafPolicyRow) {
-      const wafChecked = document.getElementById('group-waf')?.checked || false;
-      wafPolicyRow.classList.toggle('hidden', mode !== 'relay' || !wafChecked);
-    }
+    const wafChecked = document.getElementById('group-waf')?.checked || false;
+    if (wafClientModeRow) wafClientModeRow.classList.toggle('hidden', mode !== 'relay' || !wafChecked);
+    if (wafPolicyRow) wafPolicyRow.classList.toggle('hidden', mode !== 'relay' || !wafChecked);
     if (label) label.textContent = mode === 'ark' ? 'Ark API Key' : '上游 API Key';
 
     if (hint) {
@@ -791,6 +813,7 @@ const ConfigTab = {
     if (groupForm) {
       groupForm.addEventListener('submit', e => this.onGroupSubmit(e));
       panel.querySelector('#group-provider')?.addEventListener('change', () => { this.syncGroupModeUI(); this.autoSaveGroup(); });
+      panel.querySelector('#group-waf')?.addEventListener('change', () => { this.syncGroupModeUI(); this.autoSaveGroup(); });
       panel.querySelector('#group-key-toggle')?.addEventListener('click', e => {
         const input = document.getElementById('group-key');
         input.type = input.type === 'password' ? 'text' : 'password';
@@ -877,7 +900,7 @@ const ConfigTab = {
         const cell = document.querySelector(`[data-member-status-cell="${member.id}"]`);
         if (!cell) return;
         const status = this.aggregateMemberStatus(member, Store.getModel(member.model_id));
-        const next = `<span class="pill ${status.class}" title="${Utils.escapeHtml(status.title)}">${status.text}</span>`;
+        const next = `<span data-aggregate-member-status="${member.id}" class="pill ${status.class}" title="${Utils.escapeHtml(status.title)}">${status.text}</span>`;
         if (cell.innerHTML !== next) cell.innerHTML = next;
       });
     }
@@ -984,6 +1007,14 @@ const ConfigTab = {
     } else {
       display.textContent = '-';
     }
+    document.querySelectorAll('[data-aggregate-member-status]').forEach(el => {
+      const member = Store.state.aggregate_members?.find(item => item.id === el.dataset.aggregateMemberStatus);
+      if (!member) return;
+      const status = this.aggregateMemberStatus(member, Store.getModel(member.model_id));
+      el.className = `pill ${status.class}`;
+      el.textContent = status.text;
+      el.title = status.title;
+    });
   },
 
   async onRecoverModel() {
@@ -1048,6 +1079,10 @@ const ConfigTab = {
       auto_model_name: document.getElementById('group-auto-model-name').value.trim(),
       auto_model_cooldown_minutes: Number(document.getElementById('group-cooldown').value || 0),
       stream_idle_timeout: Math.max(0, Math.min(600, Number(document.getElementById('group-stream-timeout').value || 0))),
+      reasoning_support: document.getElementById('group-reasoning-support')?.value || 'unknown',
+      waf_client_mode: mode === 'relay' && document.getElementById('group-waf').checked
+        ? (document.getElementById('group-waf-client-mode')?.value || 'always')
+        : 'always',
       waf_compatible: mode === 'relay' ? document.getElementById('group-waf').checked : false,
       waf_accept_policy: mode === 'relay' && document.getElementById('group-waf').checked
         ? (document.getElementById('group-waf-policy')?.value || 'default')

@@ -5,6 +5,8 @@ const LogsTab = {
   refreshTimer: null,
   REFRESH_INTERVAL: 5000,
   _lastRenderSignature: '',
+  _openDetailKey: '',
+  _detailEventsBound: false,
 
   refresh() {
     const panel = document.getElementById('panel-logs');
@@ -82,6 +84,7 @@ const LogsTab = {
     `;
     this.attachEvents(panel);
     this._lastRenderSignature = '';
+    this._detailEventsBound = false;
     this.renderRows();
     this.startAutoRefresh();
   },
@@ -155,7 +158,7 @@ const LogsTab = {
 
   filterLogs() {
     const logs = Store.state.logs || [];
-    return logs.filter(item => this.matches(item) && !this.isStableConfigSkip(item));
+    return logs.filter(item => this.matches(item) && !this.isStableConfigSkip(item) && item.usage_source !== 'manual_probe');
   },
 
   isStableConfigSkip(item) {
@@ -277,10 +280,7 @@ const LogsTab = {
     this._lastRenderSignature = signature;
     const wasAtBottom = keepScroll && wrap ? (wrap.scrollHeight - wrap.scrollTop - wrap.clientHeight < 30) : false;
     const scrollTop = wrap ? wrap.scrollTop : 0;
-    const openKeys = new Set(Array.from(tbody.querySelectorAll('[data-log-detail-row]'))
-      .filter(row => !row.classList.contains('hidden'))
-      .map(row => row.dataset.logDetailRow));
-
+    const openKey = this._openDetailKey;
     if (filtered.length === 0) {
       tbody.innerHTML = '';
       empty.classList.remove('hidden');
@@ -289,7 +289,6 @@ const LogsTab = {
     empty.classList.add('hidden');
 
     const seen = new Set();
-    let cursor = tbody.firstChild;
     filtered.forEach((item, idx) => {
       const key = this.rowKey(item);
       seen.add(key);
@@ -299,20 +298,15 @@ const LogsTab = {
       const nextDetail = temp.children[1];
       const currentMain = tbody.querySelector(`[data-log-main-row="${CSS.escape(key)}"]`);
       const currentDetail = tbody.querySelector(`[data-log-detail-row="${CSS.escape(key)}"]`);
-      if (openKeys.has(key)) nextDetail.classList.remove('hidden');
+      if (openKey === key) nextDetail.classList.remove('hidden');
       if (currentMain && currentDetail) {
         if (currentMain.outerHTML !== nextMain.outerHTML) currentMain.replaceWith(nextMain);
         if (currentDetail.outerHTML !== nextDetail.outerHTML) currentDetail.replaceWith(nextDetail);
         const main = tbody.querySelector(`[data-log-main-row="${CSS.escape(key)}"]`);
         const detail = tbody.querySelector(`[data-log-detail-row="${CSS.escape(key)}"]`);
-        if (main !== cursor) tbody.insertBefore(main, cursor);
-        cursor = main.nextSibling;
-        if (detail !== cursor) tbody.insertBefore(detail, cursor);
-        cursor = detail.nextSibling;
+        tbody.append(main, detail);
       } else {
-        tbody.insertBefore(nextMain, cursor);
-        tbody.insertBefore(nextDetail, cursor);
-        cursor = nextDetail.nextSibling;
+        tbody.append(nextMain, nextDetail);
       }
     });
 
@@ -325,12 +319,15 @@ const LogsTab = {
       if (!seen.has(key)) row.remove();
     });
 
-    tbody.querySelectorAll('[data-log-detail-key]').forEach(btn => {
-      btn.addEventListener('click', () => this.toggleDetailByKey(btn.dataset.logDetailKey));
-    });
-    tbody.querySelectorAll('[data-log-detail-preview-key]').forEach(cell => {
-      cell.addEventListener('click', () => this.toggleDetailByKey(cell.dataset.logDetailPreviewKey));
-    });
+    if (openKey && !seen.has(openKey)) this._openDetailKey = '';
+    if (!this._detailEventsBound) {
+      tbody.addEventListener('click', event => {
+        const target = event.target.closest('[data-log-detail-key], [data-log-detail-preview-key]');
+        if (!target) return;
+        this.toggleDetailByKey(target.dataset.logDetailKey || target.dataset.logDetailPreviewKey);
+      });
+      this._detailEventsBound = true;
+    }
 
     if (wasAtBottom && wrap) wrap.scrollTop = wrap.scrollHeight;
     else if (wrap) wrap.scrollTop = scrollTop;
@@ -526,14 +523,54 @@ const LogsTab = {
     return { className: 'info', title: '需要关注', scope: item.failure_scope || parsed.failure_scope || 'request', cooldown: item.cooldown_applied ? '是' : '否', suggestion: '请结合候选过滤详情和脱敏摘要继续排查。' };
   },
 
+  wafDecisionLabel(value) {
+    const map = {
+      waf_compatible: '已套用 WAF 兼容 Header',
+      codex_direct: 'Codex 直连 Header（智能兼容）',
+      disabled: '未启用 WAF 兼容',
+    };
+    return map[String(value || '')] || '-';
+  },
+
+  boolLabel(value) {
+    if (String(value) === 'true') return '是';
+    if (String(value) === 'false') return '否';
+    return '-';
+  },
+
+  reasoningSupportLabel(value) {
+    const map = { supported: '已验证支持', unsupported: '不支持', unknown: '未知' };
+    return map[String(value || 'unknown')] || '未知';
+  },
+
+  reasoningPreservedLabel(value) {
+    if (String(value) === 'true') return '是';
+    if (String(value) === 'false') return '否';
+    return '-';
+  },
+
+  reasoningWarning(parsed) {
+    const effort = String(parsed.requested_reasoning_effort || 'unset');
+    if (effort === 'unset') return '';
+    if (String(parsed.reasoning_preserved) === 'false') {
+      return '推理强度字段未被完整保留，请检查请求体转换路径。';
+    }
+    if (['unknown', 'unsupported'].includes(String(parsed.upstream_reasoning_support || 'unknown'))) {
+      return '当前中转渠道未确认支持推理强度，实际可能按上游默认值执行。';
+    }
+    return '';
+  },
+
   renderDiagnosisCard(item, parsed) {
     const d = this.diagnosisFor(item, parsed);
+    const reasoningWarning = this.reasoningWarning(parsed);
     return `
       <div class="diagnosis-card ${d.className}">
         <div>
           <div class="diagnosis-eyebrow">智能诊断</div>
           <strong>${Utils.escapeHtml(d.title)}</strong>
           <p>${Utils.escapeHtml(d.suggestion)}</p>
+          ${reasoningWarning ? `<p class="reasoning-support-warning">${Utils.escapeHtml(reasoningWarning)}</p>` : ''}
         </div>
         <dl>
           <dt>影响范围</dt><dd>${Utils.escapeHtml(this.failureScopeLabel(d.scope))}</dd>
@@ -664,8 +701,18 @@ const LogsTab = {
             <dt>影响范围</dt><dd>${Utils.escapeHtml(this.failureScopeLabel(this.firstValue(item.failure_scope, parsed.failure_scope, '')))}</dd>
             <dt>触发冷却</dt><dd>${Utils.escapeHtml(String(cooldownApplied) === 'true' ? '是' : '否')}</dd>
             <dt>WAF 兼容</dt><dd>${Utils.escapeHtml(parsed.waf_compatible || '-')}</dd>
-            <dt>WAF 锁</dt><dd>${Utils.escapeHtml(parsed.waf_lock_enabled || '-')}</dd>
+            <dt>WAF 策略</dt><dd>${Utils.escapeHtml(parsed.waf_client_mode || '-')}</dd>
+            <dt>WAF 实际套用</dt><dd>${Utils.escapeHtml(this.boolLabel(parsed.waf_applied))}</dd>
+            <dt>WAF 决策</dt><dd>${Utils.escapeHtml(this.wafDecisionLabel(parsed.waf_decision))}</dd>
+            <dt>请求客户端</dt><dd>${Utils.escapeHtml(parsed.client_family || '-')}</dd>
+            <dt>WAF 锁</dt><dd>${Utils.escapeHtml(this.boolLabel(parsed.waf_lock_enabled))}</dd>
             <dt>等待锁</dt><dd>${Utils.escapeHtml(parsed.lock_wait_ms ? parsed.lock_wait_ms + ' ms' : '-')}</dd>
+            <dt>请求 API</dt><dd>${Utils.escapeHtml(parsed.request_api || '-')}</dd>
+            <dt>请求推理强度</dt><dd>${Utils.escapeHtml(parsed.requested_reasoning_effort || 'unset')}</dd>
+            <dt>推理字段来源</dt><dd>${Utils.escapeHtml(parsed.reasoning_field_source || 'none')}</dd>
+            <dt>推理字段已保留</dt><dd>${Utils.escapeHtml(this.reasoningPreservedLabel(parsed.reasoning_preserved))}</dd>
+            <dt>上游推理支持</dt><dd>${Utils.escapeHtml(this.reasoningSupportLabel(parsed.upstream_reasoning_support))}</dd>
+            <dt>请求体模式</dt><dd>${Utils.escapeHtml(parsed.body_mode || parsed.body || '-')}</dd>
             <dt>Payload 预警</dt><dd>${this.renderPayloadWarnings(parsed)}</dd>
           </dl>
         </div>

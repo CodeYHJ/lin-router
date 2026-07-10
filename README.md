@@ -196,3 +196,25 @@ python -m PyInstaller --noconfirm LinRouter.spec
 - 模板配置：`lin-router-config.example.json`
 
 真实配置已加入 `.gitignore`，不要提交真实 API Key。
+
+## 推理强度与 WAF 验证
+
+- `/v1/responses` 使用 `reasoning.effort`；`/v1/chat/completions` 使用 `reasoning_effort`。Lin Router 只按对应协议读取和透传，不会同时注入两种字段。
+- WAF 兼容只调整 Header；请求体仅在路由到真实上游模型时补丁替换 `model`，推理字段保持不变。
+- 连接组高级配置可标记“推理强度支持”为未知、已验证支持或不支持；未知/不支持会在日志诊断卡片中明确提示。
+- 对真实渠道执行 low/high A/B（先关闭 WAF 运行一次，再开启 WAF 运行一次）：
+
+```powershell
+python scripts\reasoning_ab_check.py --api-key <route-key> --model <model> --waf-state off
+python scripts\reasoning_ab_check.py --api-key <route-key> --model <model> --waf-state on
+```
+
+脚本不会打印 route key 或请求正文。若日志显示 `reasoning_preserved=true`，但 low/high 的上游用量与行为始终相同，应优先判断为渠道未支持或忽略推理强度，而不是 Lin Router 删除字段。
+## WAF 客户端策略
+
+中转站连接组开启 WAF 兼容后，可在“高级配置 → WAF 客户端策略”选择：
+
+- **始终使用 WAF 兼容**：维持原有行为，所有客户端使用浏览器化 Header 与 WAF 锁。
+- **智能兼容（Codex 直连 Header）**：识别 `Codex` User-Agent 或 `x-codex-*` Header 后，保留其原始 Header、跳过 WAF 锁；其他客户端（例如 Hermes）仍使用 WAF 兼容。两种策略都不会改写请求 JSON。
+
+请求日志详情会显示 WAF 策略、是否实际套用、最终决策与客户端类型。

@@ -211,6 +211,8 @@ class ConnectionGroup:
     stream_idle_timeout: int = DEFAULT_STREAM_IDLE_TIMEOUT_SECONDS
     waf_compatible: bool = False
     waf_accept_policy: str = "default"
+    waf_client_mode: str = "always"
+    reasoning_support: str = "unknown"
     upstream_models: List[Dict[str, Any]] = field(default_factory=list)
     upstream_models_fetched_at: str = ""
 
@@ -229,6 +231,8 @@ class ConnectionGroup:
             stream_idle_timeout=max(0, min(MAX_STREAM_IDLE_TIMEOUT_SECONDS, int(data.get("stream_idle_timeout", DEFAULT_STREAM_IDLE_TIMEOUT_SECONDS) or 0))),
             waf_compatible=bool(data.get("waf_compatible", False)),
             waf_accept_policy=str(data.get("waf_accept_policy") or "default"),
+            waf_client_mode=str(data.get("waf_client_mode") or "always").lower(),
+            reasoning_support=str(data.get("reasoning_support") or "unknown").lower(),
             upstream_models=[item for item in data.get("upstream_models", []) if isinstance(item, dict)] if isinstance(data.get("upstream_models", []), list) else [],
             upstream_models_fetched_at=str(data.get("upstream_models_fetched_at") or ""),
         )
@@ -1844,6 +1848,47 @@ class ArkProxyRouter:
         parts.append(f"prefix=({ArkProxyRouter._cache_prefix_fingerprint(payload, body)})")
         return "; ".join(parts)
 
+    @staticmethod
+    def _reasoning_log_fields(path: str, payload: Dict[str, Any], body: bytes, body_mode: str, group: ConnectionGroup) -> str:
+        normalized_path = str(path or '').rstrip('/')
+        if normalized_path.endswith('/responses'):
+            request_api = 'responses'
+            reasoning = payload.get('reasoning')
+            effort = reasoning.get('effort') if isinstance(reasoning, dict) else None
+            field_source = 'reasoning.effort' if isinstance(effort, str) else 'none'
+        elif normalized_path.endswith('/chat/completions'):
+            request_api = 'chat_completions'
+            effort = payload.get('reasoning_effort')
+            field_source = 'reasoning_effort' if isinstance(effort, str) else 'none'
+        else:
+            request_api = 'unknown'
+            effort = None
+            field_source = 'none'
+
+        allowed_efforts = {'low', 'medium', 'high', 'xhigh'}
+        requested_effort = str(effort).lower() if isinstance(effort, str) and str(effort).lower() in allowed_efforts else 'unset'
+        preserved = requested_effort == 'unset'
+        if not preserved:
+            try:
+                outbound = json.loads(body.decode('utf-8'))
+                if field_source == 'reasoning.effort':
+                    outbound_reasoning = outbound.get('reasoning') if isinstance(outbound, dict) else None
+                    preserved = isinstance(outbound_reasoning, dict) and str(outbound_reasoning.get('effort') or '').lower() == requested_effort
+                else:
+                    preserved = isinstance(outbound, dict) and str(outbound.get('reasoning_effort') or '').lower() == requested_effort
+            except Exception:
+                preserved = False
+        support = str(getattr(group, 'reasoning_support', 'unknown') or 'unknown').lower()
+        if support not in {'supported', 'unsupported', 'unknown'}:
+            support = 'unknown'
+        return (
+            f'request_api={request_api}'
+            f'; requested_reasoning_effort={requested_effort}'
+            f'; reasoning_field_source={field_source}'
+            f'; reasoning_preserved={str(preserved).lower()}'
+            f'; upstream_reasoning_support={support}'
+            f'; body_mode={body_mode}'
+        )
     def _debug_detail(
         self,
         candidate: UpstreamCandidate,
@@ -1867,13 +1912,14 @@ class ArkProxyRouter:
         # mode=passthrough 表示该请求走透传路径（ark/proxy），relay 专属逻辑不介入
         mode_tag = "passthrough" if candidate.group.provider_type != PROVIDER_RELAY else "relay"
         path = urlparse(target_url).path
-        header_policy = "waf_browser" if candidate.group.provider_type == PROVIDER_RELAY and candidate.group.waf_compatible else "passthrough"
         lower_headers = {k.lower(): v for k, v in headers.items()}
+        waf_applied = lower_headers.get("user-agent", "") == BROWSER_UA
+        header_policy = "waf_browser" if waf_applied else "passthrough"
         accept = lower_headers.get("accept", "")
         content_type = lower_headers.get("content-type", "")
         user_agent = lower_headers.get("user-agent", "")
         user_agent_family = self._user_agent_family(user_agent)
-        waf_lock_enabled = self._candidate_lock_enabled(candidate)
+        waf_lock_enabled = waf_applied
         http_client = getattr(self, "_upstream_client", None) and getattr(self._upstream_client, "client_type", "urllib") or "urllib"
         http_version = getattr(resp, "http_version", "") if resp else ""
         extra = (
@@ -1882,6 +1928,10 @@ class ArkProxyRouter:
             f"; content_type={content_type}"
             f"; user_agent_family={user_agent_family}"
             f"; waf_compatible={'true' if candidate.group.waf_compatible else 'false'}"
+            f"; waf_client_mode={str(getattr(candidate.group, 'waf_client_mode', 'always') or 'always')}"
+            f"; waf_applied={str(waf_applied).lower()}"
+            f"; waf_decision={'waf_compatible' if waf_applied else self._waf_decision(candidate.group, headers)}"
+            f"; client_family={self._incoming_client_family(headers)}"
             f"; waf_lock_enabled={'true' if waf_lock_enabled else 'false'}"
             f"; http_client={http_client}"
             f"; upstream_http_version={http_version or '-'}"
@@ -1892,7 +1942,7 @@ class ArkProxyRouter:
             extra += f"; lock_release_reason={lock_release_reason}"
         return (
             f"{base}; group_id={candidate.group.id}; group_name={group_name}; provider={candidate.group.provider_type}; mode={mode_tag}; "
-            f"upstream={target_url}; body={body_mode}; "
+            f"upstream={target_url}; body={body_mode}; {self._reasoning_log_fields(path, payload, body, body_mode, candidate.group)}; "
             f"fingerprint=({self._payload_fingerprint(payload, body, path, tools_normalized=tools_normalized)}); "
             f"out_headers=({self._safe_header_view(headers)})"
             f"{extra}"
@@ -1948,8 +1998,28 @@ class ArkProxyRouter:
             return group.api_key or group.ark_api_key
         return group.ark_api_key
 
+    @staticmethod
+    def _incoming_client_family(incoming_headers: Dict[str, str]) -> str:
+        headers = {str(name).lower(): str(value) for name, value in (incoming_headers or {}).items()}
+        user_agent = headers.get("user-agent", "").lower()
+        if "codex" in user_agent or any(name.startswith("x-codex-") for name in headers):
+            return "codex"
+        if any(marker in user_agent for marker in ("hermes", "claude-code", "openai-cli")):
+            return "agent"
+        if any(marker in user_agent for marker in ("chrome", "safari", "firefox", "edge", "mozilla")):
+            return "browser"
+        return "other"
+
+    def _waf_decision(self, group: ConnectionGroup, incoming_headers: Dict[str, str]) -> str:
+        if group.provider_type != PROVIDER_RELAY or not group.waf_compatible:
+            return "disabled"
+        mode = str(getattr(group, "waf_client_mode", "always") or "always").lower()
+        if mode == "auto_bypass_codex" and self._incoming_client_family(incoming_headers) == "codex":
+            return "codex_direct"
+        return "waf_compatible"
+
     def _headers_for(self, group: ConnectionGroup, auth_key: str, incoming_headers: Dict[str, str], *, stream: bool) -> Dict[str, str]:
-        if group.provider_type == PROVIDER_RELAY and group.waf_compatible:
+        if self._waf_decision(group, incoming_headers) == "waf_compatible":
             upstream_host = urlparse(group.base_url).netloc
             headers = build_waf_compatible_headers(incoming_headers, upstream_host, stream=stream)
             headers["authorization"] = f"Bearer {auth_key}"
@@ -1959,11 +2029,7 @@ class ArkProxyRouter:
             if policy == "text_event_stream":
                 headers["accept"] = "text/event-stream" if stream else "application/json"
             elif policy == "passthrough":
-                incoming_accept = None
-                for name, value in incoming_headers.items():
-                    if name.strip().lower() == "accept":
-                        incoming_accept = value
-                        break
+                incoming_accept = next((value for name, value in incoming_headers.items() if name.strip().lower() == "accept"), None)
                 if incoming_accept:
                     headers["accept"] = incoming_accept
             return headers
@@ -1988,8 +2054,8 @@ class ArkProxyRouter:
             channel=channel,
         )
 
-    def _candidate_lock(self, candidate: UpstreamCandidate) -> Optional[threading.Lock]:
-        if not self._candidate_lock_enabled(candidate):
+    def _candidate_lock(self, candidate: UpstreamCandidate, incoming_headers: Optional[Dict[str, str]] = None) -> Optional[threading.Lock]:
+        if not self._candidate_lock_enabled(candidate, incoming_headers):
             return None
         key = f"{candidate.group.id}:{candidate.target_model}:{candidate.channel}"
         with self.upstream_locks_guard:
@@ -2025,9 +2091,8 @@ class ArkProxyRouter:
             f"lock_wait_ms={lock_wait_ms}; busy_hint=candidate_busy"
         )
 
-    @staticmethod
-    def _candidate_lock_enabled(candidate: UpstreamCandidate) -> bool:
-        return candidate.group.provider_type == PROVIDER_RELAY and candidate.group.waf_compatible
+    def _candidate_lock_enabled(self, candidate: UpstreamCandidate, incoming_headers: Optional[Dict[str, str]] = None) -> bool:
+        return self._waf_decision(candidate.group, incoming_headers or {}) == "waf_compatible"
 
     @staticmethod
     def _release_lock(lock: Optional[threading.Lock]) -> None:
@@ -2230,6 +2295,27 @@ class ArkProxyRouter:
         finally:
             self._release_lock(upstream_lock)
 
+    @staticmethod
+    def _manual_probe_summary(reason: str, detail: str) -> str:
+        normalized_reason = str(reason or '').lower()
+        if normalized_reason == 'waf_lock_wait_timeout':
+            return '候选忙，等待 WAF 锁超时；未判定为上游故障。'
+        if normalized_reason.startswith('server_error_'):
+            return f'上游服务暂时异常（HTTP {normalized_reason.rsplit("_", 1)[-1]}）。'
+        if normalized_reason.startswith('http_'):
+            return f'上游返回 HTTP {normalized_reason.rsplit("_", 1)[-1]}。'
+        if normalized_reason in {'network', 'read_timeout', 'stream_idle_timeout'}:
+            return '连接或等待上游响应超时，请稍后重试。'
+        if normalized_reason == 'missing_upstream_api_key':
+            return '缺少上游 API Key。'
+        return '最小探测未通过，请检查上游服务状态。'
+
+    @staticmethod
+    def _manual_probe_failure_scope(reason: str) -> Tuple[str, bool]:
+        if str(reason or '').lower() == 'waf_lock_wait_timeout':
+            return 'local_lock', False
+        return 'upstream', True
+
     def recover_model(self, model_id: str) -> Dict[str, Any]:
         model = self.store.find_model(model_id)
         if not model:
@@ -2243,9 +2329,14 @@ class ArkProxyRouter:
         candidate = self._candidate_from_model(self.store.models.index(model), model, group)
         ok, reason, detail = self._manual_probe_candidate(candidate)
         if not ok:
-            self._set_cooldown(candidate.idx, detail, self._auto_cooldown_seconds(group), reason)
-            self.add_log("/api/models/recover", model.name, "probe_failed", f"manual_probe=true; model_id={model.id}; probe_result=failed; reason={reason}; detail={detail}; cooldown_applied=true; failure_scope=upstream", event="manual_probe", usage_source="manual_probe", cooldown_applied=True, failure_scope="upstream")
-            return {"ok": False, "message": "最小探测未通过，模型保持冷却，请稍后重试或检查上游服务。", "code": "probe_failed", "before": before, "model": asdict(model)}
+            failure_scope, cooldown_applied = self._manual_probe_failure_scope(reason)
+            if cooldown_applied:
+                self._set_cooldown(candidate.idx, self._manual_probe_summary(reason, detail), self._auto_cooldown_seconds(group), reason)
+            summary = self._manual_probe_summary(reason, detail)
+            probe_request_id = f"manual-probe-{uuid.uuid4().hex}"
+            self.add_log("/api/models/recover", model.name, "probe_failed", f"manual_probe=true; model_id={model.id}; probe_result=failed; reason={reason}; summary={summary}; cooldown_applied={str(cooldown_applied).lower()}; failure_scope={failure_scope}", group=group, request_id=probe_request_id, event="manual_probe", usage_source="manual_probe", cooldown_applied=cooldown_applied, failure_scope=failure_scope)
+            message = "候选正忙，等待 WAF 锁超时；模型保持当前状态，请稍后重试。" if not cooldown_applied else "最小探测未通过，模型保持冷却，请稍后重试或检查上游服务。"
+            return {"ok": False, "message": message, "code": "probe_failed", "before": before, "model": asdict(model)}
         model.cooldown_until = 0
         model.cooldown_reason = ""
         model.last_error = ""
@@ -2254,7 +2345,7 @@ class ArkProxyRouter:
         model.last_success_at = self._now()
         model.last_checked_at = model.last_success_at
         self.store.save()
-        self.add_log("/api/models/recover", model.name, "probe_ok", f"manual_probe=true; model_id={model.id}; probe_result=success; cooldown_applied=false; failure_scope=manual", event="manual_probe", usage_source="manual_probe")
+        self.add_log("/api/models/recover", model.name, "probe_ok", f"manual_probe=true; model_id={model.id}; probe_result=success; summary=最小探测成功，模型已恢复参与调度。; cooldown_applied=false; failure_scope=manual", group=group, request_id=f"manual-probe-{uuid.uuid4().hex}", event="manual_probe", usage_source="manual_probe", failure_scope="manual")
         return {"ok": True, "message": "最小探测成功，已恢复该模型参与调度。", "model": asdict(model), "before": before}
 
     def recover_aggregate_member(self, member_id: str) -> Dict[str, Any]:
@@ -2274,16 +2365,21 @@ class ArkProxyRouter:
         candidate = self._candidate_from_model(self.store.models.index(model), model, group)
         ok, reason, detail = self._manual_probe_candidate(candidate)
         if not ok:
-            self._set_aggregate_member_cooldown(member.id, detail, self._aggregate_cooldown_seconds(aggregate) if aggregate else self._auto_cooldown_seconds(group), reason)
-            self.add_log("/api/aggregate-members/recover", model.name, "probe_failed", f"manual_probe=true; aggregate_member_id={member.id}; probe_result=failed; reason={reason}; detail={detail}; cooldown_applied=true; failure_scope=upstream", event="manual_probe", usage_source="manual_probe", cooldown_applied=True, failure_scope="upstream")
-            return {"ok": False, "message": "最小探测未通过，成员保持冷却，请稍后重试或检查上游服务。", "code": "probe_failed", "before": before, "member": asdict(member)}
+            failure_scope, cooldown_applied = self._manual_probe_failure_scope(reason)
+            if cooldown_applied:
+                self._set_aggregate_member_cooldown(member.id, self._manual_probe_summary(reason, detail), self._aggregate_cooldown_seconds(aggregate) if aggregate else self._auto_cooldown_seconds(group), reason)
+            summary = self._manual_probe_summary(reason, detail)
+            probe_request_id = f"manual-probe-{uuid.uuid4().hex}"
+            self.add_log("/api/aggregate-members/recover", model.name, "probe_failed", f"manual_probe=true; aggregate_member_id={member.id}; probe_result=failed; reason={reason}; summary={summary}; cooldown_applied={str(cooldown_applied).lower()}; failure_scope={failure_scope}", group=group, request_id=probe_request_id, event="manual_probe", usage_source="manual_probe", cooldown_applied=cooldown_applied, failure_scope=failure_scope)
+            message = "候选正忙，等待 WAF 锁超时；成员保持当前状态，请稍后重试。" if not cooldown_applied else "最小探测未通过，成员保持冷却，请稍后重试或检查上游服务。"
+            return {"ok": False, "message": message, "code": "probe_failed", "before": before, "member": asdict(member)}
         member.cooldown_until = 0
         member.cooldown_reason = ""
         member.last_error = ""
         member.last_success_at = self._now()
         member.last_checked_at = member.last_success_at
         self.store.save()
-        self.add_log("/api/aggregate-members/recover", model.name, "probe_ok", f"manual_probe=true; aggregate_member_id={member.id}; probe_result=success; cooldown_applied=false; failure_scope=manual", event="manual_probe", usage_source="manual_probe")
+        self.add_log("/api/aggregate-members/recover", model.name, "probe_ok", f"manual_probe=true; aggregate_member_id={member.id}; probe_result=success; summary=最小探测成功，成员已恢复参与调度。; cooldown_applied=false; failure_scope=manual", group=group, request_id=f"manual-probe-{uuid.uuid4().hex}", event="manual_probe", usage_source="manual_probe", failure_scope="manual")
         return {"ok": True, "message": "最小探测成功，已恢复该聚合成员参与调度。", "member": asdict(member), "before": before}
     def _iter_upstream_candidates(self, requested_model: str | None, group_id: str | None = None) -> Iterator[UpstreamCandidate]:
         # 旧全局 Key 已退役，不再跨组调度真实模型
@@ -2675,7 +2771,7 @@ class ArkProxyRouter:
                 payload_for_upstream, tools_normalized = self._normalize_tools_order(payload)
             body, body_mode = self._body_for_upstream(payload_for_upstream, raw_body, str(requested_model) if requested_model else None, candidate.target_model)
             outbound_headers = self._headers_for(group, candidate.auth_key, incoming_headers, stream=False)
-            upstream_lock = self._candidate_lock(candidate)
+            upstream_lock = self._candidate_lock(candidate, incoming_headers)
             started_at = time.perf_counter()
             if upstream_lock:
                 self._live_request_update(request_id, stage="waiting_waf_lock", stage_label="等待 WAF 锁")
@@ -3026,7 +3122,7 @@ class ArkProxyRouter:
                 payload_for_upstream, tools_normalized = self._normalize_tools_order(payload)
             body, body_mode = self._body_for_upstream(payload_for_upstream, raw_body, str(requested_model) if requested_model else None, candidate.target_model)
             outbound_headers = self._headers_for(group, candidate.auth_key, incoming_headers, stream=True)
-            upstream_lock = self._candidate_lock(candidate)
+            upstream_lock = self._candidate_lock(candidate, incoming_headers)
             resp: Optional[Any] = None
             started_at = time.perf_counter()
             if upstream_lock:
@@ -3751,6 +3847,9 @@ class RouterHandler(BaseHTTPRequestHandler):
             auto_model_cooldown_minutes=source.auto_model_cooldown_minutes if source.provider_type == PROVIDER_RELAY else 0,
             stream_idle_timeout=source.stream_idle_timeout,
             waf_compatible=source.waf_compatible,
+            waf_accept_policy=source.waf_accept_policy,
+            waf_client_mode=source.waf_client_mode,
+            reasoning_support=source.reasoning_support,
             upstream_models=[dict(item) for item in source.upstream_models],
             upstream_models_fetched_at=source.upstream_models_fetched_at,
         )
@@ -4083,7 +4182,11 @@ class RouterHandler(BaseHTTPRequestHandler):
         logs = self.router.recent_logs()
         if include_skip:
             return logs
-        return [log for log in logs if not self._is_config_skip_log(log)]
+        return [
+            log for log in logs
+            if not self._is_config_skip_log(log)
+            and str(getattr(log, "usage_source", "")) != "manual_probe"
+        ]
 
     def _runtime_state_payload(self, include_skip: bool = False) -> Dict[str, Any]:
         self.store.refresh_expired_cooldowns()
@@ -4322,7 +4425,7 @@ class RouterHandler(BaseHTTPRequestHandler):
                 "models": [asdict(m) for m in self.store.models],
                 "aggregate_models": [asdict(m) for m in self.store.aggregate_models],
                 "aggregate_members": [asdict(m) for m in self.store.aggregate_members],
-                "logs": self.router.recent_logs(),
+                "logs": self._filtered_recent_logs(),
                 "log_file": str(self.router.log_file),
                 "log_write_error": self.router.log_write_error,
             })
@@ -4409,7 +4512,7 @@ class RouterHandler(BaseHTTPRequestHandler):
             end_ts = _ts(end_str) if end_str else 0
 
             def _keep(item):
-                if not include_skip and self._is_config_skip_log(item):
+                if not include_skip and (self._is_config_skip_log(item) or str(getattr(item, "usage_source", "")) == "manual_probe"):
                     return False
                 if group_filter and getattr(item, "group_id", "") != group_filter:
                     return False
@@ -4736,6 +4839,10 @@ class RouterHandler(BaseHTTPRequestHandler):
                 payload["waf_compatible"] = existing.waf_compatible
             if existing and "waf_accept_policy" not in payload:
                 payload["waf_accept_policy"] = existing.waf_accept_policy
+            if existing and "waf_client_mode" not in payload:
+                payload["waf_client_mode"] = existing.waf_client_mode
+            if existing and "reasoning_support" not in payload:
+                payload["reasoning_support"] = existing.reasoning_support
             if existing and "auto_model_name" not in payload:
                 payload["auto_model_name"] = existing.auto_model_name
             # 自动路由模型名空值按默认值处理
