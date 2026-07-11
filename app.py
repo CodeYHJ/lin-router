@@ -55,6 +55,8 @@ from linrouter_core.config.constants import (
 from linrouter_core.config.models import AggregateMember, AggregateModel, ConnectionGroup, ModelConfig
 from linrouter_core.config.store import ConfigStore
 from linrouter_core.observability import ObservabilityService, RequestLog
+from linrouter_core.upstream import UpstreamAdapter
+from linrouter_core.upstream import request as upstream_request
 
 MAX_PORT_SCAN = 1
 
@@ -123,58 +125,23 @@ def mask_secret(value: str) -> str:
 
 
 def build_upstream_headers(api_key: str, *, stream: bool) -> Dict[str, str]:
-    return {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-        "Accept": "text/event-stream" if stream else "application/json",
-    }
+    return upstream_request.build_upstream_headers(api_key, stream=stream)
 
 
 def build_waf_compatible_headers(incoming_headers: Dict[str, str], upstream_host: str, *, stream: bool) -> Dict[str, str]:
-    headers: Dict[str, str] = {}
-    for name, value in incoming_headers.items():
-        lower = name.strip().lower()
-        if not lower or lower in WAF_STRIP_EXACT or any(lower.startswith(prefix) for prefix in WAF_STRIP_PREFIXES):
-            continue
-        headers[name] = value
-    headers["host"] = upstream_host
-    headers["user-agent"] = BROWSER_UA
-    if not any(k.lower() == "accept" for k in headers):
-        headers["accept"] = "application/json, text/event-stream, */*"
-    if not any(k.lower() == "accept-language" for k in headers):
-        headers["accept-language"] = "zh-CN,zh;q=0.9,en;q=0.8"
-    return headers
+    return upstream_request.build_waf_compatible_headers(incoming_headers, upstream_host, stream=stream)
 
 
 def build_passthrough_headers(api_key: str, incoming_headers: Dict[str, str], *, stream: bool) -> Dict[str, str]:
-    headers: Dict[str, str] = {}
-    for name, value in incoming_headers.items():
-        lower = name.strip().lower()
-        if not lower or lower in PASSTHROUGH_STRIP_EXACT:
-            continue
-        headers[name] = value
-    headers["Authorization"] = f"Bearer {api_key}"
-    headers["Content-Type"] = headers.get("Content-Type") or headers.get("content-type") or "application/json"
-    if stream and not any(key.lower() == "accept" for key in headers):
-        headers["Accept"] = "text/event-stream"
-    elif not stream and not any(key.lower() == "accept" for key in headers):
-        headers["Accept"] = "application/json"
-    return headers
+    return upstream_request.build_passthrough_headers(api_key, incoming_headers, stream=stream)
 
 
 def build_model_fetch_headers(auth_key: str) -> Dict[str, str]:
-    return {
-        "authorization": f"Bearer {auth_key}",
-        "user-agent": BROWSER_UA,
-        "accept": "application/json, text/event-stream, */*",
-        "accept-language": "zh-CN,zh;q=0.9,en;q=0.8",
-        "content-type": "application/json",
-    }
+    return upstream_request.build_model_fetch_headers(auth_key)
 
 
 def can_forward_header(name: str) -> bool:
-    normalized = name.strip().lower()
-    return bool(normalized) and normalized not in BLOCKED_FORWARD_HEADERS and not normalized.startswith("x-stainless-")
+    return upstream_request.can_forward_header(name)
 
 
 def parse_bearer_key(auth_header: str) -> str:
@@ -269,6 +236,7 @@ class ArkProxyRouter:
         store: ConfigStore,
         settings_store: Optional[SettingsStore] = None,
         log_file: Optional[str | Path] = None,
+        upstream_adapter: Optional[UpstreamAdapter] = None,
     ) -> None:
         self.store = store
         self.settings_store = settings_store
@@ -282,6 +250,7 @@ class ArkProxyRouter:
         self.upstream_locks: Dict[str, threading.Lock] = {}
         self.upstream_active_streams: Dict[str, int] = {}
         self.upstream_locks_guard = threading.Lock()
+        self.upstream_adapter = upstream_adapter or UpstreamAdapter(_ssl_context)
         self._upstream_client = self._create_upstream_client()
         # 供 DebugCapture 的旧两参数构造路径读取；避免 debug_capture.py 反向 import app。
         self._debug_capture_browser_user_agent = BROWSER_UA
@@ -649,13 +618,8 @@ class ArkProxyRouter:
             return " 上游中转站返回 403：Your request was blocked。该连接组已开启 WAF，可能是中转站账号、渠道权限、频率限制或服务商风控导致，请检查中转站后台。"
         return " 上游中转站返回 403：Your request was blocked。该连接组未开启 WAF 兼容，建议开启「仅中转站 WAF 兼容」后重试。"
 
-    @staticmethod
-    def _resolve_url(base_url: str, path: str) -> str:
-        base = base_url.rstrip("/")
-        suffix = path.lstrip("/")
-        if suffix.startswith("v1/"):
-            suffix = suffix[3:]
-        return f"{base}/{suffix}"
+    def _resolve_url(self, base_url: str, path: str) -> str:
+        return self.upstream_adapter.resolve_endpoint(base_url, path)
 
     @staticmethod
     def _empty_usage() -> Tuple[int, int, int, int, int]:
@@ -1237,23 +1201,15 @@ class ArkProxyRouter:
         return "waf_compatible"
 
     def _headers_for(self, group: ConnectionGroup, auth_key: str, incoming_headers: Dict[str, str], *, stream: bool) -> Dict[str, str]:
-        if self._waf_decision(group, incoming_headers) == "waf_compatible":
-            upstream_host = urlparse(group.base_url).netloc
-            headers = build_waf_compatible_headers(incoming_headers, upstream_host, stream=stream)
-            headers["authorization"] = f"Bearer {auth_key}"
-            if not any(key.lower() == "content-type" for key in headers):
-                headers["content-type"] = "application/json"
-            policy = str(group.waf_accept_policy or "default")
-            if policy == "text_event_stream":
-                headers["accept"] = "text/event-stream" if stream else "application/json"
-            elif policy == "passthrough":
-                incoming_accept = next((value for name, value in incoming_headers.items() if name.strip().lower() == "accept"), None)
-                if incoming_accept:
-                    headers["accept"] = incoming_accept
-            return headers
-        if incoming_headers:
-            return build_passthrough_headers(auth_key, incoming_headers, stream=stream)
-        return build_upstream_headers(auth_key, stream=stream)
+        waf_compatible = self._waf_decision(group, incoming_headers) == "waf_compatible"
+        return self.upstream_adapter.build_request(
+            base_url=group.base_url,
+            auth_key=auth_key,
+            incoming_headers=incoming_headers,
+            stream=stream,
+            waf_compatible=waf_compatible,
+            waf_accept_policy=str(group.waf_accept_policy or "default"),
+        )
 
     def _candidate_from_model(self, idx: int, model: ModelConfig, group: ConnectionGroup) -> UpstreamCandidate:
         mode = self._mode_for(group)
@@ -2861,27 +2817,24 @@ class RouterHandler(BaseHTTPRequestHandler):
         return group.ark_api_key or group.api_key
 
     def _fetch_upstream_models(self, group: ConnectionGroup, auth_key: str) -> List[Dict[str, Any]]:
+        # RouterHandler remains responsible for logs and external error semantics;
+        # the injected adapter owns only the upstream protocol operation.
         target_url = self.router._resolve_url(group.base_url, "/v1/models")
         headers = build_model_fetch_headers(auth_key)
-        request = Request(
-            target_url,
-            headers=headers,
-            method="GET",
-        )
         started_at = time.perf_counter()
         try:
-            with urlopen(request, timeout=60, context=_ssl_context) as resp:
-                raw = resp.read()
-                duration_ms = int((time.perf_counter() - started_at) * 1000)
-                self.router.add_log(
-                    "/v1/models",
-                    group.name,
-                    str(resp.status),
-                    f"fetch upstream models ok; upstream={target_url}; out_headers=({self.router._safe_header_view(headers)})",
-                    duration_ms,
-                    group=group,
-                    event="fetch_models",
-                )
+            target_url, headers, status, models = self.router.upstream_adapter.fetch_models(group.base_url, auth_key)
+            duration_ms = int((time.perf_counter() - started_at) * 1000)
+            self.router.add_log(
+                "/v1/models",
+                group.name,
+                str(status),
+                f"fetch upstream models ok; upstream={target_url}; out_headers=({self.router._safe_header_view(headers)})",
+                duration_ms,
+                group=group,
+                event="fetch_models",
+            )
+            return models
         except HTTPError as err:
             duration_ms = int((time.perf_counter() - started_at) * 1000)
             body = err.read().decode("utf-8", "ignore") if hasattr(err, "read") else str(err)
@@ -2907,11 +2860,6 @@ class RouterHandler(BaseHTTPRequestHandler):
                 event="fetch_models_failed",
             )
             raise
-        payload = json.loads(raw.decode("utf-8"))
-        data = payload.get("data") if isinstance(payload, dict) else None
-        if not isinstance(data, list):
-            raise RuntimeError("上游模型列表格式无效")
-        return [item for item in data if isinstance(item, dict)]
 
     def _clone_group(self, group_id: str) -> Optional[Dict[str, Any]]:
         source = self.store.find_group(group_id)
