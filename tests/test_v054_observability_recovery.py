@@ -170,6 +170,7 @@ def test_v054_frontend_contracts():
     root = Path(__file__).resolve().parent.parent
     api_js = (root / "static/js/api.js").read_text(encoding="utf-8")
     app_js = (root / "static/js/app.js").read_text(encoding="utf-8")
+    tree_js = (root / "static/js/tree.js").read_text(encoding="utf-8")
     dashboard_js = (root / "static/js/dashboard-tab.js").read_text(encoding="utf-8")
     logs_js = (root / "static/js/logs-tab.js").read_text(encoding="utf-8")
     config_js = (root / "static/js/config-tab.js").read_text(encoding="utf-8")
@@ -179,7 +180,8 @@ def test_v054_frontend_contracts():
     assert "recoverModel" in api_js
     assert "recoverAggregateMember" in api_js
     assert "live_requests" in app_js
-    assert "lin-router-sidebar-collapsed" in app_js
+    assert "lin-router-sidebar-collapsed" not in app_js
+    assert "sidebar-collapse" not in tree_js
     assert "实时请求观测" in dashboard_js
     assert "waiting_waf_lock" in dashboard_js
     assert "智能诊断" in logs_js
@@ -193,6 +195,9 @@ def test_v054_frontend_contracts():
     assert "当前中转渠道未确认支持推理强度" in logs_js
     assert "requested_reasoning_effort" in logs_js
     assert "reasoningPreservedLabel" in logs_js
+    assert "reasoningValueStatusLabel" in logs_js
+    assert "不适用（未携带字段）" in logs_js
+    assert "未识别，但已记录原值" in logs_js
     assert "group-reasoning-support" in config_js
     assert "aggregate-client-model-aliases" in config_js
     assert r"split(/[\n,]+/)" in config_js

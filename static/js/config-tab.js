@@ -1,4 +1,7 @@
 const ConfigTab = {
+  defaultRelayBaseUrl: 'https://www.codeok.cc/v1',
+  _newGroupDraft: null,
+
   onShow() {
     const panel = document.getElementById('panel-config');
     if (!panel) return;
@@ -7,6 +10,34 @@ const ConfigTab = {
       this._upstreamDropdownBound = true;
     }
     this.render();
+  },
+
+  startNewGroup() {
+    this._newGroupDraft = {
+      name: '新连接组',
+      provider_type: 'relay',
+      base_url: this.defaultRelayBaseUrl,
+      ark_api_key: '',
+      api_key: '',
+      auto_model_name: '',
+      auto_model_cooldown_minutes: 5,
+      stream_idle_timeout: 120,
+      reasoning_support: 'unknown',
+      waf_compatible: false,
+      waf_client_mode: 'always',
+      waf_accept_policy: 'default',
+    };
+    Store.select('group', null);
+    Tabs.switch('config');
+    this.render();
+  },
+
+  isNewGroupDraft(selection = Store.selected) {
+    return selection.type === 'group' && !selection.id && Boolean(this._newGroupDraft);
+  },
+
+  isDefaultRelayBaseUrl(value) {
+    return String(value || '').trim() === this.defaultRelayBaseUrl;
   },
 
   render() {
@@ -22,12 +53,16 @@ const ConfigTab = {
     const oldSelectedId = oldForm?.dataset.selectedId;
     const formValues = this._captureFormValues();
     this._stopCooldownTimer();
-    if (!sel.id) {
+    const isNewGroupDraft = this.isNewGroupDraft(sel);
+    if (this._newGroupDraft && !isNewGroupDraft) this._newGroupDraft = null;
+    if (!sel.id && !isNewGroupDraft) {
       panel.innerHTML = this.renderEmptyState();
       this.attachEmptyEvents(panel);
       return;
     }
-    const item = sel.type === 'group' ? Store.getGroup(sel.id) : (sel.type === 'model' ? Store.getModel(sel.id) : Store.getAggregate(sel.id));
+    const item = isNewGroupDraft
+      ? this._newGroupDraft
+      : (sel.type === 'group' ? Store.getGroup(sel.id) : (sel.type === 'model' ? Store.getModel(sel.id) : Store.getAggregate(sel.id)));
     const title = item ? Utils.escapeHtml(item.display_name || item.name) : (sel.type === 'group' ? '新建连接组' : (sel.type === 'model' ? '新建模型' : '新建聚合模型'));
 
     panel.innerHTML = `
@@ -59,12 +94,12 @@ const ConfigTab = {
       <div class="empty-state">
         <div class="empty-icon">🚀</div>
         <h2>欢迎使用 Lin Router</h2>
-        <p class="empty-subtitle">点击左上角 + 新建你的第一个连接组，或导入已有配置</p>
+        <p class="empty-subtitle">还没有连接组。添加连接组后，可以获取模型、测试请求并复制客户端接入信息。</p>
         <div class="empty-actions">
           <button type="button" class="btn-primary" id="empty-new-group">新建连接组</button>
           <button type="button" class="btn-secondary" id="empty-import">导入配置</button>
         </div>
-        <p class="empty-hint">客户端请使用连接组 Key（lr-...）或聚合模型 Key（lr-ag-...），旧全局 Key lin-router 已停用</p>
+        <p class="empty-hint">Lin Router 本身不提供模型额度；客户端使用连接组的本地路由 Key，不是上游 API Key。</p>
       </div>
     `;
   },
@@ -81,8 +116,12 @@ const ConfigTab = {
   },
 
   renderGroupSection(sel = Store.selected) {
-    const g = sel.type === 'group' ? Store.getGroup(sel.id) : null;
-    const provider = g?.provider_type || 'ark';
+    const storedGroup = sel.type === 'group' && sel.id ? Store.getGroup(sel.id) : null;
+    const g = storedGroup || (this.isNewGroupDraft(sel) ? this._newGroupDraft : null);
+    const isDraft = !storedGroup && Boolean(g);
+    const provider = g?.provider_type || 'relay';
+    const baseUrl = g?.base_url || '';
+    const usesDefaultRelayBaseUrl = provider === 'relay' && this.isDefaultRelayBaseUrl(baseUrl);
     return `
       <form class="config-form" id="group-form" data-type="group" data-selected-type="group" data-selected-id="${g?.id || ''}">
         <input type="hidden" id="group-id" value="${g?.id || ''}">
@@ -102,7 +141,8 @@ const ConfigTab = {
           </div>
           <div class="form-row">
             <label>Base URL</label>
-            <input id="group-base" value="${Utils.escapeHtml(g?.base_url || '')}" placeholder="https://example.com/v1">
+            <input id="group-base" value="${Utils.escapeHtml(baseUrl)}" placeholder="https://example.com/v1" data-codeok-default="${usesDefaultRelayBaseUrl ? 'true' : 'false'}">
+            <div class="form-hint ${usesDefaultRelayBaseUrl ? '' : 'hidden'}" id="group-base-default-note">默认第三方地址，可修改</div>
           </div>
           <div class="form-row" id="group-key-row">
             <label id="group-key-label">Ark API Key</label>
@@ -112,8 +152,10 @@ const ConfigTab = {
             </div>
           </div>
         </section>
-        <section class="form-card" id="group-advanced-card">
-          <h3>高级配置</h3>
+        ${g ? this.renderGroupWorkflow(g, { isDraft }) : ''}
+        <details class="form-card advanced-config" id="group-advanced-card">
+          <summary>高级配置</summary>
+          <div class="advanced-config-body">
           <div class="form-row" id="group-cooldown-row">
             <label>自动冷却分钟</label>
             <input id="group-cooldown" type="number" min="0" step="1" value="${g?.auto_model_cooldown_minutes ?? 5}">
@@ -154,28 +196,29 @@ const ConfigTab = {
             </select>
             <div class="form-hint">仅在 WAF 兼容开启时生效；passthrough 仅用于 debug 对照。</div>
           </div>
-        </section>
+          <div class="form-row">
+            <label>自动路由模型名</label>
+            <input id="group-auto-model-name" value="${Utils.escapeHtml(g?.auto_model_name || '')}" placeholder="lin-router-auto">
+            <div class="form-hint">留空则使用 lin-router-auto；只影响当前连接组的自动调度模型名。</div>
+          </div>
+          </div>
+        </details>
         <section class="form-card">
           <h3>其他</h3>
-          <div class="form-row">
+          ${g ? `<div class="form-row">
             <label>本地路由 Key</label>
             <div class="input-with-btn">
               <input id="group-route-key" value="${Utils.escapeHtml(g?.route_key || '')}" readonly>
               <button type="button" id="group-copy-route-key" title="复制路由 Key">📋</button>
             </div>
-          </div>
-          <div class="form-row">
-            <label>自动路由模型名</label>
-            <input id="group-auto-model-name" value="${Utils.escapeHtml(g?.auto_model_name || '')}" placeholder="lin-router-auto">
-            <div class="form-hint">客户端 /v1/models 中显示的自动路由模型 ID；留空则使用 lin-router-auto。</div>
-          </div>
+          </div><div class="form-hint group-route-key-hint">客户端使用此 Key 访问本机 Lin Router，不是上游 API Key。</div>` : '<div class="form-hint">保存连接组后会生成本地路由 Key。</div>'}
           <div class="form-row">
             <label>模式说明</label>
             <div class="form-hint" id="group-mode-hint"></div>
           </div>
           <div class="form-actions form-actions-split">
             <div class="form-actions-left">
-              <button type="submit" class="btn-primary">保存更改</button>
+              <button type="submit" class="btn-primary">${isDraft ? '保存连接组' : '保存更改'}</button>
               ${g ? `<button type="button" id="group-clone" class="btn-secondary">复制组</button>` : ''}
             </div>
             <div class="form-actions-right">
@@ -185,6 +228,30 @@ const ConfigTab = {
         </section>
       </form>
     `;
+  },
+
+  renderGroupWorkflow(group, { isDraft = false } = {}) {
+    const status = isDraft ? ConnectionStatus.draftGroup(group) : ConnectionStatus.group(group);
+    const supportsFetch = ['relay', 'proxy'].includes(group.provider_type);
+    const actions = {
+      needs_completion: '<button type="button" class="btn-primary" data-group-action="focus-required">补全字段</button>',
+      draft_ready: '',
+      needs_model_completion: `<button type="button" class="btn-primary" data-group-action="edit-model" data-model-id="${status.representative?.id || ''}">编辑模型</button>`,
+      saved_no_model: `${supportsFetch ? '<button type="button" class="btn-primary" data-group-action="fetch-models">获取模型</button>' : ''}<button type="button" class="btn-secondary" data-group-action="add-model">手动添加模型</button>`,
+      pending_verify: `<button type="button" class="btn-primary" data-group-action="test-model" data-model-id="${status.representative?.id || ''}">测试模型</button><button type="button" class="btn-secondary" data-group-action="add-model">添加模型</button>`,
+      ready: `<button type="button" class="btn-primary" data-group-action="copy-client" data-model-id="${status.verifiedModel?.id || status.representative?.id || ''}">复制客户端配置</button><button type="button" class="btn-secondary" data-group-action="test-model" data-model-id="${status.verifiedModel?.id || status.representative?.id || ''}">再次测试</button>`,
+      cooldown: `<button type="button" class="btn-primary" data-group-action="test-model" data-model-id="${status.representative?.id || ''}">重新测试</button>`,
+      needs_attention: `<button type="button" class="btn-primary" data-group-action="test-model" data-model-id="${status.representative?.id || ''}">查看模型</button>`,
+    };
+    return `
+      <section class="form-card group-workflow-card" id="group-workflow-card">
+        <h3>连接状态</h3>
+        <div class="group-workflow-line"><strong>状态：</strong><span class="connection-status-badge ${status.code}">${Utils.escapeHtml(status.label)}</span></div>
+        <div class="group-workflow-line"><strong>原因：</strong><span>${Utils.escapeHtml(status.reason)}</span></div>
+        <div class="group-workflow-line"><strong>影响：</strong><span>${Utils.escapeHtml(status.impact)}</span></div>
+        <div class="group-workflow-line"><strong>系统动作：</strong><span>${Utils.escapeHtml(status.systemAction)}</span></div>
+        <div class="form-actions group-workflow-actions">${actions[status.code] || ''}</div>
+      </section>`;
   },
 
   renderModelSection(sel = Store.selected) {
@@ -273,6 +340,7 @@ const ConfigTab = {
           <div class="form-actions form-actions-split">
             <div class="form-actions-left">
               <button type="submit" class="btn-primary">保存模型</button>
+              ${m ? '<button type="button" id="model-test" class="btn-secondary">测试模型</button>' : ''}
               ${m ? `<button type="button" id="model-clone" class="btn-secondary">复制</button>` : ''}
             </div>
             <div class="form-actions-right">
@@ -510,8 +578,9 @@ const ConfigTab = {
   },
 
   renderGroupSide() {
+    const hasSavedGroup = Store.selected.type === 'group' && Boolean(Store.selected.id);
     return `
-      ${this.renderBatchImport()}
+      ${hasSavedGroup ? this.renderBatchImport() : ''}
       ${this.renderConfigTools()}
     `;
   },
@@ -641,7 +710,7 @@ const ConfigTab = {
   },
 
   syncGroupModeUI() {
-    const mode = document.getElementById('group-provider')?.value || 'ark';
+    const mode = document.getElementById('group-provider')?.value || 'relay';
     const needsKey = mode === 'ark' || mode === 'proxy';
     const keyRow = document.getElementById('group-key-row');
     const advancedCard = document.getElementById('group-advanced-card');
@@ -662,12 +731,80 @@ const ConfigTab = {
     if (wafClientModeRow) wafClientModeRow.classList.toggle('hidden', mode !== 'relay' || !wafChecked);
     if (wafPolicyRow) wafPolicyRow.classList.toggle('hidden', mode !== 'relay' || !wafChecked);
     if (label) label.textContent = mode === 'ark' ? 'Ark API Key' : '上游 API Key';
+    this.updateDefaultRelayBaseUrlHint();
 
     if (hint) {
       if (mode === 'ark') hint.textContent = '火山方舟：组内保存 Ark Key，模型里填写 EP ID。';
       else if (mode === 'relay') hint.textContent = '中转站：组内只保存 Base URL；每个模型通道单独保存 API Key 和上游模型。';
       else hint.textContent = '通用代理：组内保存 Base URL 和上游 API Key；未配置的具体模型保持原样透传。';
     }
+  },
+
+  updateDefaultRelayBaseUrlHint() {
+    const input = document.getElementById('group-base');
+    const note = document.getElementById('group-base-default-note');
+    if (!input || !note) return;
+    const mode = document.getElementById('group-provider')?.value || 'relay';
+    const remainsDefault = mode === 'relay'
+      && input.dataset.codeokDefault === 'true'
+      && this.isDefaultRelayBaseUrl(input.value);
+    if (!remainsDefault) input.dataset.codeokDefault = 'false';
+    note.classList.toggle('hidden', !remainsDefault);
+  },
+
+  onGroupProviderChange() {
+    const baseInput = document.getElementById('group-base');
+    if (baseInput?.dataset.codeokDefault === 'true') {
+      baseInput.value = '';
+      baseInput.dataset.codeokDefault = 'false';
+    }
+    this.syncGroupModeUI();
+    this.refreshGroupWorkflowFromDraft();
+    this.autoSaveGroup();
+  },
+
+  groupStateFromForm() {
+    const id = document.getElementById('group-id')?.value || '';
+    const stored = id ? Store.getGroup(id) : this._newGroupDraft;
+    if (!stored) return null;
+    const mode = document.getElementById('group-provider')?.value || 'relay';
+    const key = document.getElementById('group-key')?.value.trim() || '';
+    return {
+      ...stored,
+      id: stored.id || '__new_group_draft__',
+      name: document.getElementById('group-name')?.value.trim() || '',
+      provider_type: mode,
+      base_url: document.getElementById('group-base')?.value.trim() || '',
+      ark_api_key: mode === 'ark' ? key : '',
+      api_key: mode === 'proxy' ? key : '',
+    };
+  },
+
+  syncNewGroupDraftFromForm(group) {
+    if (document.getElementById('group-id')?.value || !this._newGroupDraft || !group) return;
+    const { id, ...draft } = group;
+    this._newGroupDraft = { ...this._newGroupDraft, ...draft };
+  },
+
+  refreshGroupWorkflowFromDraft() {
+    const group = this.groupStateFromForm();
+    const workflow = document.getElementById('group-workflow-card');
+    if (!group || !workflow) return;
+    const isDraft = !document.getElementById('group-id')?.value;
+    if (isDraft) this.syncNewGroupDraftFromForm(group);
+    workflow.outerHTML = this.renderGroupWorkflow(group, { isDraft });
+    this.bindGroupWorkflowActions(document.getElementById('panel-config'));
+  },
+
+  bindGroupWorkflowActions(panel) {
+    panel?.querySelectorAll('#group-workflow-card [data-group-action]').forEach(btn => {
+      btn.addEventListener('click', () => this.onGroupWorkflowAction(btn.dataset.groupAction, btn.dataset.modelId));
+    });
+  },
+
+  onGroupDraftInput() {
+    this.updateDefaultRelayBaseUrlHint();
+    this.refreshGroupWorkflowFromDraft();
   },
 
   syncModelModeUI() {
@@ -817,7 +954,7 @@ const ConfigTab = {
     const groupForm = panel.querySelector('#group-form');
     if (groupForm) {
       groupForm.addEventListener('submit', e => this.onGroupSubmit(e));
-      panel.querySelector('#group-provider')?.addEventListener('change', () => { this.syncGroupModeUI(); this.autoSaveGroup(); });
+      panel.querySelector('#group-provider')?.addEventListener('change', () => this.onGroupProviderChange());
       panel.querySelector('#group-waf')?.addEventListener('change', () => { this.syncGroupModeUI(); this.autoSaveGroup(); });
       panel.querySelector('#group-key-toggle')?.addEventListener('click', e => {
         const input = document.getElementById('group-key');
@@ -831,6 +968,11 @@ const ConfigTab = {
       panel.querySelector('#group-delete')?.addEventListener('click', () => this.onGroupDelete());
       panel.querySelector('#group-clone')?.addEventListener('click', () => this.onGroupClone());
       panel.querySelector('#group-add-model')?.addEventListener('click', () => this.onAddModelToGroup());
+      this.bindGroupWorkflowActions(panel);
+      ['#group-name', '#group-base', '#group-key'].forEach(selector => {
+        panel.querySelector(selector)?.addEventListener('input', () => this.onGroupDraftInput());
+        panel.querySelector(selector)?.addEventListener('blur', () => this.validateGroupForm({ focus: false }));
+      });
       this.bindAutoSave(groupForm, () => this.autoSaveGroup());
     }
 
@@ -854,6 +996,7 @@ const ConfigTab = {
       panel.querySelector('#model-clone')?.addEventListener('click', () => this.onModelClone());
       panel.querySelector('#model-recover')?.addEventListener('click', () => this.onRecoverModel());
       panel.querySelector('#model-fetch')?.addEventListener('click', () => this.onFetchUpstream());
+      panel.querySelector('#model-test')?.addEventListener('click', () => this.openQuickTest(document.getElementById('model-id')?.value));
       this.bindAutoSave(modelForm, () => this.autoSaveModel());
     }
 
@@ -1043,9 +1186,95 @@ const ConfigTab = {
     }
   },
 
+  clearFieldErrors(form) {
+    form?.querySelectorAll('.field-error').forEach(el => el.remove());
+    form?.querySelectorAll('[aria-invalid="true"]').forEach(el => el.removeAttribute('aria-invalid'));
+  },
+
+  setFieldError(inputId, message) {
+    const input = document.getElementById(inputId);
+    if (!input) return;
+    input.setAttribute('aria-invalid', 'true');
+    const row = input.closest('.form-row');
+    if (!row || row.querySelector('.field-error')) return;
+    const error = document.createElement('div');
+    error.className = 'field-error';
+    error.textContent = message;
+    const control = input.closest('.input-with-btn') || input.parentElement;
+    control?.appendChild(error);
+  },
+
+  validateGroupForm({ focus = false } = {}) {
+    const form = document.getElementById('group-form');
+    this.clearFieldErrors(form);
+    const mode = document.getElementById('group-provider')?.value || 'relay';
+    const name = document.getElementById('group-name')?.value.trim() || '';
+    const baseUrl = document.getElementById('group-base')?.value.trim() || '';
+    const key = document.getElementById('group-key')?.value.trim() || '';
+    const errors = [];
+    if (!name) errors.push(['group-name', '请填写连接组名称。']);
+    if (!baseUrl) errors.push(['group-base', '请填写 Base URL，例如 https://example.com/v1。']);
+    else if (!ConnectionStatus.isValidBaseUrl(baseUrl)) errors.push(['group-base', 'Base URL 格式不正确，请使用 http:// 或 https:// 地址。']);
+    if (['ark', 'proxy'].includes(mode) && !key) errors.push(['group-key', '请填写上游 API Key 后再保存。']);
+    errors.forEach(([id, message]) => this.setFieldError(id, message));
+    if (focus && errors.length) document.getElementById(errors[0][0])?.focus();
+    return { ok: !errors.length, message: errors[0]?.[1] || '' };
+  },
+
+  validateModelForm({ focus = false } = {}) {
+    const form = document.getElementById('model-form');
+    this.clearFieldErrors(form);
+    const group = Store.getGroup(document.getElementById('model-group')?.value);
+    const name = document.getElementById('model-name')?.value.trim() || '';
+    const upstreamId = ['relay', 'proxy'].includes(group?.provider_type)
+      ? 'model-upstream' : 'model-ep';
+    const upstream = document.getElementById(upstreamId)?.value.trim() || '';
+    const relayKey = document.getElementById('model-key')?.value.trim() || '';
+    const errors = [];
+    if (!name) errors.push(['model-name', '请填写模型名称。']);
+    if (!upstream) errors.push([upstreamId, group?.provider_type === 'ark' ? '请填写上游模型或 EP ID。' : '请填写上游模型名称。']);
+    if (group?.provider_type === 'relay' && !relayKey) errors.push(['model-key', '请填写中转站 API Key。']);
+    errors.forEach(([id, message]) => this.setFieldError(id, message));
+    if (focus && errors.length) document.getElementById(errors[0][0])?.focus();
+    return { ok: !errors.length, message: errors[0]?.[1] || '' };
+  },
+
+  onGroupWorkflowAction(action, modelId) {
+    const groupId = document.getElementById('group-id')?.value;
+    if (action === 'focus-required') {
+      this.validateGroupForm({ focus: true });
+      return;
+    }
+    if (action === 'fetch-models') return this.fetchModelsForGroup(groupId);
+    if (action === 'add-model') return this.onAddModelToGroup(groupId);
+    if (action === 'edit-model') {
+      Store.select('model', modelId);
+      return Tabs.switch('config');
+    }
+    if (action === 'test-model') return this.openQuickTest(modelId);
+    if (action === 'copy-client') return this.copyGroupClientConfig(groupId, modelId);
+  },
+
+  openQuickTest(modelId) {
+    if (!modelId) return Toast.warning('请先添加一个模型');
+    Store.select('model', modelId);
+    Tabs.switch('test');
+  },
+
+  copyGroupClientConfig(groupId, modelId) {
+    const group = Store.getGroup(groupId);
+    const model = Store.getModel(modelId) || (group ? ConnectionStatus.group(group).representative : null);
+    if (!group?.route_key || !model?.name) return Toast.warning('当前连接组还没有可复制的客户端配置');
+    const text = `Base URL: ${window.location.origin}/v1\nAPI Key: ${group.route_key}\nModel: ${model.name}`;
+    return Utils.copy(text).then(ok => ok ? Toast.success('客户端配置已复制') : Toast.error('复制失败'));
+  },
+
   autoSaveGroup() {
     const id = document.getElementById('group-id')?.value;
-    if (!id) return; // 新建不自动保存
+    if (!id) {
+      this.syncNewGroupDraftFromForm(this.groupStateFromForm());
+      return;
+    }
     clearTimeout(this._autoSaveTimer);
     this.setSaveStatus('saving');
     this._autoSaveTimer = setTimeout(() => {
@@ -1067,8 +1296,16 @@ const ConfigTab = {
 
   async onGroupSubmit(e) {
     e.preventDefault();
+    const explicitSubmit = Boolean(e.submitter);
+    const validation = this.validateGroupForm({ focus: explicitSubmit });
+    if (!validation.ok) {
+      if (explicitSubmit) Toast.warning(validation.message);
+      else this.setSaveStatus('error', validation.message);
+      return;
+    }
     const id = document.getElementById('group-id').value;
-    if (Store.selected.type !== 'group' || Store.selected.id !== id) {
+    const isNewGroupDraft = !id && this.isNewGroupDraft();
+    if (Store.selected.type !== 'group' || (id ? Store.selected.id !== id : !isNewGroupDraft)) {
       Toast.error('当前连接组表单状态已过期，请重新选择后再保存');
       this.render();
       return;
@@ -1078,7 +1315,7 @@ const ConfigTab = {
     const payload = {
       name: document.getElementById('group-name').value.trim(),
       provider_type: mode,
-      base_url: document.getElementById('group-base').value.trim() || undefined,
+      base_url: document.getElementById('group-base').value.trim(),
       ark_api_key: mode === 'ark' ? key : '',
       api_key: mode === 'proxy' ? key : '',
       auto_model_name: document.getElementById('group-auto-model-name').value.trim(),
@@ -1095,10 +1332,15 @@ const ConfigTab = {
     };
     try {
       this.setSaveStatus('saving');
-      if (id) await API.saveGroup(id, payload);
-      else await API.createGroup(payload);
+      const result = id ? await API.saveGroup(id, payload) : await API.createGroup(payload);
+      if (!id) this._newGroupDraft = null;
       await Store.load();
+      if (!id && result?.group?.id) Store.select('group', result.group.id);
       this.setSaveStatus('saved');
+      if (explicitSubmit) {
+        this.render();
+        Toast.success('连接组已保存，请按状态提示完成下一步');
+      }
     } catch (err) {
       this.setSaveStatus('error', '保存失败：' + err.message);
       Toast.error('保存失败：' + err.message);
@@ -1135,8 +1377,8 @@ const ConfigTab = {
     }
   },
 
-  async onAddModelToGroup() {
-    const groupId = document.getElementById('group-id')?.value;
+  async onAddModelToGroup(groupId = '') {
+    groupId = groupId || document.getElementById('group-id')?.value;
     if (!groupId) {
       Toast.warning('请先保存连接组');
       return;
@@ -1165,6 +1407,13 @@ const ConfigTab = {
 
   async onModelSubmit(e) {
     e.preventDefault();
+    const explicitSubmit = Boolean(e.submitter);
+    const validation = this.validateModelForm({ focus: explicitSubmit });
+    if (!validation.ok) {
+      if (explicitSubmit) Toast.warning(validation.message);
+      else this.setSaveStatus('error', validation.message);
+      return;
+    }
     const id = document.getElementById('model-id').value;
     if (Store.selected.type !== 'model' || Store.selected.id !== id) {
       Toast.error('当前模型表单状态已过期，请重新选择后再保存');
@@ -1538,29 +1787,46 @@ const ConfigTab = {
 
   async onFetchUpstream() {
     const groupId = document.getElementById('model-group').value;
-    const group = Store.getGroup(groupId);
-    if (!['relay', 'proxy'].includes(group?.provider_type)) {
-      Toast.warning('只有中转站或通用代理模式才能获取模型');
-      return;
-    }
     const apiKey = document.getElementById('model-key')?.value?.trim() || '';
     const btn = document.getElementById('model-fetch');
     const old = btn.textContent;
     btn.disabled = true;
     btn.textContent = '获取中...';
     try {
-      await API.fetchUpstreamModels(groupId, apiKey);
-      await Store.load();
+      await this.fetchModelsForGroup(groupId, apiKey);
       // 获取到新列表后清空旧值，并直接渲染下拉，避免 datalist 在 Safari 中不刷新
       const upstreamInput = document.getElementById('model-upstream');
       if (upstreamInput) upstreamInput.value = '';
       this.renderUpstreamOptions(groupId, true);
-      Toast.success('上游模型已获取');
-    } catch (err) {
-      Toast.error('获取失败：' + err.message);
     } finally {
       btn.disabled = false;
       btn.textContent = old;
+    }
+  },
+
+  async fetchModelsForGroup(groupId, suppliedKey = '') {
+    const group = Store.getGroup(groupId);
+    if (!['relay', 'proxy'].includes(group?.provider_type)) {
+      Toast.warning('当前模式不支持自动获取模型，请直接手动添加模型。');
+      return false;
+    }
+    let apiKey = suppliedKey || group?.api_key || '';
+    if (group?.provider_type === 'relay' && !apiKey) {
+      apiKey = window.prompt('请输入中转站 API Key 以获取模型列表。该 Key 只用于本次获取，不会保存到连接组。', '') || '';
+    }
+    if (!apiKey) {
+      Toast.warning('需要 API Key 才能获取上游模型；你也可以手动添加模型。');
+      return false;
+    }
+    try {
+      const result = await API.fetchUpstreamModels(groupId, apiKey);
+      await Store.load();
+      const count = Number(result?.count || result?.models?.length || 0);
+      Toast.success(count ? `已获取 ${count} 个上游模型` : '获取完成；未返回模型，可手动添加模型');
+      return true;
+    } catch (err) {
+      Toast.error('获取模型失败：' + err.message + '。你仍可以手动添加模型。');
+      return false;
     }
   },
 

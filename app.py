@@ -222,7 +222,7 @@ class ConnectionGroup:
             id=str(data.get("id") or uuid.uuid4().hex),
             name=data["name"],
             provider_type=str(data.get("provider_type") or PROVIDER_ARK),
-            base_url=data.get("base_url") or DEFAULT_BASE_URL,
+            base_url="" if "base_url" in data and data.get("base_url") is None else (str(data.get("base_url")) if "base_url" in data else DEFAULT_BASE_URL),
             ark_api_key=data.get("ark_api_key") or "",
             api_key=str(data.get("api_key") or ""),
             route_key=str(data.get("route_key") or ""),
@@ -974,11 +974,16 @@ class StreamIdleTimeoutError(TimeoutError):
 
 
 class ArkProxyRouter:
-    def __init__(self, store: ConfigStore, settings_store: Optional[SettingsStore] = None) -> None:
+    def __init__(
+        self,
+        store: ConfigStore,
+        settings_store: Optional[SettingsStore] = None,
+        log_file: Optional[str | Path] = None,
+    ) -> None:
         self.store = store
         self.settings_store = settings_store
         self.logs: List[RequestLog] = []
-        self.log_file = self._resolve_log_file()
+        self.log_file = Path(log_file) if log_file else self._resolve_log_file()
         self.log_write_error = ""
         self.upstream_locks: Dict[str, threading.Lock] = {}
         self.upstream_active_streams: Dict[str, int] = {}
@@ -1967,28 +1972,37 @@ class ArkProxyRouter:
         if normalized_path.endswith('/responses'):
             request_api = 'responses'
             reasoning = payload.get('reasoning')
+            field_present = isinstance(reasoning, dict) and 'effort' in reasoning
             effort = reasoning.get('effort') if isinstance(reasoning, dict) else None
-            field_source = 'reasoning.effort' if isinstance(effort, str) else 'none'
+            field_source = 'reasoning.effort' if field_present else 'none'
         elif normalized_path.endswith('/chat/completions'):
             request_api = 'chat_completions'
+            field_present = 'reasoning_effort' in payload
             effort = payload.get('reasoning_effort')
-            field_source = 'reasoning_effort' if isinstance(effort, str) else 'none'
+            field_source = 'reasoning_effort' if field_present else 'none'
         else:
             request_api = 'unknown'
             effort = None
+            field_present = False
             field_source = 'none'
 
-        allowed_efforts = {'low', 'medium', 'high', 'xhigh'}
-        requested_effort = str(effort).lower() if isinstance(effort, str) and str(effort).lower() in allowed_efforts else 'unset'
-        preserved = requested_effort == 'unset'
-        if not preserved:
+        allowed_efforts = {'low', 'medium', 'high', 'xhigh', 'max', 'ultra'}
+        if not field_present:
+            requested_effort = 'unset'
+            value_status = 'absent'
+            preserved = 'n/a'
+        else:
+            raw_effort = effort if isinstance(effort, str) else json.dumps(effort, ensure_ascii=False, separators=(',', ':'))
+            requested_effort = re.sub(r'[\r\n;]', '_', str(raw_effort))
+            value_status = 'recognized' if isinstance(effort, str) and effort.lower() in allowed_efforts else 'unrecognized'
+            preserved = False
             try:
                 outbound = json.loads(body.decode('utf-8'))
                 if field_source == 'reasoning.effort':
                     outbound_reasoning = outbound.get('reasoning') if isinstance(outbound, dict) else None
-                    preserved = isinstance(outbound_reasoning, dict) and str(outbound_reasoning.get('effort') or '').lower() == requested_effort
+                    preserved = isinstance(outbound_reasoning, dict) and outbound_reasoning.get('effort') == effort
                 else:
-                    preserved = isinstance(outbound, dict) and str(outbound.get('reasoning_effort') or '').lower() == requested_effort
+                    preserved = isinstance(outbound, dict) and outbound.get('reasoning_effort') == effort
             except Exception:
                 preserved = False
         support = str(getattr(group, 'reasoning_support', 'unknown') or 'unknown').lower()
@@ -1998,7 +2012,8 @@ class ArkProxyRouter:
             f'request_api={request_api}'
             f'; requested_reasoning_effort={requested_effort}'
             f'; reasoning_field_source={field_source}'
-            f'; reasoning_preserved={str(preserved).lower()}'
+            f'; reasoning_value_status={value_status}'
+            f'; reasoning_preserved={preserved if isinstance(preserved, str) else str(preserved).lower()}'
             f'; upstream_reasoning_support={support}'
             f'; body_mode={body_mode}'
         )
@@ -5622,25 +5637,12 @@ class RouterHandler(BaseHTTPRequestHandler):
         self._send_json({"error": {"message": "资源不存在", "type": "invalid_request_error", "code": "not_found"}}, status=404)
 
 
-def ensure_sample_config(path: Path) -> None:
+def ensure_initial_config(path: Path) -> None:
     if path.exists():
         return
-    sample_group = ConnectionGroup(
-        id=uuid.uuid4().hex,
-        name="默认组",
-        provider_type=PROVIDER_ARK,
-        base_url=DEFAULT_BASE_URL,
-        ark_api_key="sk-xxxx",
-    )
-    sample_model = ModelConfig(
-        id=uuid.uuid4().hex,
-        name="DeepSeek",
-        ep_id="ep-xxxx",
-        group_id=sample_group.id,
-        usable=True,
-    )
+    path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as f:
-        json.dump({"groups": [asdict(sample_group)], "models": [asdict(sample_model)]}, f, ensure_ascii=False, indent=2)
+        json.dump({"groups": [], "models": [], "aggregate_models": [], "aggregate_members": []}, f, ensure_ascii=False, indent=2)
 
 
 def pick_port(start_port: int, host: str) -> int:
@@ -5661,11 +5663,11 @@ def create_server(
     config: str | Path = DEFAULT_CONFIG_FILE,
 ) -> Tuple[ThreadingHTTPServer, int, Path]:
     config_path = Path(config)
-    ensure_sample_config(config_path)
+    ensure_initial_config(config_path)
     store = ConfigStore(config_path)
     store.refresh_expired_cooldowns()
     settings_store = SettingsStore(config_path)
-    router = ArkProxyRouter(store, settings_store)
+    router = ArkProxyRouter(store, settings_store, log_file=config_path.parent / "lin-router-logs.jsonl")
     selected_port = pick_port(port, host)
 
     server = ThreadingHTTPServer((host, selected_port), RouterHandler)

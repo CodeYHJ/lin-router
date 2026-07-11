@@ -61,21 +61,47 @@ class CaptureHandler(BaseHTTPRequestHandler):
         return
 
 
-def post_responses(port, effort, model="client-model", route_key="lr-reasoning-test"):
+def post_responses(port, effort, model="client-model", route_key="lr-reasoning-test", extra_headers=None):
     raw = (
         f'{{ "model" : "{model}", "input" : "ping", '
         f'"reasoning" : {{ "effort" : "{effort}", "summary" : "auto" }}, '
         '"stream" : false }'
     ).encode("utf-8")
+    headers = {
+        "Authorization": f"Bearer {route_key}",
+        "Content-Type": "application/json",
+        "User-Agent": "Hermes-Test/1.0",
+    }
+    headers.update(extra_headers or {})
     request = urllib.request.Request(
         f"http://127.0.0.1:{port}/v1/responses",
         data=raw,
         method="POST",
-        headers={
-            "Authorization": f"Bearer {route_key}",
-            "Content-Type": "application/json",
-            "User-Agent": "Hermes-Test/1.0",
-        },
+        headers=headers,
+    )
+    with urllib.request.urlopen(request, timeout=10) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def post_chat_completions(port, effort, model="client-model", route_key="lr-reasoning-test", extra_headers=None):
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": "ping"}],
+        "stream": False,
+    }
+    if effort is not None:
+        payload["reasoning_effort"] = effort
+    headers = {
+        "Authorization": f"Bearer {route_key}",
+        "Content-Type": "application/json",
+        "User-Agent": "Hermes-Test/1.0",
+    }
+    headers.update(extra_headers or {})
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{port}/v1/chat/completions",
+        data=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
+        method="POST",
+        headers=headers,
     )
     with urllib.request.urlopen(request, timeout=10) as response:
         return json.loads(response.read().decode("utf-8"))
@@ -184,8 +210,89 @@ def test_reasoning_field_selection_and_raw_model_patch_bytes():
     chat_fields = ArkProxyRouter._reasoning_log_fields("/v1/chat/completions", chat_payload, chat_body, chat_mode, group)
     assert "requested_reasoning_effort=low" in chat_fields
     assert "reasoning_field_source=reasoning_effort" in chat_fields
+    assert "reasoning_value_status=recognized" in chat_fields
     assert "reasoning_preserved=true" in chat_fields
     assert "\"reasoning\"" not in chat_body.decode("utf-8")
+
+    for effort in ("low", "medium", "high", "xhigh", "max", "ultra"):
+        raw = json.dumps({"model": "client-model", "reasoning": {"effort": effort}}, separators=(",", ":")).encode("utf-8")
+        payload = json.loads(raw)
+        body, mode = ArkProxyRouter._body_for_upstream(payload, raw, "client-model", "target-model")
+        fields = ArkProxyRouter._reasoning_log_fields("/v1/responses", payload, body, mode, group)
+        assert f"requested_reasoning_effort={effort}" in fields
+        assert "reasoning_value_status=recognized" in fields
+        assert "reasoning_preserved=true" in fields
+
+    future_payload = {"model": "client-model", "reasoning": {"effort": "future_level"}}
+    future_body, future_mode = ArkProxyRouter._body_for_upstream(future_payload, None, "client-model", "target-model")
+    future_fields = ArkProxyRouter._reasoning_log_fields("/v1/responses", future_payload, future_body, future_mode, group)
+    assert "requested_reasoning_effort=future_level" in future_fields
+    assert "reasoning_value_status=unrecognized" in future_fields
+    assert "reasoning_preserved=true" in future_fields
+
+    absent_payload = {"model": "client-model", "input": "ping"}
+    absent_body, absent_mode = ArkProxyRouter._body_for_upstream(absent_payload, None, "client-model", "target-model")
+    absent_fields = ArkProxyRouter._reasoning_log_fields("/v1/responses", absent_payload, absent_body, absent_mode, group)
+    assert "requested_reasoning_effort=unset" in absent_fields
+    assert "reasoning_value_status=absent" in absent_fields
+    assert "reasoning_preserved=n/a" in absent_fields
+
+    for effort in ("max", "ultra", "future_level"):
+        payload = {"model": "client-model", "messages": [], "reasoning_effort": effort}
+        body, mode = ArkProxyRouter._body_for_upstream(payload, None, "client-model", "target-model")
+        fields = ArkProxyRouter._reasoning_log_fields("/v1/chat/completions", payload, body, mode, group)
+        assert f"requested_reasoning_effort={effort}" in fields
+        assert f"reasoning_value_status={'recognized' if effort != 'future_level' else 'unrecognized'}" in fields
+        assert "reasoning_preserved=true" in fields
+
+
+def test_chat_completions_reasoning_effort_is_preserved_through_waf_and_logged():
+    upstream_port = free_port()
+    upstream = ThreadingHTTPServer(("127.0.0.1", upstream_port), CaptureHandler)
+    upstream.captures = []
+    upstream.fail_models = set()
+    threading.Thread(target=upstream.serve_forever, daemon=True).start()
+
+    with tempfile.TemporaryDirectory() as tmp:
+        config_path = Path(tmp) / "config.json"
+        write_config(config_path, upstream_port)
+        server, port, _ = create_server("127.0.0.1", free_port(), config_path)
+        server.router.logs = []
+        server.router.log_file = Path(tmp) / "test-logs.jsonl"
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            group = server.store.find_group("g1")
+            assert group is not None
+            group.waf_compatible = True
+            server.store.save()
+
+            for effort in ("max", "ultra", "future_level", None):
+                post_chat_completions(port, effort)
+
+            assert [capture["payload"].get("reasoning_effort") for capture in upstream.captures] == [
+                "max", "ultra", "future_level", None,
+            ]
+            assert all("reasoning" not in capture["payload"] for capture in upstream.captures)
+            success_logs = [item for item in server.router.logs if item.event == "ok"]
+            assert len(success_logs) == 4
+            expected_details = [
+                ("max", "recognized", "true"),
+                ("ultra", "recognized", "true"),
+                ("future_level", "unrecognized", "true"),
+                ("unset", "absent", "n/a"),
+            ]
+            for item, (effort, status, preserved) in zip(reversed(success_logs), expected_details):
+                assert "request_api=chat_completions" in item.detail
+                assert f"requested_reasoning_effort={effort}" in item.detail
+                field_source = "none" if effort == "unset" else "reasoning_effort"
+                assert f"reasoning_field_source={field_source}" in item.detail
+                assert f"reasoning_value_status={status}" in item.detail
+                assert f"reasoning_preserved={preserved}" in item.detail
+        finally:
+            server.shutdown()
+            server.server_close()
+            upstream.shutdown()
+            upstream.server_close()
 
 
 def test_aggregate_fallback_preserves_same_reasoning_effort():
@@ -219,15 +326,60 @@ def test_aggregate_fallback_preserves_same_reasoning_effort():
         server.router.log_file = Path(tmp) / "test-logs.jsonl"
         threading.Thread(target=server.serve_forever, daemon=True).start()
         try:
-            response = post_responses(port, "high", model="gpt-5.5", route_key="lr-ag-reasoning")
-            assert response["usage"]["output_tokens_details"]["reasoning_tokens"] == 96
+            response = post_responses(port, "ultra", model="gpt-5.5", route_key="lr-ag-reasoning")
+            assert response["usage"]["output_tokens_details"]["reasoning_tokens"] == 0
             assert [capture["payload"]["model"] for capture in upstream.captures] == ["target-one", "target-two"]
-            assert all(capture["payload"]["reasoning"]["effort"] == "high" for capture in upstream.captures)
+            assert all(capture["payload"]["reasoning"]["effort"] == "ultra" for capture in upstream.captures)
             request_logs = [item for item in server.router.logs if item.event in {"fallback", "cooldown", "ok"}]
             assert len(request_logs) >= 2
-            assert all("requested_reasoning_effort=high" in item.detail for item in request_logs[:2])
+            assert all("requested_reasoning_effort=ultra" in item.detail for item in request_logs[:2])
+            assert all("reasoning_value_status=recognized" in item.detail for item in request_logs[:2])
             assert all("reasoning_preserved=true" in item.detail for item in request_logs[:2])
             assert any("requested=gpt-5.5" in item.detail and "resolved_as=aggregate_alias" in item.detail for item in request_logs)
+        finally:
+            server.shutdown()
+            server.server_close()
+            upstream.shutdown()
+            upstream.server_close()
+
+
+def test_codex_max_and_ultra_are_preserved_through_codex_direct_path():
+    upstream_port = free_port()
+    upstream = ThreadingHTTPServer(("127.0.0.1", upstream_port), CaptureHandler)
+    upstream.captures = []
+    upstream.fail_models = set()
+    threading.Thread(target=upstream.serve_forever, daemon=True).start()
+
+    with tempfile.TemporaryDirectory() as tmp:
+        config_path = Path(tmp) / "config.json"
+        write_config(config_path, upstream_port)
+        server, port, _ = create_server("127.0.0.1", free_port(), config_path)
+        server.router.logs = []
+        server.router.log_file = Path(tmp) / "test-logs.jsonl"
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            group = server.store.find_group("g1")
+            assert group is not None
+            group.waf_compatible = True
+            group.waf_client_mode = "auto_bypass_codex"
+            server.store.save()
+            codex_headers = {"User-Agent": "Codex/1.0", "X-Codex-Beta-Features": "responses"}
+
+            for effort in ("max", "ultra"):
+                post_responses(port, effort, extra_headers=codex_headers)
+
+            assert [capture["payload"]["reasoning"]["effort"] for capture in upstream.captures] == ["max", "ultra"]
+            assert all(capture["headers"]["user-agent"] == "Codex/1.0" for capture in upstream.captures)
+            request_logs = [item for item in server.router.logs if item.event == "ok"]
+            assert len(request_logs) == 2
+            for effort, item in zip(("max", "ultra"), reversed(request_logs)):
+                assert f"request_api=responses" in item.detail
+                assert f"requested_reasoning_effort={effort}" in item.detail
+                assert "reasoning_field_source=reasoning.effort" in item.detail
+                assert "reasoning_value_status=recognized" in item.detail
+                assert "reasoning_preserved=true" in item.detail
+                assert "waf_decision=codex_direct" in item.detail
+                assert "body_mode=raw-model-patch" in item.detail
         finally:
             server.shutdown()
             server.server_close()

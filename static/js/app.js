@@ -1,17 +1,14 @@
 const App = {
   theme: 'system',
-  sidebarCollapsed: false,
   _lastSelectionKey: '',
   _runtimeRefreshTimer: null,
 
   async init() {
-    this.restoreSidebarState();
     this.renderTopbar();
     this.renderFabs();
     Tree.init();
     Tabs.init();
     this.bindShortcuts();
-    this.bindResize();
 
     await Store.load();
     // 应用服务器端保存的设置
@@ -142,23 +139,6 @@ const App = {
     Toast.info(`主题已切换：${{light:'浅色', dark:'深色', system:'跟随系统'}[next]}`);
   },
 
-  toggleSidebar() {
-    this.sidebarCollapsed = !this.sidebarCollapsed;
-    this.applySidebarState();
-    localStorage.setItem('lin-router-sidebar-collapsed', this.sidebarCollapsed ? '1' : '0');
-  },
-
-  restoreSidebarState() {
-    this.sidebarCollapsed = localStorage.getItem('lin-router-sidebar-collapsed') === '1';
-    this.applySidebarState();
-  },
-
-  applySidebarState() {
-    document.querySelector('.app')?.classList.toggle('sidebar-collapsed', this.sidebarCollapsed);
-    const btn = document.getElementById('sidebar-collapse');
-    if (btn) btn.textContent = this.sidebarCollapsed ? '▶' : '◀';
-  },
-
   updateStatusDot(state) {
     const dot = document.getElementById('status-dot');
     if (!dot) return;
@@ -216,27 +196,8 @@ const App = {
     }
   },
 
-  bindResize() {
-    const check = () => {
-      const shouldCollapse = window.innerWidth < 1200;
-      if (shouldCollapse !== this.sidebarCollapsed) {
-        this.toggleSidebar();
-      }
-    };
-    window.addEventListener('resize', Utils.debounce(check, 200));
-    check();
-  },
-
-  async createGroup() {
-    try {
-      const data = await API.createGroup({ name: '新连接组', provider_type: 'ark', base_url: '', api_key: '', ark_api_key: '' });
-      await Store.load();
-      Store.select('group', data.group.id);
-      Tabs.switch('config');
-      Toast.success('已新建连接组，请直接编辑');
-    } catch (err) {
-      Toast.error('创建失败：' + err.message);
-    }
+  createGroup() {
+    ConfigTab.startNewGroup();
   },
 
   async createAggregate() {
@@ -263,6 +224,14 @@ const App = {
     } catch (err) {
       Toast.error('导出失败：' + err.message);
     }
+  },
+
+  importConfig() {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'application/json,.json';
+    input.addEventListener('change', event => ConfigTab.onConfigImport(event));
+    input.click();
   },
 
   openSettings() {

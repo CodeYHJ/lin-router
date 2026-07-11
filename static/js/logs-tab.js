@@ -590,7 +590,17 @@ const LogsTab = {
   reasoningPreservedLabel(value) {
     if (String(value) === 'true') return '是';
     if (String(value) === 'false') return '否';
+    if (String(value) === 'n/a') return '不适用（未携带字段）';
     return '-';
+  },
+
+  reasoningValueStatusLabel(value) {
+    const map = {
+      absent: '未携带字段',
+      recognized: '已识别',
+      unrecognized: '未识别，但已记录原值',
+    };
+    return map[String(value || '')] || '-';
   },
 
   reasoningWarning(parsed) {
@@ -598,6 +608,9 @@ const LogsTab = {
     if (effort === 'unset') return '';
     if (String(parsed.reasoning_preserved) === 'false') {
       return '推理强度字段未被完整保留，请检查请求体转换路径。';
+    }
+    if (String(parsed.reasoning_value_status) === 'unrecognized') {
+      return '请求携带了尚未纳入已知枚举的推理强度；Lin Router 已按原值记录并透传。';
     }
     if (['unknown', 'unsupported'].includes(String(parsed.upstream_reasoning_support || 'unknown'))) {
       return '当前中转渠道未确认支持推理强度，实际可能按上游默认值执行。';
@@ -764,6 +777,7 @@ const LogsTab = {
             <dt>请求 API</dt><dd>${Utils.escapeHtml(parsed.request_api || '-')}</dd>
             <dt>请求推理强度</dt><dd>${Utils.escapeHtml(parsed.requested_reasoning_effort || 'unset')}</dd>
             <dt>推理字段来源</dt><dd>${Utils.escapeHtml(parsed.reasoning_field_source || 'none')}</dd>
+            <dt>推理强度状态</dt><dd>${Utils.escapeHtml(this.reasoningValueStatusLabel(parsed.reasoning_value_status))}</dd>
             <dt>推理字段已保留</dt><dd>${Utils.escapeHtml(this.reasoningPreservedLabel(parsed.reasoning_preserved))}</dd>
             <dt>上游推理支持</dt><dd>${Utils.escapeHtml(this.reasoningSupportLabel(parsed.upstream_reasoning_support))}</dd>
             <dt>请求体模式</dt><dd>${Utils.escapeHtml(parsed.body_mode || parsed.body || '-')}</dd>

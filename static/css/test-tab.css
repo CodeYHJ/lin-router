@@ -5,6 +5,14 @@
   height: calc(100% - 40px);
 }
 
+.test-quick-card { margin-bottom: 16px; }
+.test-quick-card h3 { margin-bottom: 6px; }
+.test-quick-hint { color: var(--text-secondary); font-size: 13px; line-height: 1.5; margin: 0 0 16px; }
+.test-advanced-card > summary { cursor: pointer; font-size: 14px; font-weight: 600; }
+.test-advanced-body { margin-top: 16px; }
+.test-result-actions { display: flex; gap: 8px; margin: -4px 0 12px; }
+.test-empty-state { min-height: 45vh; }
+
 .test-col {
   display: flex;
   flex-direction: column;

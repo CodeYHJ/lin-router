@@ -3,40 +3,11 @@
   grid-template-areas:
     "topbar topbar"
     "sidebar main";
-  grid-template-columns: var(--sidebar-w) 1fr;
+  grid-template-columns: var(--sidebar-w) minmax(680px, 1fr);
   grid-template-rows: var(--topbar-h) 1fr;
   height: 100vh;
-  overflow: hidden;
-}
-
-.app.sidebar-collapsed {
-  grid-template-columns: var(--sidebar-collapsed-w) 1fr;
-}
-
-.app.sidebar-collapsed .sidebar {
-  position: relative;
-  z-index: 80;
-}
-
-.app.sidebar-collapsed .sidebar:hover {
-  position: absolute;
-  left: 0;
-  top: var(--topbar-h);
-  bottom: 0;
-  width: var(--sidebar-w);
-  box-shadow: var(--shadow-lg);
-}
-
-.app.sidebar-collapsed .sidebar:hover .sidebar-title,
-.app.sidebar-collapsed .sidebar:hover .tree-label,
-.app.sidebar-collapsed .sidebar:hover .tree-badge,
-.app.sidebar-collapsed .sidebar:hover .tree-meta,
-.app.sidebar-collapsed .sidebar:hover .tree-cooldown {
-  display: inline;
-}
-
-.app.sidebar-collapsed .sidebar:hover .tree-toggle {
-  display: inline-flex;
+  overflow-x: auto;
+  overflow-y: hidden;
 }
 
 .topbar {
@@ -131,8 +102,7 @@
   flex-direction: column;
   overflow: hidden;
   width: var(--sidebar-w);
-  min-width: 0;
-  transition: width .2s ease;
+  min-width: var(--sidebar-w);
 }
 
 .sidebar-header {
@@ -163,6 +133,7 @@
   flex-direction: column;
   background: var(--bg-secondary);
   overflow: hidden;
+  min-width: 680px;
 }
 
 .tabbar {
@@ -236,13 +207,4 @@
   background: var(--text-tertiary);
   cursor: not-allowed;
   transform: none;
-}
-
-
-.app.sidebar-collapsed .sidebar {
-  width: var(--sidebar-collapsed-w);
-}
-
-.app.sidebar-collapsed .main {
-  min-width: 0;
 }

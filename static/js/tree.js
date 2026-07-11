@@ -9,12 +9,9 @@ const Tree = {
     this.el.innerHTML = `
       <div class="sidebar-header">
         <span class="sidebar-title">连接组</span>
-        <button class="icon-btn" id="sidebar-collapse" title="折叠/展开">◀</button>
       </div>
       <div class="tree-container" id="tree-root"></div>
     `;
-    document.getElementById('sidebar-collapse').addEventListener('click', () => App.toggleSidebar());
-    App.applySidebarState?.();
     this.hideMenu = this.hideMenu.bind(this);
     document.addEventListener('click', this.hideMenu);
     this.loadExpanded();
@@ -57,9 +54,15 @@ const Tree = {
     const models = Store.state.models || [];
     const aggregates = Store.state.aggregate_models || [];
     const aggregateMembers = Store.state.aggregate_members || [];
-    if (!groups.length && !aggregates.length) return '<div class="config-placeholder">暂无连接组，点击右上角 + 新建</div>';
-
-    const groupsHtml = groups.map(g => this.buildGroupHtml(g, models)).join('');
+    const groupsHtml = groups.length ? groups.map(g => this.buildGroupHtml(g, models)).join('') : `
+      <div class="tree-group-empty">
+        <div class="tree-empty-title">暂无连接组</div>
+        <div class="tree-empty-desc">添加连接组后，可以获取模型、测试请求并复制客户端接入信息。</div>
+        <div class="tree-empty-actions">
+          <button type="button" class="btn-primary btn-sm" id="tree-new-group">添加连接组</button>
+          <button type="button" class="btn-secondary btn-sm" id="tree-import-config">导入配置</button>
+        </div>
+      </div>`;
     const aggregatesHtml = this.buildAggregatesSection(aggregates, aggregateMembers);
     return `<div class="tree-root">${groupsHtml}${aggregatesHtml}</div>`;
   },
@@ -113,6 +116,7 @@ const Tree = {
   buildGroupHtml(g, models) {
     const groupModels = models.filter(m => m.group_id === g.id);
     const expanded = this.expanded.has(g.id);
+    const summary = ConnectionStatus.group(g);
     const status = this.groupStatus(g, groupModels);
     const modeLabel = { ark: '方舟', relay: '中转', proxy: '代理' }[g.provider_type] || g.provider_type;
     const active = Store.selected.type === 'group' && Store.selected.id === g.id ? 'active' : '';
@@ -120,12 +124,12 @@ const Tree = {
 
     return `
       <div class="tree-node ${filtered}" data-type="group" data-id="${g.id}">
-        <div class="tree-group ${active}" data-type="group" data-id="${g.id}" data-context="group">
+        <div class="tree-group ${active}" data-type="group" data-id="${g.id}" data-context="group" title="${Utils.escapeHtml(`${summary.label}：${summary.reason}`)}">
           <span class="tree-toggle" data-action="toggle">${expanded ? '▼' : '▶'}</span>
           <span class="tree-status ${status}"></span>
           <span class="tree-label">${this.highlight(Utils.escapeHtml(g.name))}</span>
           <span class="tree-badge">${modeLabel}</span>
-          <span class="tree-meta">${groupModels.length}模型</span>
+          <span class="tree-meta">${groupModels.length}模型 · ${Utils.escapeHtml(summary.label)}</span>
         </div>
         <div class="tree-children ${expanded ? '' : 'hidden'}">
           ${groupModels.map(m => this.buildModelHtml(m)).join('')}
@@ -157,11 +161,10 @@ const Tree = {
   },
 
   groupStatus(g, models) {
-    if (!models.length) return 'error';
-    const usable = models.filter(m => m.usable && !this.isCooling(m)).length;
-    if (usable === 0) return 'error';
-    if (usable < models.length) return 'warning';
-    return 'ok';
+    const summary = ConnectionStatus.group(g);
+    if (summary.code === 'ready') return 'ok';
+    if (['pending_verify', 'saved_no_model', 'cooldown'].includes(summary.code)) return 'warning';
+    return 'error';
   },
 
   modelStatus(m) {
@@ -190,6 +193,8 @@ const Tree = {
   },
 
   attachEvents(root) {
+    root.querySelector('#tree-new-group')?.addEventListener('click', () => App.createGroup());
+    root.querySelector('#tree-import-config')?.addEventListener('click', () => App.importConfig());
     const newAggregateBtn = root.querySelector('#tree-new-aggregate');
     if (newAggregateBtn) {
       newAggregateBtn.addEventListener('click', () => App.createAggregate());
