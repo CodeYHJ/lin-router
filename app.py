@@ -56,6 +56,7 @@ from linrouter_core.config.models import AggregateMember, AggregateModel, Connec
 from linrouter_core.config.store import ConfigStore
 from linrouter_core.observability import ObservabilityService, RequestLog
 from linrouter_core.runtime import CandidateErrorClassifier, CandidateRuntime, WafLockState
+from linrouter_core.runtime.handler_runtime import handle_proxy_request
 from linrouter_core.upstream import UpstreamAdapter
 from linrouter_core.upstream import request as upstream_request
 
@@ -1610,6 +1611,7 @@ class ArkProxyRouter:
 
 class RouterHandler(BaseHTTPRequestHandler):
     server_version = "LinRouter/2.0"
+    _all_models_failed_error_type = AllModelsFailedError
 
     @property
     def store(self) -> ConfigStore:
@@ -3500,44 +3502,7 @@ class RouterHandler(BaseHTTPRequestHandler):
                 return
             raw = self._read_raw_body()
             payload = self._json_from_raw(raw)
-            stream = bool(payload.get("stream"))
-            try:
-                if stream:
-                    status, headers, iterator, request_id = self.router.stream(parsed.path, payload, ctx, dict(self.headers.items()), raw)
-                    self.send_response(status)
-                    for key, value in headers.items():
-                        if key.lower() in {"content-length", "connection", "transfer-encoding"}:
-                            continue
-                        self.send_header(key, value)
-                    self.send_header("Content-Type", headers.get("Content-Type", "text/event-stream; charset=utf-8"))
-                    self.end_headers()
-                    try:
-                        for chunk in iterator:
-                            self.wfile.write(chunk)
-                            self.wfile.flush()
-                    finally:
-                        iterator.close()
-                        self.router.finalize_stream_if_needed(request_id)
-                    return
-                status, headers, data = self.router.call(parsed.path, payload, ctx, dict(self.headers.items()), raw)
-                self.send_response(status)
-                for key, value in headers.items():
-                    if key.lower() in {"content-length", "connection", "transfer-encoding"}:
-                        continue
-                    self.send_header(key, value)
-                self.send_header("Content-Length", str(len(data)))
-                self.end_headers()
-                self.wfile.write(data)
-            except AllModelsFailedError as err:
-                self._send_all_models_failed_error(err)
-            except Exception as err:
-                self._send_json({
-                    "error": {
-                        "message": f"服务器内部错误: {err}",
-                        "type": "internal_server_error",
-                        "code": "internal_error",
-                    }
-                }, status=500)
+            handle_proxy_request(self, parsed.path, payload, ctx, raw)
             return
         self._send_json({"error": {"message": "资源不存在", "type": "invalid_request_error", "code": "not_found"}}, status=404)
 
