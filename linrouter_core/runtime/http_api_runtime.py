@@ -37,6 +37,15 @@ def handle_get(handler: Any) -> None:
     if parsed.path == "/":
         handler._send_text(handler._render_index_page(), content_type="text/html; charset=utf-8")
         return
+    if parsed.path == "/health":
+        handler._send_json({
+            "ok": True,
+            "groups": len(handler.store.groups),
+            "models": len(handler.store.models),
+            "aggregate_models": len(handler.store.aggregate_models),
+            "aggregate_members": len(handler.store.aggregate_members),
+        })
+        return
     if parsed.path.startswith("/") and not parsed.path.startswith("/api/") and not parsed.path.startswith("/v1/"):
         # 服务静态资源（css/js/html 等），统一映射到 static/ 目录
         rel = parsed.path.lstrip("/")
@@ -262,15 +271,6 @@ def handle_get(handler: Any) -> None:
         handler.send_header("Content-Length", str(len(body)))
         handler.end_headers()
         handler.wfile.write(body)
-        return
-    if parsed.path == "/health":
-        handler._send_json({
-            "ok": True,
-            "groups": len(handler.store.groups),
-            "models": len(handler.store.models),
-            "aggregate_models": len(handler.store.aggregate_models),
-            "aggregate_members": len(handler.store.aggregate_members),
-        })
         return
     handler._send_json({"error": {"message": "资源不存在", "type": "invalid_request_error", "code": "not_found"}}, status=404)
 
