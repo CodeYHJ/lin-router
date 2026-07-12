@@ -5,11 +5,6 @@ const ConfigTabRuntimeView = {
     controller._autoSaveTimer = null;
   },
 
-  isEditingConfigForm(controller) {
-    const active = document.activeElement;
-    return !!(active && active.closest && active.closest('#panel-config .config-form') && ['INPUT', 'TEXTAREA', 'SELECT'].includes(active.tagName));
-  },
-
   onRuntimeStateUpdate(controller) {
     const panel = document.getElementById('panel-config');
     if (!panel || Tabs.current !== 'config') return;

@@ -945,7 +945,6 @@ const ConfigTab = {
   autoSaveGroup(...args) { return ConfigTabForm.autoSaveGroup(this, ...args); },
   autoSaveModel(...args) { return ConfigTabForm.autoSaveModel(this, ...args); },
   autoSaveAggregate(...args) { return ConfigTabForm.autoSaveAggregate(this, ...args); },
-  isEditingConfigForm(...args) { return ConfigTabRuntimeView.isEditingConfigForm(this, ...args); },
   onRuntimeStateUpdate(...args) { return ConfigTabRuntimeView.onRuntimeStateUpdate(this, ...args); },
   patchVisibleRuntimeStatus(...args) { return ConfigTabRuntimeView.patchVisibleRuntimeStatus(this, ...args); },
   refreshRuntimeNow(...args) { return ConfigTabRuntimeView.refreshRuntimeNow(this, ...args); },
