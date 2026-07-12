@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 from app import ArkProxyRouter, ConfigStore
-from linrouter_core.runtime import CandidateErrorClassifier, WafLockState
+from linrouter_core.runtime import WafLockState
 
 
 def _router(tmp_path: Path) -> ArkProxyRouter:
@@ -41,8 +41,8 @@ def test_m3a_candidate_facades_preserve_order_and_skip_logging(tmp_path: Path) -
 def test_m3a_error_classifier_and_health_facades_preserve_contract(tmp_path: Path) -> None:
     router = _router(tmp_path)
 
-    assert router._classify_candidate_error(403, "Your request was blocked")["category"] == "waf_blocked"
-    assert CandidateErrorClassifier.classify(ArkProxyRouter, 400, '{"error":{"type":"invalid_request_error"}}')["failure_scope"] == "request"
+    assert router._classify_candidate_error(403, "Your request was blocked").category == "waf_blocked"
+    assert router._classify_candidate_error(400, '{"error":{"type":"invalid_request_error"}}').failure_scope == "request"
     router._set_cooldown(0, "network failure", 60, "network")
     assert router.store.models[0].usable is False
     assert router.store.models[0].cooldown_reason == "network"

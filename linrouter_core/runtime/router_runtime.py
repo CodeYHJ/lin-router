@@ -15,34 +15,31 @@ from urllib.parse import urlparse
 from typing import Any, Callable, Dict, Iterator, Optional, Tuple
 
 from linrouter_core.config.constants import DEFAULT_AUTO_MODEL_NAME, GLOBAL_ROUTE_GROUP_ID, PROVIDER_PROXY, PROVIDER_RELAY
-from linrouter_core.contracts.execution_ports import ExecutionDependencies
+from linrouter_core.contracts.execution_ports import (
+    CandidateErrorClassification,
+    ExecutionDependencies,
+    ExecutionPolicyPort,
+)
 from linrouter_core.runtime.candidate_health import CandidateHealthService
+from linrouter_core.runtime.execution_policy import ExecutionPolicyService
 
 
 class CandidateErrorClassifier:
-    """Pure candidate-error classification shared by the router facade."""
+    """Compatibility wrapper for the sole ``ExecutionPolicyService`` owner."""
 
     @staticmethod
-    def classify(dependencies: ExecutionDependencies, status_code: Optional[int], raw: str, error_kind: str = "http") -> Dict[str, Any]:
-        if error_kind in ("network", "stream_timeout"):
-            return {"should_cooldown": True, "is_request_level": False, "category": error_kind, "log_reason": error_kind, "failure_scope": "upstream"}
-        if status_code is None:
-            return {"should_cooldown": True, "is_request_level": False, "category": "network", "log_reason": "network", "failure_scope": "upstream"}
-        if status_code >= 500:
-            return {"should_cooldown": True, "is_request_level": False, "category": "server_error", "log_reason": f"server_error_{status_code}", "failure_scope": "upstream"}
-        if status_code == 429:
-            if dependencies._is_rate_limited(status_code, raw):
-                return {"should_cooldown": True, "is_request_level": False, "category": "rate_limit", "log_reason": "rate_limit", "failure_scope": "upstream"}
-            if dependencies._is_quota_exhausted(status_code, raw):
-                return {"should_cooldown": True, "is_request_level": False, "category": "quota_exhausted", "log_reason": "quota_exhausted", "failure_scope": "upstream"}
-            return {"should_cooldown": True, "is_request_level": False, "category": "rate_limit", "log_reason": "rate_limit_429", "failure_scope": "upstream"}
-        if dependencies._is_waf_blocked_error(status_code, raw):
-            return {"should_cooldown": False, "is_request_level": True, "category": "waf_blocked", "log_reason": "waf_blocked", "failure_scope": "candidate"}
-        if dependencies._is_request_level_error(status_code, raw):
-            if status_code in (401, 403):
-                return {"should_cooldown": False, "is_request_level": True, "category": "auth_error", "log_reason": "auth_error", "failure_scope": "candidate"}
-            return {"should_cooldown": False, "is_request_level": True, "category": "request_level", "log_reason": "request_level", "failure_scope": "request"}
-        return {"should_cooldown": False, "is_request_level": False, "category": "unknown", "log_reason": f"http_{status_code}", "failure_scope": "upstream"}
+    def classify(
+        dependencies: ExecutionDependencies,
+        status_code: Optional[int],
+        raw: str,
+        error_kind: str = "http",
+    ) -> CandidateErrorClassification:
+        return ExecutionPolicyService(
+            is_rate_limited=dependencies._is_rate_limited,
+            is_quota_exhausted=dependencies._is_quota_exhausted,
+            is_waf_blocked_error=dependencies._is_waf_blocked_error,
+            is_request_level_error=dependencies._is_request_level_error,
+        ).classify_candidate_error(status_code, raw, error_kind)
 
 
 class WafLockState:
@@ -124,18 +121,15 @@ class CandidateRuntime:
     facade or HTTP transport; composition supplies its frozen policy surface.
     """
 
-    def __init__(self, dependencies: ExecutionDependencies, candidate_health: CandidateHealthService | None = None) -> None:
+    def __init__(
+        self,
+        dependencies: ExecutionDependencies,
+        candidate_health: CandidateHealthService,
+        policy: ExecutionPolicyPort,
+    ) -> None:
         self.dependencies = dependencies
-        self.candidate_health = candidate_health or CandidateHealthService(
-            dependencies.store,
-            now=dependencies._now,
-            is_auto_model=dependencies._is_auto_model,
-            mode_for=dependencies._mode_for,
-            group_for=dependencies._group_for,
-            auth_for=dependencies._auth_for,
-            candidate_type=dependencies._upstream_candidate_type,
-            log_aggregate_member_skip=dependencies._log_aggregate_member_skip,
-        )
+        self.candidate_health = candidate_health
+        self.policy = policy
 
     def iter_candidates(self, requested_model: str | None, group_id: str | None = None) -> Iterator[Tuple[int, Any]]:
         yield from self.candidate_health.iter_candidates(requested_model, group_id)
@@ -180,7 +174,7 @@ class CandidateRuntime:
             return 403, {"Content-Type": "application/json; charset=utf-8"}, json.dumps({"error": {"message": "全局 Key 已停用，请改用连接组 Key 或聚合模型 Key", "type": "global_key_deprecated", "code": "use_group_or_aggregate_key"}}, ensure_ascii=False).encode("utf-8")
         route_aggregate = route.aggregate if is_route_context else None
         is_global = bool(route.is_global) if is_route_context else False
-        auto_mode = router._is_auto_model(str(requested_model) if requested_model else None, route_group)
+        auto_mode = self.policy.is_auto_model(str(requested_model) if requested_model else None, route_group)
         # auto_fallback：组级 auto 或聚合模型下，失败时尝试下一个候选（全局 Key 已退役）
         auto_fallback = auto_mode or bool(route_aggregate)
         request_id = uuid.uuid4().hex[:12]
@@ -323,9 +317,9 @@ class CandidateRuntime:
                 duration_ms = int((time.perf_counter() - started_at) * 1000)
                 raw = err.read().decode("utf-8", "ignore") if hasattr(err, "read") else str(err)
                 last_error = err
-                classification = router._classify_candidate_error(err.code, raw, "http")
-                cooldown_applied = classification["should_cooldown"]
-                is_request_level = classification["is_request_level"]
+                classification = self.policy.classify_candidate_error(err.code, raw, "http")
+                cooldown_applied = classification.should_cooldown
+                is_request_level = classification.is_request_level
                 if cooldown_applied:
                     saw_cooldown = True
                 if is_request_level:
@@ -335,8 +329,8 @@ class CandidateRuntime:
                 if is_aggregate_candidate and aggregate_model and candidate.aggregate_member_id:
                     if cooldown_applied:
                         cooldown_seconds = router._aggregate_cooldown_seconds(aggregate_model)
-                        router._set_aggregate_member_cooldown(candidate.aggregate_member_id, raw or str(err), cooldown_seconds, classification["log_reason"])
-                    failure_scope = classification["failure_scope"]
+                        router._set_aggregate_member_cooldown(candidate.aggregate_member_id, raw or str(err), cooldown_seconds, classification.log_reason)
+                    failure_scope = classification.failure_scope
                     fallback_chain.append({
                         "member_id": candidate.aggregate_member_id,
                         "group": group.name,
@@ -346,16 +340,16 @@ class CandidateRuntime:
                         "reason": router._short_error(raw),
                         "cooldown_applied": cooldown_applied,
                         "failure_scope": failure_scope,
-                        "category": classification["category"],
+                        "category": classification.category,
                         "waf_compatible": group.waf_compatible,
                     })
                     fallback_index += 1
-                    detail = f"cooldown_applied={str(cooldown_applied).lower()}; failure_scope={failure_scope}; {classification['log_reason']}; try next; error={router._short_error(raw)}{router._waf_blocked_suffix(classification, group)}"
+                    detail = f"cooldown_applied={str(cooldown_applied).lower()}; failure_scope={failure_scope}; {classification.log_reason}; try next; error={router._short_error(raw)}{self.policy.waf_blocked_suffix(classification, group)}"
                     router.add_log(path, candidate.label, str(err.code), router._debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, detail, lock_wait_ms=lock_wait_ms, lock_release_reason="http_error", aggregate_suffix=aggregate_suffix), duration_ms, group=group, request_id=request_id, attempt=attempt, event="cooldown" if cooldown_applied else "fallback", cooldown_applied=cooldown_applied, failure_scope=failure_scope)
                     continue
 
                 # 429 立即重试一次（非聚合路径保持原有行为）
-                if classification["category"] == "rate_limit" and not is_aggregate_candidate:
+                if classification.category == "rate_limit" and not is_aggregate_candidate:
                     try:
                         retry_started_at = time.perf_counter()
                         with router._upstream_client.request("POST", target_url, outbound_headers, body, stream=False, timeout=120) as resp:
@@ -389,11 +383,11 @@ class CandidateRuntime:
                 if auto_fallback:
                     if cooldown_applied:
                         if candidate.group.provider_type == PROVIDER_RELAY and candidate.idx is not None:
-                            router._set_cooldown(candidate.idx, raw or str(err), router._auto_cooldown_seconds(group), classification["log_reason"])
+                            router._set_cooldown(candidate.idx, raw or str(err), self.policy.auto_cooldown_seconds(group), classification.log_reason)
                         elif candidate.idx is not None:
                             router._set_unusable(candidate.idx, raw or str(err))
                         saw_cooldown = True
-                    failure_scope = classification["failure_scope"]
+                    failure_scope = classification.failure_scope
                     if not is_aggregate_candidate:
                         fallback_chain.append({
                             "member_id": "",
@@ -404,20 +398,20 @@ class CandidateRuntime:
                             "reason": router._short_error(raw),
                             "cooldown_applied": cooldown_applied,
                             "failure_scope": failure_scope,
-                            "category": classification["category"],
+                            "category": classification.category,
                             "waf_compatible": group.waf_compatible,
                         })
                         fallback_index += 1
-                    detail = f"cooldown_applied={str(cooldown_applied).lower()}; failure_scope={failure_scope}; {classification['log_reason']}; try next; error={router._short_error(raw)}{router._waf_blocked_suffix(classification, group)}"
+                    detail = f"cooldown_applied={str(cooldown_applied).lower()}; failure_scope={failure_scope}; {classification.log_reason}; try next; error={router._short_error(raw)}{self.policy.waf_blocked_suffix(classification, group)}"
                     router.add_log(path, candidate.label, str(err.code), router._debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, detail, lock_wait_ms=lock_wait_ms, lock_release_reason="http_error"), duration_ms, group=group, request_id=request_id, attempt=attempt, event="cooldown" if cooldown_applied else "fallback", cooldown_applied=cooldown_applied, failure_scope=failure_scope)
                     continue
 
                 # 非自动 fallback：保留原有显式模型处理逻辑
-                if router._is_quota_exhausted(err.code, raw):
+                if classification.category == "quota_exhausted":
                     router._mark_unusable(candidate, raw)
                     router.add_log(path, candidate.label, str(err.code), router._debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, "quota exhausted, try next", lock_wait_ms=lock_wait_ms, lock_release_reason="http_error"), duration_ms, group=group, request_id=request_id, attempt=attempt, event="fallback", cooldown_applied=False, failure_scope="upstream")
                     continue
-                if router._is_server_error(err.code):
+                if classification.category == "server_error":
                     router.add_log(path, candidate.label, str(err.code), router._debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, "server error, try next", lock_wait_ms=lock_wait_ms, lock_release_reason="http_error"), duration_ms, group=group, request_id=request_id, attempt=attempt, event="fallback", cooldown_applied=False, failure_scope="upstream")
                     continue
                 headers = dict(getattr(err, "headers", {}) or {})
@@ -428,14 +422,14 @@ class CandidateRuntime:
             except (URLError, TimeoutError, OSError) as err:
                 duration_ms = int((time.perf_counter() - started_at) * 1000)
                 last_error = err
-                classification = router._classify_candidate_error(None, str(err), "network")
+                classification = self.policy.classify_candidate_error(None, str(err), "network")
                 saw_cooldown = True
 
                 # 聚合成员网络失败：cooldown 聚合成员本身并记录 fallback 链路
                 if is_aggregate_candidate and aggregate_model and candidate.aggregate_member_id:
                     cooldown_seconds = router._aggregate_cooldown_seconds(aggregate_model)
-                    router._set_aggregate_member_cooldown(candidate.aggregate_member_id, str(err), cooldown_seconds, classification["log_reason"])
-                    failure_scope = classification["failure_scope"]
+                    router._set_aggregate_member_cooldown(candidate.aggregate_member_id, str(err), cooldown_seconds, classification.log_reason)
+                    failure_scope = classification.failure_scope
                     fallback_chain.append({
                         "member_id": candidate.aggregate_member_id,
                         "group": group.name,
@@ -445,19 +439,19 @@ class CandidateRuntime:
                         "reason": router._short_error(str(err)),
                         "cooldown_applied": True,
                         "failure_scope": failure_scope,
-                        "category": classification["category"],
+                        "category": classification.category,
                         "waf_compatible": group.waf_compatible,
                     })
                     fallback_index += 1
-                    detail = f"cooldown_applied=true; failure_scope={failure_scope}; {classification['log_reason']}; try next; error={router._short_error(str(err))}"
+                    detail = f"cooldown_applied=true; failure_scope={failure_scope}; {classification.log_reason}; try next; error={router._short_error(str(err))}"
                     router.add_log(path, candidate.label, "network", router._debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, detail, lock_wait_ms=lock_wait_ms, lock_release_reason="network_error", aggregate_suffix=aggregate_suffix), duration_ms, group=group, request_id=request_id, attempt=attempt, event="network", cooldown_applied=True, failure_scope=failure_scope)
                     continue
                 if auto_fallback:
                     if candidate.group.provider_type == PROVIDER_RELAY and candidate.idx is not None:
-                        router._set_cooldown(candidate.idx, str(err), router._auto_cooldown_seconds(group), classification["log_reason"])
+                        router._set_cooldown(candidate.idx, str(err), self.policy.auto_cooldown_seconds(group), classification.log_reason)
                     elif candidate.idx is not None:
                         router._set_unusable(candidate.idx, str(err))
-                    failure_scope = classification["failure_scope"]
+                    failure_scope = classification.failure_scope
                     if not is_aggregate_candidate:
                         fallback_chain.append({
                             "member_id": "",
@@ -468,15 +462,15 @@ class CandidateRuntime:
                             "reason": router._short_error(str(err)),
                             "cooldown_applied": True,
                             "failure_scope": failure_scope,
-                            "category": classification["category"],
+                            "category": classification.category,
                             "waf_compatible": group.waf_compatible,
                         })
                         fallback_index += 1
-                    detail = f"cooldown_applied=true; failure_scope={failure_scope}; {classification['log_reason']}; try next; error={router._short_error(str(err))}"
+                    detail = f"cooldown_applied=true; failure_scope={failure_scope}; {classification.log_reason}; try next; error={router._short_error(str(err))}"
                     router.add_log(path, candidate.label, "network", router._debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, detail, lock_wait_ms=lock_wait_ms, lock_release_reason="network_error"), duration_ms, group=group, request_id=request_id, attempt=attempt, event="network", cooldown_applied=True, failure_scope=failure_scope)
                     continue
-                failure_scope = classification["failure_scope"]
-                detail = f"cooldown_applied=false; failure_scope={failure_scope}; {classification['log_reason']}; error={router._short_error(str(err))}"
+                failure_scope = classification.failure_scope
+                detail = f"cooldown_applied=false; failure_scope={failure_scope}; {classification.log_reason}; error={router._short_error(str(err))}"
                 router.add_log(path, candidate.label, "network", router._debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, detail, lock_wait_ms=lock_wait_ms, lock_release_reason="network_error"), duration_ms, group=group, request_id=request_id, attempt=attempt, event="network", cooldown_applied=False, failure_scope=failure_scope)
                 continue
             finally:
@@ -486,7 +480,7 @@ class CandidateRuntime:
             router._live_request_finish(request_id, "error")
             if not saw_cooldown and saw_request_level:
                 raise router._all_models_failed_error_type(
-                    f"聚合模型 {aggregate_model.name} 的所有成员均因请求级错误被拒绝{router._waf_blocked_hint(fallback_chain)}",
+                    f"聚合模型 {aggregate_model.name} 的所有成员均因请求级错误被拒绝{self.policy.waf_blocked_hint(fallback_chain)}",
                     attempted=attempt,
                     error_code="upstream_request_rejected",
                     fallback_chain=fallback_chain,
@@ -504,7 +498,7 @@ class CandidateRuntime:
             raise router._all_models_failed_error_type("没有可用模型", attempted=attempt, error_code="no_usable_models")
         if not saw_cooldown and saw_request_level:
             raise router._all_models_failed_error_type(
-                f"所有候选均因请求级错误被拒绝{router._waf_blocked_hint(fallback_chain)}",
+                f"所有候选均因请求级错误被拒绝{self.policy.waf_blocked_hint(fallback_chain)}",
                 attempted=attempt,
                 error_code="upstream_request_rejected",
             )
@@ -530,7 +524,7 @@ class CandidateRuntime:
             return 403, {"Content-Type": "application/json; charset=utf-8"}, deprecated_iter(), ""
         route_aggregate = route.aggregate if isinstance(route, router._route_context_type) else None
         is_global = isinstance(route, router._route_context_type) and route.is_global
-        auto_mode = router._is_auto_model(str(requested_model) if requested_model else None, route_group)
+        auto_mode = self.policy.is_auto_model(str(requested_model) if requested_model else None, route_group)
         auto_fallback = auto_mode or bool(route_aggregate)
         request_id = uuid.uuid4().hex[:12]
         router._live_request_start(request_id, path, requested_label, stream=True)
@@ -804,9 +798,9 @@ class CandidateRuntime:
                 duration_ms = int((time.perf_counter() - started_at) * 1000)
                 raw = err.read().decode("utf-8", "ignore") if hasattr(err, "read") else str(err)
                 last_error = err
-                classification = router._classify_candidate_error(err.code, raw, "http")
-                cooldown_applied = classification["should_cooldown"]
-                is_request_level = classification["is_request_level"]
+                classification = self.policy.classify_candidate_error(err.code, raw, "http")
+                cooldown_applied = classification.should_cooldown
+                is_request_level = classification.is_request_level
                 if cooldown_applied:
                     saw_cooldown = True
                 if is_request_level:
@@ -816,8 +810,8 @@ class CandidateRuntime:
                 if is_aggregate_candidate and aggregate_model and candidate.aggregate_member_id:
                     if cooldown_applied:
                         cooldown_seconds = router._aggregate_cooldown_seconds(aggregate_model)
-                        router._set_aggregate_member_cooldown(candidate.aggregate_member_id, raw or str(err), cooldown_seconds, classification["log_reason"])
-                    failure_scope = classification["failure_scope"]
+                        router._set_aggregate_member_cooldown(candidate.aggregate_member_id, raw or str(err), cooldown_seconds, classification.log_reason)
+                    failure_scope = classification.failure_scope
                     fallback_chain.append({
                         "member_id": candidate.aggregate_member_id,
                         "group": group.name,
@@ -827,11 +821,11 @@ class CandidateRuntime:
                         "reason": router._short_error(raw),
                         "cooldown_applied": cooldown_applied,
                         "failure_scope": failure_scope,
-                        "category": classification["category"],
+                        "category": classification.category,
                         "waf_compatible": group.waf_compatible,
                     })
                     fallback_index += 1
-                    detail = f"cooldown_applied={str(cooldown_applied).lower()}; failure_scope={failure_scope}; {classification['log_reason']}; try next; error={router._short_error(raw)}{router._waf_blocked_suffix(classification, group)}"
+                    detail = f"cooldown_applied={str(cooldown_applied).lower()}; failure_scope={failure_scope}; {classification.log_reason}; try next; error={router._short_error(raw)}{self.policy.waf_blocked_suffix(classification, group)}"
                     router.add_log(path, candidate.label, str(err.code), router._debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, detail, lock_wait_ms=lock_wait_ms, lock_release_reason="http_error", aggregate_suffix=aggregate_suffix), duration_ms, group=group, request_id=request_id, attempt=attempt, event="cooldown" if cooldown_applied else "fallback", cooldown_applied=cooldown_applied, failure_scope=failure_scope)
                     continue
 
@@ -839,11 +833,11 @@ class CandidateRuntime:
                 if auto_fallback:
                     if cooldown_applied:
                         if candidate.group.provider_type == PROVIDER_RELAY and candidate.idx is not None:
-                            router._set_cooldown(candidate.idx, raw or str(err), router._auto_cooldown_seconds(group), classification["log_reason"])
+                            router._set_cooldown(candidate.idx, raw or str(err), self.policy.auto_cooldown_seconds(group), classification.log_reason)
                         elif candidate.idx is not None:
                             router._set_unusable(candidate.idx, raw or str(err))
                         saw_cooldown = True
-                    failure_scope = classification["failure_scope"]
+                    failure_scope = classification.failure_scope
                     if not is_aggregate_candidate:
                         fallback_chain.append({
                             "member_id": "",
@@ -854,20 +848,20 @@ class CandidateRuntime:
                             "reason": router._short_error(raw),
                             "cooldown_applied": cooldown_applied,
                             "failure_scope": failure_scope,
-                            "category": classification["category"],
+                            "category": classification.category,
                             "waf_compatible": group.waf_compatible,
                         })
                         fallback_index += 1
-                    detail = f"cooldown_applied={str(cooldown_applied).lower()}; failure_scope={failure_scope}; {classification['log_reason']}; try next; error={router._short_error(raw)}{router._waf_blocked_suffix(classification, group)}"
+                    detail = f"cooldown_applied={str(cooldown_applied).lower()}; failure_scope={failure_scope}; {classification.log_reason}; try next; error={router._short_error(raw)}{self.policy.waf_blocked_suffix(classification, group)}"
                     router.add_log(path, candidate.label, str(err.code), router._debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, detail, lock_wait_ms=lock_wait_ms, lock_release_reason="http_error"), duration_ms, group=group, request_id=request_id, attempt=attempt, event="cooldown" if cooldown_applied else "fallback", cooldown_applied=cooldown_applied, failure_scope=failure_scope)
                     continue
 
                 # 非自动 fallback：保留原有显式模型处理逻辑
-                if router._is_quota_exhausted(err.code, raw):
+                if classification.category == "quota_exhausted":
                     router._mark_unusable(candidate, raw)
                     router.add_log(path, candidate.label, str(err.code), router._debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, "quota exhausted, try next", lock_wait_ms=lock_wait_ms, lock_release_reason="http_error"), duration_ms, group=group, request_id=request_id, attempt=attempt, event="fallback", cooldown_applied=False, failure_scope="upstream")
                     continue
-                if router._is_server_error(err.code):
+                if classification.category == "server_error":
                     router.add_log(path, candidate.label, str(err.code), router._debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, "server error, try next", lock_wait_ms=lock_wait_ms, lock_release_reason="http_error"), duration_ms, group=group, request_id=request_id, attempt=attempt, event="fallback", cooldown_applied=False, failure_scope="upstream")
                     continue
                 headers = dict(getattr(err, "headers", {}) or {})
@@ -880,14 +874,14 @@ class CandidateRuntime:
                 router._release_lock(upstream_lock)
                 duration_ms = int((time.perf_counter() - started_at) * 1000)
                 last_error = err
-                classification = router._classify_candidate_error(None, str(err), "network")
+                classification = self.policy.classify_candidate_error(None, str(err), "network")
                 saw_cooldown = True
 
                 # 聚合成员网络失败：cooldown 聚合成员本身并记录 fallback 链路
                 if is_aggregate_candidate and aggregate_model and candidate.aggregate_member_id:
                     cooldown_seconds = router._aggregate_cooldown_seconds(aggregate_model)
-                    router._set_aggregate_member_cooldown(candidate.aggregate_member_id, str(err), cooldown_seconds, classification["log_reason"])
-                    failure_scope = classification["failure_scope"]
+                    router._set_aggregate_member_cooldown(candidate.aggregate_member_id, str(err), cooldown_seconds, classification.log_reason)
+                    failure_scope = classification.failure_scope
                     fallback_chain.append({
                         "member_id": candidate.aggregate_member_id,
                         "group": group.name,
@@ -897,19 +891,19 @@ class CandidateRuntime:
                         "reason": router._short_error(str(err)),
                         "cooldown_applied": True,
                         "failure_scope": failure_scope,
-                        "category": classification["category"],
+                        "category": classification.category,
                         "waf_compatible": group.waf_compatible,
                     })
                     fallback_index += 1
-                    detail = f"cooldown_applied=true; failure_scope={failure_scope}; {classification['log_reason']}; try next; error={router._short_error(str(err))}"
+                    detail = f"cooldown_applied=true; failure_scope={failure_scope}; {classification.log_reason}; try next; error={router._short_error(str(err))}"
                     router.add_log(path, candidate.label, "network", router._debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, detail, lock_wait_ms=lock_wait_ms, lock_release_reason="network_error", aggregate_suffix=aggregate_suffix), duration_ms, group=group, request_id=request_id, attempt=attempt, event="network", cooldown_applied=True, failure_scope=failure_scope)
                     continue
                 if auto_fallback:
                     if candidate.group.provider_type == PROVIDER_RELAY and candidate.idx is not None:
-                        router._set_cooldown(candidate.idx, str(err), router._auto_cooldown_seconds(group), classification["log_reason"])
+                        router._set_cooldown(candidate.idx, str(err), self.policy.auto_cooldown_seconds(group), classification.log_reason)
                     elif candidate.idx is not None:
                         router._set_unusable(candidate.idx, str(err))
-                    failure_scope = classification["failure_scope"]
+                    failure_scope = classification.failure_scope
                     if not is_aggregate_candidate:
                         fallback_chain.append({
                             "member_id": "",
@@ -920,15 +914,15 @@ class CandidateRuntime:
                             "reason": router._short_error(str(err)),
                             "cooldown_applied": True,
                             "failure_scope": failure_scope,
-                            "category": classification["category"],
+                            "category": classification.category,
                             "waf_compatible": group.waf_compatible,
                         })
                         fallback_index += 1
-                    detail = f"cooldown_applied=true; failure_scope={failure_scope}; {classification['log_reason']}; try next; error={router._short_error(str(err))}"
+                    detail = f"cooldown_applied=true; failure_scope={failure_scope}; {classification.log_reason}; try next; error={router._short_error(str(err))}"
                     router.add_log(path, candidate.label, "network", router._debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, detail, lock_wait_ms=lock_wait_ms, lock_release_reason="network_error"), duration_ms, group=group, request_id=request_id, attempt=attempt, event="network", cooldown_applied=True, failure_scope=failure_scope)
                     continue
-                failure_scope = classification["failure_scope"]
-                detail = f"cooldown_applied=false; failure_scope={failure_scope}; {classification['log_reason']}; error={router._short_error(str(err))}"
+                failure_scope = classification.failure_scope
+                detail = f"cooldown_applied=false; failure_scope={failure_scope}; {classification.log_reason}; error={router._short_error(str(err))}"
                 router.add_log(path, candidate.label, "network", router._debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, detail, lock_wait_ms=lock_wait_ms, lock_release_reason="network_error"), duration_ms, group=group, request_id=request_id, attempt=attempt, event="network", cooldown_applied=False, failure_scope=failure_scope)
                 continue
 
@@ -936,7 +930,7 @@ class CandidateRuntime:
             router._live_request_finish(request_id, "error")
             if not saw_cooldown and saw_request_level:
                 raise router._all_models_failed_error_type(
-                    f"聚合模型 {aggregate_model.name} 的所有成员均因请求级错误被拒绝{router._waf_blocked_hint(fallback_chain)}",
+                    f"聚合模型 {aggregate_model.name} 的所有成员均因请求级错误被拒绝{self.policy.waf_blocked_hint(fallback_chain)}",
                     attempted=attempt,
                     stream_timeout=saw_stream_timeout,
                     error_code="upstream_request_rejected",
@@ -961,7 +955,7 @@ class CandidateRuntime:
             )
         if not saw_cooldown and saw_request_level:
             raise router._all_models_failed_error_type(
-                f"所有候选均因请求级错误被拒绝{router._waf_blocked_hint(fallback_chain)}",
+                f"所有候选均因请求级错误被拒绝{self.policy.waf_blocked_hint(fallback_chain)}",
                 attempted=attempt,
                 stream_timeout=saw_stream_timeout,
                 error_code="upstream_request_rejected",

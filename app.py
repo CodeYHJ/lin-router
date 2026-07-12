@@ -56,11 +56,11 @@ from linrouter_core.config.models import AggregateMember, AggregateModel, Connec
 from linrouter_core.config.store import ConfigStore
 from linrouter_core.observability import ObservabilityService, RequestLog
 from linrouter_core.contracts import AllModelsFailedError, RouteContext, StreamIdleTimeoutError, UpstreamCandidate
-from linrouter_core.contracts.execution_ports import ExecutionDependencies
+from linrouter_core.contracts.execution_ports import CandidateErrorClassification, ExecutionDependencies
 from linrouter_core.runtime import (
     CandidateHealthService,
-    CandidateErrorClassifier,
     CandidateRuntime,
+    ExecutionPolicyService,
     NonStreamExecutionService,
     StreamExecutionService,
     WafLockState,
@@ -228,6 +228,12 @@ class ArkProxyRouter:
         self._all_models_failed_error_type = AllModelsFailedError
         self._stream_idle_timeout_error_type = StreamIdleTimeoutError
         self._route_context_type = RouteContext
+        self.execution_policy = ExecutionPolicyService(
+            is_rate_limited=self._is_rate_limited,
+            is_quota_exhausted=self._is_quota_exhausted,
+            is_waf_blocked_error=self._is_waf_blocked_error,
+            is_request_level_error=self._is_request_level_error,
+        )
         self.candidate_health = CandidateHealthService(
             store,
             now=self._now,
@@ -238,7 +244,7 @@ class ArkProxyRouter:
             candidate_type=UpstreamCandidate,
             log_aggregate_member_skip=self._log_aggregate_member_skip,
         )
-        self.runtime = CandidateRuntime(self, self.candidate_health)
+        self.runtime = CandidateRuntime(self, self.candidate_health, self.execution_policy)
         # v0.6 composition boundary: the legacy facade owns no execution loop.
         dependencies: ExecutionDependencies = self
         self.non_stream_execution = NonStreamExecutionService(dependencies, self.runtime)
@@ -557,41 +563,21 @@ class ArkProxyRouter:
         )
         return any(marker in lower for marker in markers)
 
-    @classmethod
-    def _classify_candidate_error(cls, status_code: Optional[int], raw: str, error_kind: str = "http") -> Dict[str, Any]:
-        """
-        error_kind: 'http' | 'network' | 'stream_timeout'
-        返回 {
-            should_cooldown: bool,
-            is_request_level: bool,
-            category: str,
-            log_reason: str,
-            failure_scope: str,  # request | candidate | upstream
-        }
-        """
-        return CandidateErrorClassifier.classify(cls, status_code, raw, error_kind)
+    def _classify_candidate_error(
+        self,
+        status_code: Optional[int],
+        raw: str,
+        error_kind: str = "http",
+    ) -> CandidateErrorClassification:
+        return self.execution_policy.classify_candidate_error(status_code, raw, error_kind)
 
-    @staticmethod
-    def _waf_blocked_suffix(classification: Dict[str, Any], group: ConnectionGroup) -> str:
-        """为 WAF 拦截类 403 错误生成中文提示后缀，供日志 detail 使用。"""
-        if classification.get("category") != "waf_blocked":
-            return ""
-        if group.provider_type == PROVIDER_RELAY and group.waf_compatible:
-            return "; waf_blocked=true; message=上游中转站拦截了请求，可能是中转站账号、渠道权限、频率限制或服务商风控导致; suggestion=该连接组已开启 WAF，仍被拦截，请检查中转站后台"
-        return "; waf_blocked=true; message=上游中转站拦截了请求，通常需要开启 WAF 兼容模式或调整中转站风控配置; suggestion=请在该连接组设置中开启「仅中转站 WAF 兼容」后重试"
+    def _waf_blocked_suffix(self, classification: CandidateErrorClassification, group: ConnectionGroup) -> str:
+        """Compatibility facade for the WAF-detail policy decision."""
+        return self.execution_policy.waf_blocked_suffix(classification, group)
 
-    @staticmethod
-    def _waf_blocked_hint(fallback_chain: List[Dict[str, Any]]) -> str:
-        """根据 fallback_chain 判断是否存在 WAF 拦截错误，并返回中文提示。"""
-        if not fallback_chain:
-            return ""
-        waf_items = [item for item in fallback_chain if str(item.get("category")) == "waf_blocked"]
-        if not waf_items:
-            return ""
-        # 如果任一失败成员所属连接组已开启 WAF，则提示检查中转站后台
-        if any(item.get("waf_compatible") for item in waf_items):
-            return " 上游中转站返回 403：Your request was blocked。该连接组已开启 WAF，可能是中转站账号、渠道权限、频率限制或服务商风控导致，请检查中转站后台。"
-        return " 上游中转站返回 403：Your request was blocked。该连接组未开启 WAF 兼容，建议开启「仅中转站 WAF 兼容」后重试。"
+    def _waf_blocked_hint(self, fallback_chain: List[Dict[str, Any]]) -> str:
+        """Compatibility facade for the WAF fallback-chain policy decision."""
+        return self.execution_policy.waf_blocked_hint(fallback_chain)
 
     def _resolve_url(self, base_url: str, path: str) -> str:
         return self.upstream_adapter.resolve_endpoint(base_url, path)
@@ -660,15 +646,8 @@ class ArkProxyRouter:
             return group.auto_model_name.strip()
         return DEFAULT_AUTO_MODEL_NAME
 
-    @staticmethod
-    def _is_auto_model(requested_model: str | None, group: ConnectionGroup | None = None) -> bool:
-        if not requested_model:
-            return True
-        if requested_model in {DEFAULT_AUTO_MODEL_NAME, "all-router-auto"}:
-            return True
-        if group and requested_model == ArkProxyRouter.group_auto_model_name(group):
-            return True
-        return False
+    def _is_auto_model(self, requested_model: str | None, group: ConnectionGroup | None = None) -> bool:
+        return self.execution_policy.is_auto_model(requested_model, group)
 
     def _iter_candidates(self, requested_model: str | None, group_id: str | None = None) -> Iterator[Tuple[int, ModelConfig]]:
         yield from self.runtime.iter_candidates(requested_model, group_id)
@@ -1253,7 +1232,7 @@ class ArkProxyRouter:
         except HTTPError as err:
             raw = err.read().decode("utf-8", "ignore") if hasattr(err, "read") else str(err)
             classification = self._classify_candidate_error(err.code, raw, "http")
-            return False, classification["log_reason"], self._short_error(raw)
+            return False, classification.log_reason, self._short_error(raw)
         except (URLError, TimeoutError, OSError) as err:
             return False, "network", self._short_error(str(err))
         finally:
@@ -1490,13 +1469,7 @@ class ArkProxyRouter:
         return route
 
     def _auto_cooldown_seconds(self, group: Optional[ConnectionGroup]) -> int:
-        if not group:
-            return DEFAULT_AUTO_MODEL_COOLDOWN_MINUTES * 60
-        try:
-            minutes = int(group.auto_model_cooldown_minutes)
-        except Exception:
-            minutes = DEFAULT_AUTO_MODEL_COOLDOWN_MINUTES
-        return max(0, minutes) * 60
+        return self.execution_policy.auto_cooldown_seconds(group)
 
     @staticmethod
     def _stream_idle_timeout_seconds(group: Optional[ConnectionGroup]) -> int:
