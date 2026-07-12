@@ -16,6 +16,7 @@ from typing import Any, Callable, Dict, Iterator, Optional, Tuple
 
 from linrouter_core.config.constants import DEFAULT_AUTO_MODEL_NAME, GLOBAL_ROUTE_GROUP_ID, PROVIDER_PROXY, PROVIDER_RELAY
 from linrouter_core.contracts.execution_ports import ExecutionDependencies
+from linrouter_core.runtime.candidate_health import CandidateHealthService
 
 
 class CandidateErrorClassifier:
@@ -123,114 +124,39 @@ class CandidateRuntime:
     facade or HTTP transport; composition supplies its frozen policy surface.
     """
 
-    def __init__(self, dependencies: ExecutionDependencies) -> None:
+    def __init__(self, dependencies: ExecutionDependencies, candidate_health: CandidateHealthService | None = None) -> None:
         self.dependencies = dependencies
+        self.candidate_health = candidate_health or CandidateHealthService(
+            dependencies.store,
+            now=dependencies._now,
+            is_auto_model=dependencies._is_auto_model,
+            mode_for=dependencies._mode_for,
+            group_for=dependencies._group_for,
+            auth_for=dependencies._auth_for,
+            candidate_type=dependencies._upstream_candidate_type,
+            log_aggregate_member_skip=dependencies._log_aggregate_member_skip,
+        )
 
     def iter_candidates(self, requested_model: str | None, group_id: str | None = None) -> Iterator[Tuple[int, Any]]:
-        router = self.dependencies
-        group = router.store.find_group(group_id) if group_id else None
-        if router._is_auto_model(requested_model, group):
-            requested_model = None
-        for idx, model in enumerate(router.store.models):
-            if model.cooldown_until and model.cooldown_until <= int(time.time()):
-                model.cooldown_until = 0
-                model.cooldown_reason = ""
-                if not model.disabled_by_user:
-                    model.usable = True
-                model.last_error = ""
-                model.last_checked_at = router._now()
-                router.store.save()
-            if model.disabled_by_user or not model.usable:
-                continue
-            if group_id and model.group_id != group_id:
-                continue
-            if requested_model and requested_model not in {model.id, model.name, model.ep_id}:
-                continue
-            yield idx, model
+        yield from self.candidate_health.iter_candidates(requested_model, group_id)
 
     def candidate_from_model(self, idx: int, model: Any, group: Any) -> Any:
-        mode = self.dependencies._mode_for(group)
-        channel = model.price_group if mode == PROVIDER_RELAY and model.price_group else ("proxy" if mode == PROVIDER_PROXY else "")
-        return self.dependencies._upstream_candidate_type(idx=idx, group=group, model=model, label=model.name, target_model=model.ep_id, auth_key=self.dependencies._auth_for(group, model), channel=channel)
+        return self.candidate_health.candidate_from_model(idx, model, group)
 
     def iter_upstream_candidates(self, requested_model: str | None, group_id: str | None = None) -> Iterator[Any]:
-        router = self.dependencies
-        if group_id == GLOBAL_ROUTE_GROUP_ID:
-            return
-        if group_id:
-            group = router.store.find_group(group_id)
-            if not group:
-                return
-            matched = False
-            for idx, model in self.iter_candidates(requested_model, group.id):
-                matched = True
-                yield self.candidate_from_model(idx, model, group)
-            if router._mode_for(group) == PROVIDER_PROXY and not matched and requested_model and not router._is_auto_model(requested_model, group):
-                yield router._upstream_candidate_type(idx=None, group=group, model=None, label=requested_model, target_model=requested_model, auth_key=router._auth_for(group, None), channel="pass-through")
-            return
-        for idx, model in self.iter_candidates(requested_model):
-            group = router._group_for(model)
-            if group:
-                yield self.candidate_from_model(idx, model, group)
+        yield from self.candidate_health.iter_upstream_candidates(requested_model, group_id)
 
     def aggregate_member_skip_reason(self, member: Any) -> Tuple[str, str, Any, Any]:
-        router = self.dependencies
-        group = router.store.find_group(member.group_id)
-        model = router.store.find_model(member.model_id)
-        now_ts = int(time.time())
-        if not member.enabled:
-            return "member_disabled", "该聚合成员已手动停用，不参与本次调度。", group, model
-        if member.cooldown_until and member.cooldown_until > now_ts:
-            return "member_cooling", "该聚合成员正在冷却中，本次直接跳过。", group, model
-        if not group:
-            return "underlying_group_missing", "底层连接组不存在，请检查聚合成员配置。", group, model
-        if not model:
-            return "underlying_model_missing", "底层真实模型不存在，请检查聚合成员配置。", group, model
-        if not model.usable or getattr(model, "disabled_by_user", False):
-            return "underlying_model_disabled", "底层真实模型已停用，请先启用真实模型。", group, model
-        if model.cooldown_until and model.cooldown_until > now_ts:
-            return "underlying_model_cooling", "底层真实模型冷却中，本次直接跳过。", group, model
-        return "", "", group, model
+        return self.candidate_health.aggregate_member_skip_reason(member)
 
     def iter_aggregate_candidates(self, aggregate: Any, **kwargs: Any) -> Iterator[Any]:
-        router = self.dependencies
-        router.store.refresh_expired_cooldowns()
-        members = router.store.get_aggregate_members(aggregate.id)
-        strategy = aggregate.strategy or "priority"
-        if strategy == "price_first":
-            members = sorted(members, key=lambda m: (m.manual_price is None, m.manual_price if m.manual_price is not None else 0, m.priority))
-        else:
-            members = sorted(members, key=lambda m: m.priority)
-        for member in members:
-            reason, message, group, model = self.aggregate_member_skip_reason(member)
-            if reason:
-                if kwargs.get("log_skips", False):
-                    router._log_aggregate_member_skip(kwargs.get("path", ""), aggregate, member, reason, message, group, model, kwargs.get("requested_label", ""), kwargs.get("request_id", ""), kwargs.get("resolved_as", ""))
-                continue
-            if not group or not model:
-                continue
-            candidate = self.candidate_from_model(router.store.models.index(model), model, group)
-            candidate.aggregate_id = aggregate.id
-            candidate.aggregate_name = aggregate.name
-            candidate.aggregate_member_id = member.id
-            candidate.manual_price = member.manual_price
-            yield candidate
+        yield from self.candidate_health.iter_aggregate_candidates(aggregate, **kwargs)
 
     def set_cooldown(self, idx: int, error: str, cooldown_seconds: int, reason: str) -> None:
-        model = self.dependencies.store.models[idx]
-        model.usable = False
-        model.last_error = error[:500]
-        model.last_checked_at = self.dependencies._now()
-        model.cooldown_until = int(time.time()) + max(0, cooldown_seconds)
-        model.cooldown_reason = reason[:120]
-        self.dependencies.store.save()
+        self.candidate_health.set_cooldown(idx, error, cooldown_seconds, reason)
 
     def set_success(self, idx: int) -> None:
-        model = self.dependencies.store.models[idx]
-        model.last_error = ""
-        model.last_success_at = self.dependencies._now()
-        model.last_checked_at = model.last_success_at
-        self.dependencies.store.save()
+        self.candidate_health.set_success(idx)
 
     def execute_non_stream(
         self,

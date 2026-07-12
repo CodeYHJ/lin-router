@@ -58,6 +58,7 @@ from linrouter_core.observability import ObservabilityService, RequestLog
 from linrouter_core.contracts import AllModelsFailedError, RouteContext, StreamIdleTimeoutError, UpstreamCandidate
 from linrouter_core.contracts.execution_ports import ExecutionDependencies
 from linrouter_core.runtime import (
+    CandidateHealthService,
     CandidateErrorClassifier,
     CandidateRuntime,
     NonStreamExecutionService,
@@ -227,7 +228,17 @@ class ArkProxyRouter:
         self._all_models_failed_error_type = AllModelsFailedError
         self._stream_idle_timeout_error_type = StreamIdleTimeoutError
         self._route_context_type = RouteContext
-        self.runtime = CandidateRuntime(self)
+        self.candidate_health = CandidateHealthService(
+            store,
+            now=self._now,
+            is_auto_model=self._is_auto_model,
+            mode_for=self._mode_for,
+            group_for=self._group_for,
+            auth_for=self._auth_for,
+            candidate_type=UpstreamCandidate,
+            log_aggregate_member_skip=self._log_aggregate_member_skip,
+        )
+        self.runtime = CandidateRuntime(self, self.candidate_health)
         # v0.6 composition boundary: the legacy facade owns no execution loop.
         dependencies: ExecutionDependencies = self
         self.non_stream_execution = NonStreamExecutionService(dependencies, self.runtime)
@@ -1450,39 +1461,19 @@ class ArkProxyRouter:
         return max(0, minutes) * 60
 
     def _set_aggregate_member_cooldown(self, member_id: str, error: str, cooldown_seconds: int, reason: str) -> None:
-        member = next((m for m in self.store.aggregate_members if m.id == member_id), None)
-        if not member:
-            return
-        now_ts = int(time.time())
-        member.last_error = error[:500]
-        member.last_checked_at = self._now()
-        member.cooldown_until = now_ts + max(0, cooldown_seconds)
-        member.cooldown_reason = reason[:120]
-        self.store.save()
+        self.candidate_health.set_aggregate_member_cooldown(member_id, error, cooldown_seconds, reason)
 
     def _mark_aggregate_member_success(self, member_id: str) -> None:
-        member = next((m for m in self.store.aggregate_members if m.id == member_id), None)
-        if not member:
-            return
-        member.last_error = ""
-        member.last_success_at = self._now()
-        member.last_checked_at = member.last_success_at
-        self.store.save()
+        self.candidate_health.mark_aggregate_member_success(member_id)
 
     def _set_unusable(self, idx: int, error: str) -> None:
-        model = self.store.models[idx]
-        model.usable = False
-        model.last_error = error[:500]
-        model.last_checked_at = self._now()
-        model.cooldown_until = 0
-        model.cooldown_reason = ""
-        self.store.save()
+        self.candidate_health.set_unusable(idx, error)
 
     def _set_cooldown(self, idx: int, error: str, cooldown_seconds: int, reason: str) -> None:
-        self.runtime.set_cooldown(idx, error, cooldown_seconds, reason)
+        self.candidate_health.set_cooldown(idx, error, cooldown_seconds, reason)
 
     def _set_success(self, idx: int) -> None:
-        self.runtime.set_success(idx)
+        self.candidate_health.set_success(idx)
 
     def _mark_unusable(self, candidate: UpstreamCandidate, error: str) -> None:
         if candidate.idx is not None:
