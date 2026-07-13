@@ -3,6 +3,53 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
+HOP_BY_HOP_HEADERS = {
+    "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
+    "te", "trailer", "transfer-encoding", "upgrade",
+}
+
+
+def _forward_response_headers(handler: Any, headers: Dict[str, str], *, stream: bool, data_length: int = 0) -> None:
+    connection_header = next((value for key, value in headers.items() if key.lower() == "connection"), "")
+    connection_tokens = {
+        token.strip().lower()
+        for value in connection_header.split(",")
+        for token in [value]
+        if token.strip()
+    }
+    sent_content_type = False
+    for key, value in headers.items():
+        lowered = key.lower()
+        if lowered in HOP_BY_HOP_HEADERS or lowered in connection_tokens or lowered == "content-length":
+            continue
+        # The downstream client must always receive a genuine SSE response for
+        # a streaming route, even when a relay incorrectly labels its payload
+        # as JSON (or supplies buffering-related headers of its own).
+        if stream and lowered in {"content-type", "cache-control", "x-accel-buffering"}:
+            continue
+        if lowered == "content-type":
+            if sent_content_type:
+                continue
+            sent_content_type = True
+        handler.send_header(key, value)
+    if stream:
+        handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        handler.send_header("Cache-Control", "no-cache")
+        handler.send_header("X-Accel-Buffering", "no")
+    elif not sent_content_type:
+        handler.send_header("Content-Type", "application/json; charset=utf-8")
+    if not stream:
+        handler.send_header("Content-Length", str(data_length))
+
+
+def _is_terminal_chunk(chunk: bytes) -> bool:
+    return b"[DONE]" in chunk or any(signal in chunk for signal in (b"response.completed", b"response.failed", b"response.incomplete"))
+
+
+def _dashboard_cancellation_requested(router: Any, request_id: str) -> bool:
+    check = getattr(router, "is_live_request_cancelled", None)
+    return bool(request_id and callable(check) and check(request_id))
+
 
 def handle_proxy_request(
     handler: Any,
@@ -13,36 +60,45 @@ def handle_proxy_request(
 ) -> None:
     """Execute the existing ``/v1`` and ``/chat`` POST response path via a handler facade."""
     stream = bool(payload.get("stream"))
+    response_started = False
+    request_id = ""
     try:
         if stream:
             status, headers, iterator, request_id = handler.router.stream(path, payload, route, dict(handler.headers.items()), raw_body)
             handler.send_response(status)
-            for key, value in headers.items():
-                if key.lower() in {"content-length", "connection", "transfer-encoding"}:
-                    continue
-                handler.send_header(key, value)
-            handler.send_header("Content-Type", headers.get("Content-Type", "text/event-stream; charset=utf-8"))
+            _forward_response_headers(handler, headers, stream=True)
             handler.end_headers()
+            response_started = True
             try:
                 for chunk in iterator:
                     handler.wfile.write(chunk)
                     handler.wfile.flush()
+                    if _is_terminal_chunk(chunk) and hasattr(handler.router, "record_stream_transport_event"):
+                        handler.router.record_stream_transport_event(request_id, "downstream_terminal_forwarded")
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                if not _dashboard_cancellation_requested(handler.router, request_id) and hasattr(handler.router, "record_stream_transport_event"):
+                    handler.router.record_stream_transport_event(request_id, "downstream_write_failed")
             finally:
                 iterator.close()
                 handler.router.finalize_stream_if_needed(request_id)
             return
         status, headers, data = handler.router.call(path, payload, route, dict(handler.headers.items()), raw_body)
         handler.send_response(status)
-        for key, value in headers.items():
-            if key.lower() in {"content-length", "connection", "transfer-encoding"}:
-                continue
-            handler.send_header(key, value)
-        handler.send_header("Content-Length", str(len(data)))
+        _forward_response_headers(handler, headers, stream=False, data_length=len(data))
         handler.end_headers()
+        response_started = True
         handler.wfile.write(data)
     except handler._all_models_failed_error_type as err:
+        if response_started:
+            if request_id and hasattr(handler.router, "record_stream_transport_event"):
+                handler.router.record_stream_transport_event(request_id, "downstream_write_failed")
+            return
         handler._send_all_models_failed_error(err)
     except Exception as err:
+        if response_started:
+            if request_id and hasattr(handler.router, "record_stream_transport_event"):
+                handler.router.record_stream_transport_event(request_id, "downstream_write_failed")
+            return
         handler._send_json({
             "error": {
                 "message": f"服务器内部错误: {err}",

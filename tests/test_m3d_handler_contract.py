@@ -72,12 +72,19 @@ class FakeRouter:
     def finalize_stream_if_needed(self, request_id: str) -> None:
         self.finalized.append(request_id)
 
+    def record_stream_transport_event(self, request_id: str, event: str) -> None:
+        self.transport_events.append((request_id, event))
+
+    def is_live_request_cancelled(self, request_id: str) -> bool:
+        return False
+
 
 class FakeHandler:
     _all_models_failed_error_type = AllModelsFailedError
 
     def __init__(self, router: FakeRouter) -> None:
         self.router = router
+        self.router.transport_events = []
         self.headers = {"X-Client": "test"}
         self.wfile = io.BytesIO()
         self.responses: list[int] = []
@@ -137,19 +144,15 @@ def _proxy_branch(source: str) -> ast.If:
     raise AssertionError("proxy branch missing")
 
 
-def test_m3d_moved_proxy_execution_ast_matches_m3c_baseline_after_normalization() -> None:
-    baseline = subprocess.check_output(
-        ["git", "show", "2ca4d05:app.py"], cwd=ROOT, text=True, encoding="utf-8"
-    )
-    legacy_try = next(node for node in _proxy_branch(baseline).body if isinstance(node, ast.Try))
-    runtime_tree = ast.parse(inspect.getsource(handle_proxy_request))
-    runtime_fn = next(node for node in runtime_tree.body if isinstance(node, ast.FunctionDef))
-    runtime_try = next(node for node in runtime_fn.body if isinstance(node, ast.Try))
+def test_m3d_proxy_runtime_keeps_proxy_calls_and_adds_transport_safety() -> None:
+    source = inspect.getsource(handle_proxy_request)
 
-    def normalized(node: ast.AST) -> str:
-        return ast.dump(ast.fix_missing_locations(_NormalizeMovedProxyAst().visit(node)), include_attributes=False)
-
-    assert normalized(legacy_try) == normalized(runtime_try)
+    assert "handler.router.stream" in source
+    assert "handler.router.call" in source
+    assert "_forward_response_headers" in source
+    assert "response_started" in source
+    assert "downstream_write_failed" in source
+    assert RouterHandler.protocol_version == "HTTP/1.1"
 
 
 def test_m3d_non_stream_success_preserves_headers_length_and_body() -> None:
@@ -181,6 +184,84 @@ def test_m3d_stream_success_flushes_in_order_closes_and_finalizes() -> None:
     assert iterator.closed is True
     assert router.finalized == ["request-1"]
     assert ("Content-Type", "text/event-stream; charset=utf-8") in handler.sent_headers
+
+
+def test_m3d_stream_normalizes_json_upstream_headers_to_sse() -> None:
+    router = FakeRouter()
+    router.stream_result = (200, {
+        "Content-Type": "application/json; charset=utf-8",
+        "Cache-Control": "public, max-age=60",
+        "X-Accel-Buffering": "yes",
+        "X-Upstream": "ok",
+    }, FakeIterator([b"data: [DONE]\\n\\n"]), "request-sse-headers")
+    handler = FakeHandler(router)
+
+    handle_proxy_request(handler, "/v1/chat/completions", {"stream": True}, object(), b"{}")
+
+    assert ("Content-Type", "text/event-stream; charset=utf-8") in handler.sent_headers
+    assert ("Cache-Control", "no-cache") in handler.sent_headers
+    assert ("X-Accel-Buffering", "no") in handler.sent_headers
+    assert not any(
+        (key.lower(), value.lower()) in {
+            ("content-type", "application/json; charset=utf-8"),
+            ("cache-control", "public, max-age=60"),
+            ("x-accel-buffering", "yes"),
+        }
+        for key, value in handler.sent_headers
+    )
+    assert ("X-Upstream", "ok") in handler.sent_headers
+
+
+def test_m3d_stream_filters_hop_by_hop_headers_and_records_terminal() -> None:
+    router = FakeRouter()
+    iterator = FakeIterator([b"data: [DONE]\\n\\n"])
+    router.stream_result = (200, {
+        "connection": "keep-alive, X-Remove", "Keep-Alive": "timeout=5", "TE": "trailers",
+        "Trailer": "X-Trailer", "Upgrade": "h2c", "X-Remove": "yes", "Content-Type": "text/event-stream",
+    }, iterator, "request-2")
+    handler = FakeHandler(router)
+
+    handle_proxy_request(handler, "/v1/chat/completions", {"stream": True}, object(), b"{}")
+
+    assert ("Content-Type", "text/event-stream; charset=utf-8") in handler.sent_headers
+    assert not any(key.lower() in {"connection", "keep-alive", "te", "trailer", "upgrade", "x-remove"} for key, _ in handler.sent_headers)
+    assert router.transport_events == [("request-2", "downstream_terminal_forwarded")]
+
+
+def test_m3d_write_failure_after_stream_headers_never_emits_json_error() -> None:
+    router = FakeRouter()
+    iterator = FakeIterator([b"data: working\\n\\n"])
+    router.stream_result = (200, {"Content-Type": "text/event-stream"}, iterator, "request-3")
+    handler = FakeHandler(router)
+
+    def fail_write(_chunk: bytes) -> None:
+        raise BrokenPipeError("client disconnected")
+
+    handler.wfile.write = fail_write  # type: ignore[method-assign]
+    handle_proxy_request(handler, "/v1/chat/completions", {"stream": True}, object(), b"{}")
+
+    assert handler.json_errors == []
+    assert router.finalized == ["request-3"]
+    assert router.transport_events == [("request-3", "downstream_write_failed")]
+
+
+def test_m3d_dashboard_cancel_write_failure_preserves_cancellation_audit() -> None:
+    class CancelledRouter(FakeRouter):
+        def is_live_request_cancelled(self, request_id: str) -> bool:
+            return request_id == "request-cancelled"
+
+    router = CancelledRouter()
+    router.stream_result = (200, {"Content-Type": "text/event-stream"}, FakeIterator([b"data: working\\n\\n"]), "request-cancelled")
+    handler = FakeHandler(router)
+
+    def fail_write(_chunk: bytes) -> None:
+        raise BrokenPipeError("dashboard cancelled")
+
+    handler.wfile.write = fail_write  # type: ignore[method-assign]
+    handle_proxy_request(handler, "/v1/chat/completions", {"stream": True}, object(), b"{}")
+
+    assert router.transport_events == []
+    assert router.finalized == ["request-cancelled"]
 
 
 def test_m3d_keeps_existing_error_mappings() -> None:

@@ -188,11 +188,11 @@ const ConfigTab = {
           <div class="form-row hidden" id="group-waf-policy-row">
             <label>Accept 策略</label>
             <select id="group-waf-policy">
-              <option value="default" ${(g?.waf_accept_policy || 'default') === 'default' ? 'selected' : ''}>默认（浏览器 Accept）</option>
+              <option value="default" ${(g?.waf_accept_policy || 'default') === 'default' ? 'selected' : ''}>默认（按请求类型）</option>
               <option value="text_event_stream" ${g?.waf_accept_policy === 'text_event_stream' ? 'selected' : ''}>固定 text/event-stream</option>
               <option value="passthrough" ${g?.waf_accept_policy === 'passthrough' ? 'selected' : ''}>passthrough（透传入站 Accept）</option>
             </select>
-            <div class="form-hint">仅在 WAF 兼容开启时生效；passthrough 仅用于 debug 对照。</div>
+            <div class="form-hint">仅在 WAF 兼容开启时生效；流式请求默认使用 text/event-stream，passthrough 仅用于 debug 对照。</div>
           </div>
           <div class="form-row">
             <label>自动路由模型名</label>

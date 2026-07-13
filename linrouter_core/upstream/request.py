@@ -87,7 +87,12 @@ def build_request_headers(
         headers["authorization"] = f"Bearer {auth_key}"
         if not any(key.lower() == "content-type" for key in headers):
             headers["content-type"] = "application/json"
-        if waf_accept_policy == "text_event_stream":
+        # A streaming request must advertise SSE even when the client sent a
+        # browser-style Accept header such as application/json.  Keep the
+        # explicit passthrough mode available for compatibility/debugging.
+        if stream and waf_accept_policy != "passthrough":
+            headers["accept"] = "text/event-stream"
+        elif waf_accept_policy == "text_event_stream":
             headers["accept"] = "text/event-stream" if stream else "application/json"
         elif waf_accept_policy == "passthrough":
             incoming_accept = next((value for name, value in incoming_headers.items() if name.strip().lower() == "accept"), None)

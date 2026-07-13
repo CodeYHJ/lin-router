@@ -277,6 +277,12 @@ def handle_get(handler: Any) -> None:
 
 def handle_post(handler: Any) -> None:
     parsed = urlparse(handler.path)
+    if parsed.path.startswith("/api/live-requests/") and parsed.path.endswith("/cancel"):
+        request_id = parsed.path[len("/api/live-requests/"):-len("/cancel")].strip("/")
+        payload = handler.router.cancel_live_request(request_id, source="dashboard")
+        status = 200 if payload.get("ok") else (404 if payload.get("code") == "request_not_found" else 400)
+        handler._send_json(payload, status=status)
+        return
     if parsed.path == "/api/config/import":
         payload = handler._read_multipart_json()
         if payload is None:

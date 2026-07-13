@@ -55,11 +55,19 @@ class RequestPreparationPort:
 
 
 class ConcurrencyPort:
-    def __init__(self, *, candidate_lock: Callable[..., Any], acquire: Callable[[Any], Tuple[bool, int]], release: Callable[[Any], None], busy_detail: Callable[..., str], mark_stream_active: Callable[[Any, int], None]) -> None:
+    def __init__(self, *, candidate_lock: Callable[..., Any], acquire: Callable[[Any], Tuple[bool, int]], release: Callable[[Any], bool | None], busy_detail: Callable[..., str], mark_stream_active: Callable[[Any, int], None]) -> None:
         self._candidate_lock = candidate_lock; self._acquire = acquire; self._release = release; self._busy_detail = busy_detail; self._mark_stream_active = mark_stream_active
     def candidate_lock(self, *args: Any) -> Any: return self._candidate_lock(*args)
-    def acquire(self, lock: Any) -> Tuple[bool, int]: return self._acquire(lock)
-    def release(self, lock: Any) -> None: self._release(lock)
+    def acquire(self, lock: Any, request_id: str = "") -> Tuple[bool, int]:
+        try:
+            return self._acquire(lock, request_id=request_id)
+        except TypeError as exc:
+            if "request_id" not in str(exc):
+                raise
+            return self._acquire(lock)
+    def release(self, lock: Any) -> bool:
+        released = self._release(lock)
+        return bool(lock) if released is None else bool(released)
     def busy_detail(self, *args: Any) -> str: return self._busy_detail(*args)
     def mark_stream_active(self, candidate: Any, delta: int) -> None: self._mark_stream_active(candidate, delta)
 
@@ -76,13 +84,18 @@ class StreamLifecyclePort:
 
 
 class ObservabilityPort:
-    def __init__(self, *, start: Callable[..., None], update: Callable[..., None], finish: Callable[..., None], add_log: Callable[..., None], patch_stream: Callable[..., bool]) -> None:
+    def __init__(self, *, start: Callable[..., None], update: Callable[..., None], finish: Callable[..., None], add_log: Callable[..., None], patch_stream: Callable[..., bool], cancellation_requested: Callable[[str], bool], set_response: Callable[[str, Any], None], close_response: Callable[..., bool]) -> None:
         self._start = start; self._update = update; self._finish = finish; self._add_log = add_log; self._patch_stream = patch_stream
+        self._cancellation_requested = cancellation_requested; self._set_response = set_response; self._close_response = close_response
     def start_live_request(self, *args: Any, **kwargs: Any) -> None: self._start(*args, **kwargs)
+
     def update_live_request(self, *args: Any, **kwargs: Any) -> None: self._update(*args, **kwargs)
     def finish_live_request(self, *args: Any, **kwargs: Any) -> None: self._finish(*args, **kwargs)
     def add_log(self, *args: Any, **kwargs: Any) -> None: self._add_log(*args, **kwargs)
     def patch_stream_lifecycle(self, *args: Any, **kwargs: Any) -> bool: return self._patch_stream(*args, **kwargs)
+    def cancellation_requested(self, request_id: str) -> bool: return self._cancellation_requested(request_id)
+    def set_live_response(self, request_id: str, response: Any) -> None: self._set_response(request_id, response)
+    def close_live_response(self, request_id: str, response: Any = None) -> bool: return self._close_response(request_id, response)
 
 
 class DebugCapturePort:

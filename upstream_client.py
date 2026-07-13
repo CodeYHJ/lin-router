@@ -97,9 +97,19 @@ class _LineReader:
         if self._is_httpx:
             try:
                 line = next(self._iter)
-                return (line + b"\n") if line and not line.endswith(b"\n") else line
             except StopIteration:
                 return b""
+            # httpx.iter_lines() yields text lines without their line ending.
+            # Keep SSE blank lines: they delimit an event and are not EOF.
+            if isinstance(line, str):
+                line = line.encode("utf-8")
+            elif isinstance(line, bytearray):
+                line = bytes(line)
+            elif not isinstance(line, bytes):
+                line = bytes(line)
+            if not line.endswith(b"\n"):
+                line += b"\n"
+            return line
         return self._raw.readline()
 
     def readline(self, timeout_seconds: int = 0) -> bytes:

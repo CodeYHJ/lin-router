@@ -56,6 +56,7 @@ const API = {
   getState() { return this.req('/api/state'); },
   getRuntimeState(opts = {}) { return this.req('/api/runtime-state', opts); },
   getLiveRequests(opts = {}) { return this.req('/api/live-requests', opts); },
+  cancelLiveRequest(requestId) { return this.req(`/api/live-requests/${encodeURIComponent(requestId)}/cancel`, { method: 'POST' }); },
   diagnoseRequest(requestId, opts = {}) { return this.req(`/api/diagnose/${encodeURIComponent(requestId)}`, opts); },
   getLogs(params = {}) {
     const qs = new URLSearchParams(params).toString();

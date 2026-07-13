@@ -40,6 +40,40 @@ def test_adapter_url_and_request_facades_preserve_existing_header_shapes(tmp_pat
     assert "X-Stainless-Lang" not in headers
 
 
+def test_waf_default_forces_sse_accept_for_streaming_requests(tmp_path: Path) -> None:
+    router = ArkProxyRouter(Store(), None, tmp_path / "logs.jsonl")
+    group = ConnectionGroup(
+        id="g1", name="relay", provider_type="relay", base_url="https://relay.example/v1",
+        waf_compatible=True, waf_accept_policy="default",
+    )
+
+    headers = router._headers_for(
+        group,
+        "upstream-key",
+        {"Accept": "application/json", "User-Agent": "Hermes/1.0"},
+        stream=True,
+    )
+
+    assert headers["accept"] == "text/event-stream"
+
+
+def test_waf_passthrough_accept_remains_explicit_override(tmp_path: Path) -> None:
+    router = ArkProxyRouter(Store(), None, tmp_path / "logs.jsonl")
+    group = ConnectionGroup(
+        id="g1", name="relay", provider_type="relay", base_url="https://relay.example/v1",
+        waf_compatible=True, waf_accept_policy="passthrough",
+    )
+
+    headers = router._headers_for(
+        group,
+        "upstream-key",
+        {"Accept": "application/custom"},
+        stream=True,
+    )
+
+    assert headers["accept"] == "application/custom"
+
+
 def test_router_uses_explicit_injected_adapter_without_changing_waf_decision(tmp_path: Path) -> None:
     class Adapter:
         def __init__(self) -> None:

@@ -38,7 +38,7 @@ class ObservabilityService:
         self._repository = LogRepository(log_file, self._log_from_row)
         self._logs_lock = threading.RLock()
         self._live_requests: Dict[str, Dict[str, Any]] = {}
-        self._live_requests_lock = threading.Lock()
+        self._live_requests_lock = threading.RLock()
         self.load()
 
     def set_log_file(self, log_file: Path) -> None:
@@ -188,13 +188,15 @@ class ObservabilityService:
         usage_source: str, *, final_status: str, lifecycle: str, final_result: str, chunks_received: int,
         bytes_received: int, duration_ms: Optional[int] = None, lock_wait_ms: Optional[int] = None,
         lock_release_reason: str = "", cooldown_applied: Optional[bool] = None, failure_scope: str = "",
-        completion_signal: str = "",
+        completion_signal: str = "", final_event: str = "",
     ) -> bool:
         with self._logs_lock:
             item = self._find_stream_log(request_id, attempt, candidate_label)
             if not item:
                 return False
             item.status = final_status
+            if final_event:
+                item.event = final_event
             item.duration_ms = duration_ms if duration_ms is not None else item.duration_ms
             item.prompt_tokens, item.completion_tokens, item.total_tokens, item.cached_tokens, item.reasoning_tokens = usage
             item.usage_source = usage_source
@@ -203,8 +205,14 @@ class ObservabilityService:
             if failure_scope:
                 item.failure_scope = failure_scope
             suffix_parts = ["stream_finalized=true", f"lifecycle={lifecycle}", f"final_result={final_result}", f"chunks_received={chunks_received}", f"bytes_received={bytes_received}", "lock_released=true"]
+            if lifecycle == "manual_cancelled":
+                suffix_parts.extend(["cancel_source=dashboard", "cooldown_applied=false", "failure_scope=client_cancelled"])
             if completion_signal:
                 suffix_parts.append(f"completion_signal={completion_signal}")
+                suffix_parts.append(
+                    "upstream_terminal_missing=true" if completion_signal == "eof"
+                    else "upstream_terminal_received=true"
+                )
             if lock_wait_ms is not None:
                 suffix_parts.append(f"lock_wait_ms={lock_wait_ms}")
             if lock_release_reason:
@@ -220,6 +228,22 @@ class ObservabilityService:
             except Exception as exc:
                 self.log_write_error = f"日志回写失败: {exc}"
 
+    def record_stream_transport_event(self, request_id: str, event: str) -> None:
+        """Persist transport-side evidence after the HTTP response has begun."""
+        if event not in {"downstream_terminal_forwarded", "downstream_write_failed"}:
+            return
+        with self._logs_lock:
+            item = self._find_stream_log(request_id)
+            if not item:
+                return
+            if event == "downstream_write_failed" and (item.event == "request_cancelled" or item.failure_scope == "client_cancelled"):
+                return
+            item.detail = self.append_detail(item.detail, f"{event}=true")
+            if event == "downstream_write_failed":
+                item.event = event
+                item.failure_scope = "downstream"
+            self.rewrite_log_file()
+
     def export_logs_csv(self) -> str:
         output = io.StringIO()
         writer = csv.writer(output)
@@ -233,7 +257,15 @@ class ObservabilityService:
             return
         now = time.time()
         with self._live_requests_lock:
-            self._live_requests[request_id] = {"request_id": request_id, "path": path, "requested_model": requested_model, "model": requested_model, "group": "", "candidate": "", "aggregate_model": "", "stage": "selecting_candidate", "stage_label": "选择候选", "started_at": now, "updated_at": now, "elapsed_ms": 0, "stream": bool(stream), "attempt": 0, "status": "running", "slow": False, "possible_reason": ""}
+            self._live_requests[request_id] = {
+                "request_id": request_id, "path": path, "requested_model": requested_model,
+                "model": requested_model, "group": "", "candidate": "", "aggregate_model": "",
+                "stage": "selecting_candidate", "stage_label": "选择候选", "started_at": now,
+                "updated_at": now, "elapsed_ms": 0, "stream": bool(stream), "attempt": 0,
+                "status": "running", "slow": False, "possible_reason": "", "cancellable": True,
+                "cancellation_state": "none", "cancel_requested_at": 0.0,
+                "cancelled_at_stage": "", "response": None,
+            }
 
     def update_live_request(self, request_id: str, **patch: Any) -> None:
         if not request_id:
@@ -244,13 +276,64 @@ class ObservabilityService:
                 item.update({key: value for key, value in patch.items() if value is not None})
                 item["updated_at"] = time.time()
 
+    def set_live_response(self, request_id: str, response: Any) -> None:
+        with self._live_requests_lock:
+            item = self._live_requests.get(request_id)
+            if item:
+                item["response"] = response
+
+    def close_live_response(self, request_id: str, response: Any = None) -> bool:
+        """Close a registered upstream response at most once for this request."""
+        target = None
+        with self._live_requests_lock:
+            item = self._live_requests.get(request_id)
+            if item:
+                registered = item.get("response")
+                if registered is not None and (response is None or registered is response):
+                    target = registered
+                    item["response"] = None
+        if target is None:
+            return False
+        try:
+            target.close()
+        except Exception:
+            pass
+        return True
+
+    def cancellation_requested(self, request_id: str) -> bool:
+        with self._live_requests_lock:
+            item = self._live_requests.get(request_id)
+            return bool(item and item.get("cancellation_state") == "requested")
+
+    def request_cancellation(self, request_id: str, source: str = "dashboard") -> Dict[str, Any]:
+        if not request_id or len(request_id) > 64 or not re.fullmatch(r"[A-Za-z0-9_-]+", request_id):
+            return {"ok": False, "code": "invalid_request_id", "message": "请求标识无效"}
+        response = None
+        with self._live_requests_lock:
+            item = self._live_requests.get(request_id)
+            if not item:
+                return {"ok": False, "code": "request_not_found", "message": "未找到进行中的请求，可能已结束"}
+            if item.get("cancellation_state") == "requested":
+                return {"ok": True, "request_id": request_id, "state": "cancellation_already_requested", "message": "该请求已在终止处理中"}
+            item["cancellation_state"] = "requested"
+            item["cancel_requested_at"] = time.time()
+            item["cancelled_at_stage"] = str(item.get("stage") or "")
+            item["cancellable"] = False
+            item["stage"] = "cancellation_requested"
+            item["stage_label"] = "终止中"
+            item["cancel_source"] = source
+            item["updated_at"] = time.time()
+            response = item.get("response")
+        self.close_live_response(request_id)
+        return {"ok": True, "request_id": request_id, "state": "cancellation_requested", "message": "已发送终止指令，正在释放本地请求资源。"}
+
     def finish_live_request(self, request_id: str, status: str = "done") -> None:
         if not request_id:
             return
         with self._live_requests_lock:
             item = self._live_requests.get(request_id)
             if item:
-                item.update({"status": status, "stage": status, "stage_label": "已完成" if status == "done" else "已结束", "updated_at": time.time()})
+                item.update({"status": status, "stage": status, "stage_label": "已完成" if status == "done" else "已结束", "updated_at": time.time(), "cancellable": False, "cancellation_state": "finalized" if status == "manual_cancelled" else item.get("cancellation_state", "none")})
             self._live_requests.pop(request_id, None)
 
     def live_requests_payload(self) -> Dict[str, Any]:
@@ -259,6 +342,7 @@ class ObservabilityService:
             items = []
             for item in self._live_requests.values():
                 row = dict(item)
+                row.pop("response", None)
                 elapsed_ms = int((now - float(row.get("started_at") or now)) * 1000)
                 row["elapsed_ms"] = elapsed_ms
                 row["slow"] = elapsed_ms >= 10000 or str(row.get("stage") or "") in {"waiting_serial_protection", "waiting_first_byte"} and elapsed_ms >= 5000

@@ -160,6 +160,7 @@ const DashboardTab = {
           <div><span class="pill ${item.slow ? 'warning' : 'info'}">${Utils.escapeHtml(stageLabel)}</span></div>
           <div>${Utils.escapeHtml(elapsed)}</div>
           <small>${Utils.escapeHtml(hint)}</small>
+          ${item.cancellable === false ? '<span class="pill warning">终止中</span>' : `<button type="button" class="btn-secondary btn-sm" data-dashboard-action="cancel-request" data-request-id="${Utils.escapeHtml(item.request_id || '')}">终止</button>`}
         </div>`;
     }).join('');
     return `
@@ -333,6 +334,13 @@ const DashboardTab = {
           const status = group ? ConnectionStatus.group(group) : null;
           return Utils.copy(this.clientConfigText(group, status?.verifiedModel || status?.representative))
             .then(ok => ok ? Toast.success('客户端配置已复制') : Toast.error('复制失败'));
+        }
+        if (action === 'cancel-request') {
+          if (!window.confirm('确认终止该请求？这是尽力而为操作，上游可能已经产生费用。')) return;
+          btn.disabled = true;
+          return API.cancelLiveRequest(btn.dataset.requestId)
+            .then(result => { Toast.success(result.message || '已发送终止指令'); return Store.load(true); })
+            .catch(err => { btn.disabled = false; Toast.error(err.message || '终止请求失败'); });
         }
         if (action === 'aggregate') { Store.select('aggregate', btn.dataset.aggregateId); return Tabs.switch('config'); }
       });

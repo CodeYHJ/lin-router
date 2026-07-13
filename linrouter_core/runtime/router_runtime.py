@@ -104,6 +104,27 @@ class ManagedStreamIterator:
             self._finalize()
 
 
+def _read_sse_frame(readline: Callable[[int], bytes], timeout_seconds: int) -> bytes:
+    """Read one complete SSE frame, delimited by a blank line.
+
+    Upstream ``readline`` calls may return an ``event:`` line before the
+    matching ``data:`` line.  Forwarding that line immediately gives clients
+    a first byte without a parseable SSE event.  Keep the lines together until
+    the protocol delimiter arrives; only an actual EOF with no buffered data
+    returns ``b""``.
+    """
+    lines: list[bytes] = []
+    while True:
+        line = readline(timeout_seconds)
+        if not line:
+            return b"".join(lines)
+        if line in {b"\n", b"\r\n"}:
+            if lines:
+                return b"".join(lines) + line
+            continue
+        lines.append(line)
+
+
 class CandidateRuntime:
     """Candidate enumeration and execution coordination through injected dependencies.
 
@@ -156,6 +177,17 @@ class CandidateRuntime:
     def set_success(self, idx: int) -> None:
         self.candidate_health.set_success(idx)
 
+    def _finalize_cancelled(self, request_id: str, path: str, requested_label: str, *, group: Any = None, candidate: Any = None, attempt: int = 0, lock_released: bool = False) -> None:
+        """Write one cancellation audit record without touching candidate health/fallback."""
+        self.observability.add_log(
+            path, candidate.label if candidate is not None else requested_label, "cancelled",
+            "lifecycle=manual_cancelled; final_result=manual_cancelled; failure_scope=client_cancelled; "
+            f"cooldown_applied=false; cancel_source=dashboard; lock_released={str(lock_released).lower()}",
+            group=group, request_id=request_id, attempt=attempt, event="request_cancelled",
+            cooldown_applied=False, failure_scope="client_cancelled",
+        )
+        self.observability.finish_live_request(request_id, "manual_cancelled")
+
     def execute_non_stream(
         self,
         path: str,
@@ -205,6 +237,9 @@ class CandidateRuntime:
             candidates_iter = state.iter_upstream_candidates(str(requested_model) if requested_model else None, group_id)
 
         for candidate in candidates_iter:
+            if self.observability.cancellation_requested(request_id):
+                self._finalize_cancelled(request_id, path, requested_label, group=candidate.group, candidate=candidate, attempt=attempt)
+                return 499, {"Content-Type": "application/json; charset=utf-8"}, json.dumps({"error": {"message": "请求已由用户终止", "type": "request_cancelled", "code": "manual_cancelled", "request_id": request_id}}, ensure_ascii=False).encode("utf-8")
             attempt += 1
             group = candidate.group
             target_url = self.preparation.resolve_url(group.base_url, path)
@@ -252,8 +287,13 @@ class CandidateRuntime:
             started_at = time.perf_counter()
             if upstream_lock:
                 self.observability.update_live_request(request_id, stage="waiting_serial_protection", stage_label="等待串行保护")
-            acquired, lock_wait_ms = self.concurrency.acquire(upstream_lock)
+            acquired, lock_wait_ms = self.concurrency.acquire(upstream_lock, request_id=request_id)
             if not acquired:
+                if self.observability.cancellation_requested(request_id):
+                    self._finalize_cancelled(
+                        request_id, path, requested_label, group=group, candidate=candidate, attempt=attempt,
+                    )
+                    return 499, {"Content-Type": "application/json; charset=utf-8"}, json.dumps({"error": {"message": "请求已由用户终止", "type": "request_cancelled", "code": "manual_cancelled", "request_id": request_id}}, ensure_ascii=False).encode("utf-8")
                 self.observability.update_live_request(request_id, stage="candidate_busy", stage_label="候选忙/串行保护等待超时", possible_reason="该连接组已开启串行保护，候选仍在处理请求，已临时切换")
                 duration_ms = int((time.perf_counter() - started_at) * 1000)
                 self.observability.add_log(
@@ -273,12 +313,36 @@ class CandidateRuntime:
                     continue
                 self.observability.finish_live_request(request_id, "error")
                 return 503, {"Content-Type": "application/json; charset=utf-8"}, [json.dumps({"error": {"message": "该连接组已开启串行保护，候选仍在处理请求", "type": "candidate_busy", "code": "serial_protection_wait_timeout", "request_id": request_id}}, ensure_ascii=False).encode("utf-8")]
+            if self.observability.cancellation_requested(request_id):
+                lock_released = self.concurrency.release(upstream_lock)
+                self._finalize_cancelled(
+                    request_id, path, requested_label, group=group, candidate=candidate, attempt=attempt,
+                    lock_released=lock_released,
+                )
+                return 499, {"Content-Type": "application/json; charset=utf-8"}, json.dumps({"error": {"message": "请求已由用户终止", "type": "request_cancelled", "code": "manual_cancelled", "request_id": request_id}}, ensure_ascii=False).encode("utf-8")
             try:
                 self.observability.update_live_request(request_id, stage="connecting_upstream", stage_label="连接上游")
                 resp = self.upstream.request("POST", target_url, outbound_headers, body, stream=False, timeout=120)
+                self.observability.set_live_response(request_id, resp)
+                if self.observability.cancellation_requested(request_id):
+                    self.observability.close_live_response(request_id, resp)
+                    lock_released = self.concurrency.release(upstream_lock)
+                    self._finalize_cancelled(
+                        request_id, path, requested_label, group=group, candidate=candidate, attempt=attempt,
+                        lock_released=lock_released,
+                    )
+                    return 499, {"Content-Type": "application/json; charset=utf-8"}, json.dumps({"error": {"message": "请求已由用户终止", "type": "request_cancelled", "code": "manual_cancelled", "request_id": request_id}}, ensure_ascii=False).encode("utf-8")
                 with resp:
                     self.observability.update_live_request(request_id, stage="receiving_response", stage_label="接收响应")
                     data = resp.read()
+                    if self.observability.cancellation_requested(request_id):
+                        self.observability.close_live_response(request_id, resp)
+                        lock_released = self.concurrency.release(upstream_lock)
+                        self._finalize_cancelled(
+                            request_id, path, requested_label, group=group, candidate=candidate, attempt=attempt,
+                            lock_released=lock_released,
+                        )
+                        return 499, {"Content-Type": "application/json; charset=utf-8"}, json.dumps({"error": {"message": "请求已由用户终止", "type": "request_cancelled", "code": "manual_cancelled", "request_id": request_id}}, ensure_ascii=False).encode("utf-8")
                     duration_ms = int((time.perf_counter() - started_at) * 1000)
                     prompt_tokens, completion_tokens, total_tokens, cached_tokens, reasoning_tokens = self.stream_lifecycle.usage_from_response(data)
                     state.mark_success(candidate)
@@ -424,6 +488,14 @@ class CandidateRuntime:
                 self.observability.finish_live_request(request_id, "error")
                 return err.code, headers, raw.encode("utf-8")
             except (URLError, TimeoutError, OSError) as err:
+                if self.observability.cancellation_requested(request_id):
+                    self.observability.close_live_response(request_id)
+                    lock_released = self.concurrency.release(upstream_lock)
+                    self._finalize_cancelled(
+                        request_id, path, requested_label, group=group, candidate=candidate, attempt=attempt,
+                        lock_released=lock_released,
+                    )
+                    return 499, {"Content-Type": "application/json; charset=utf-8"}, json.dumps({"error": {"message": "请求已由用户终止", "type": "request_cancelled", "code": "manual_cancelled", "request_id": request_id}}, ensure_ascii=False).encode("utf-8")
                 duration_ms = int((time.perf_counter() - started_at) * 1000)
                 last_error = err
                 classification = self.policy.classify_candidate_error(None, str(err), "network")
@@ -556,6 +628,10 @@ class CandidateRuntime:
             candidates_iter = state.iter_upstream_candidates(str(requested_model) if requested_model else None, group_id)
 
         for candidate in candidates_iter:
+            if self.observability.cancellation_requested(request_id):
+                self._finalize_cancelled(request_id, path, requested_label, group=candidate.group, candidate=candidate, attempt=attempt)
+                error_body = json.dumps({"error": {"message": "请求已由用户终止", "type": "request_cancelled", "code": "manual_cancelled", "request_id": request_id}}, ensure_ascii=False).encode("utf-8")
+                return 499, {"Content-Type": "application/json; charset=utf-8"}, [error_body], request_id
             attempt += 1
             group = candidate.group
             target_url = self.preparation.resolve_url(group.base_url, path)
@@ -605,8 +681,12 @@ class CandidateRuntime:
             started_at = time.perf_counter()
             if upstream_lock:
                 self.observability.update_live_request(request_id, stage="waiting_serial_protection", stage_label="等待串行保护")
-            acquired, lock_wait_ms = self.concurrency.acquire(upstream_lock)
+            acquired, lock_wait_ms = self.concurrency.acquire(upstream_lock, request_id=request_id)
             if not acquired:
+                if self.observability.cancellation_requested(request_id):
+                    self._finalize_cancelled(request_id, path, requested_label, group=group, candidate=candidate, attempt=attempt)
+                    error_body = json.dumps({"error": {"message": "请求已由用户终止", "type": "request_cancelled", "code": "manual_cancelled", "request_id": request_id}}, ensure_ascii=False).encode("utf-8")
+                    return 499, {"Content-Type": "application/json; charset=utf-8"}, [error_body], request_id
                 self.observability.update_live_request(request_id, stage="candidate_busy", stage_label="候选忙/串行保护等待超时", possible_reason="该连接组已开启串行保护，候选仍在处理请求，已临时切换")
                 duration_ms = int((time.perf_counter() - started_at) * 1000)
                 self.observability.add_log(
@@ -628,10 +708,31 @@ class CandidateRuntime:
                 self.observability.finish_live_request(request_id, "error")
                 return 503, {"Content-Type": "application/json; charset=utf-8"}, [error_body], request_id
             try:
+                if self.observability.cancellation_requested(request_id):
+                    lock_released = self.concurrency.release(upstream_lock)
+                    self._finalize_cancelled(request_id, path, requested_label, group=group, candidate=candidate, attempt=attempt, lock_released=lock_released)
+                    error_body = json.dumps({"error": {"message": "请求已由用户终止", "type": "request_cancelled", "code": "manual_cancelled", "request_id": request_id}}, ensure_ascii=False).encode("utf-8")
+                    return 499, {"Content-Type": "application/json; charset=utf-8"}, [error_body], request_id
                 self.observability.update_live_request(request_id, stage="connecting_upstream", stage_label="连接上游")
                 resp = self.upstream.request("POST", target_url, outbound_headers, body, stream=True, timeout=120)
+                self.observability.set_live_response(request_id, resp)
+                if self.observability.cancellation_requested(request_id):
+                    self.observability.close_live_response(request_id, resp)
+                    lock_released = self.concurrency.release(upstream_lock)
+                    self._finalize_cancelled(request_id, path, requested_label, group=group, candidate=candidate, attempt=attempt, lock_released=lock_released)
+                    error_body = json.dumps({"error": {"message": "请求已由用户终止", "type": "request_cancelled", "code": "manual_cancelled", "request_id": request_id}}, ensure_ascii=False).encode("utf-8")
+                    return 499, {"Content-Type": "application/json; charset=utf-8"}, [error_body], request_id
                 self.observability.update_live_request(request_id, stage="waiting_first_byte", stage_label="等待首包")
-                first_chunk = self.stream_lifecycle.readline_with_idle_timeout(resp, idle_timeout)
+                first_chunk = _read_sse_frame(
+                    lambda timeout: self.stream_lifecycle.readline_with_idle_timeout(resp, timeout),
+                    idle_timeout,
+                )
+                if self.observability.cancellation_requested(request_id):
+                    self.observability.close_live_response(request_id, resp)
+                    lock_released = self.concurrency.release(upstream_lock)
+                    self._finalize_cancelled(request_id, path, requested_label, group=group, candidate=candidate, attempt=attempt, lock_released=lock_released)
+                    error_body = json.dumps({"error": {"message": "请求已由用户终止", "type": "request_cancelled", "code": "manual_cancelled", "request_id": request_id}}, ensure_ascii=False).encode("utf-8")
+                    return 499, {"Content-Type": "application/json; charset=utf-8"}, [error_body], request_id
                 if not first_chunk:
                     raise URLError("upstream stream closed before first chunk")
                 duration_ms = int((time.perf_counter() - started_at) * 1000)
@@ -715,9 +816,14 @@ class CandidateRuntime:
                         return
                     finalized = True
                     if resp:
-                        resp.close()
+                        self.observability.close_live_response(request_id, resp)
                     final_duration_ms = int((time.perf_counter() - started_at) * 1000)
-                    if stream_state["timeout"]:
+                    if self.observability.cancellation_requested(request_id):
+                        usage_source = "stream_incomplete"
+                        lifecycle_status = "cancelled"
+                        lifecycle_result = "manual_cancelled"
+                        lifecycle_scope = "client_cancelled"
+                    elif stream_state["timeout"]:
                         usage_source = "stream_incomplete"
                         lifecycle_status = "timeout"
                         lifecycle_result = "stream_idle_timeout"
@@ -753,8 +859,10 @@ class CandidateRuntime:
                         lock_release_reason=release_reason,
                         failure_scope=lifecycle_scope,
                         completion_signal=str(stream_state["completion_signal"]),
+                        cooldown_applied=False if lifecycle_result == "manual_cancelled" else None,
+                        final_event="request_cancelled" if lifecycle_result == "manual_cancelled" else ("stream_disconnected_before_completion" if lifecycle_result == "stream_incomplete" and stream_state["completion_signal"] == "missing" else ""),
                     )
-                    self.observability.finish_live_request(request_id, "done" if stream_state["lifecycle"] == "stream_done" else "ended")
+                    self.observability.finish_live_request(request_id, "done" if stream_state["lifecycle"] == "stream_done" else ("manual_cancelled" if lifecycle_result == "manual_cancelled" else "ended"))
                     self.concurrency.mark_stream_active(candidate, -1)
                     self.concurrency.release(upstream_lock)
 
@@ -768,7 +876,10 @@ class CandidateRuntime:
                             return
                         while True:
                             try:
-                                chunk = self.stream_lifecycle.readline_with_idle_timeout(resp, idle_timeout)
+                                chunk = _read_sse_frame(
+                                    lambda timeout: self.stream_lifecycle.readline_with_idle_timeout(resp, timeout),
+                                    idle_timeout,
+                                )
                             except self.faults.stream_idle_timeout:
                                 stream_state["timeout"] = True
                                 release_reason = "stream_idle_timeout"
@@ -795,12 +906,27 @@ class CandidateRuntime:
 
                 return 200, dict(resp.headers.items()), ManagedStreamIterator(iterator(), finalize_stream), request_id
             except self.faults.stream_idle_timeout as err:
+                if self.observability.cancellation_requested(request_id):
+                    if resp:
+                        self.observability.close_live_response(request_id, resp)
+                    lock_released = self.concurrency.release(upstream_lock)
+                    self._finalize_cancelled(
+                        request_id,
+                        path,
+                        requested_label,
+                        group=group,
+                        candidate=candidate,
+                        attempt=attempt,
+                        lock_released=lock_released,
+                    )
+                    error_body = json.dumps({"error": {"message": "请求已由用户终止", "type": "request_cancelled", "code": "manual_cancelled", "request_id": request_id}}, ensure_ascii=False).encode("utf-8")
+                    return 499, {"Content-Type": "application/json; charset=utf-8"}, [error_body], request_id
                 saw_stream_timeout = True
                 saw_cooldown = True
                 last_error = err
                 duration_ms = int((time.perf_counter() - started_at) * 1000)
                 if resp:
-                    resp.close()
+                    self.observability.close_live_response(request_id, resp)
                 self.concurrency.release(upstream_lock)
                 # 聚合成员在首包前 stream 超时：cooldown 聚合成员并继续 fallback
                 if is_aggregate_candidate and aggregate_model and candidate.aggregate_member_id:
@@ -843,7 +969,7 @@ class CandidateRuntime:
                 return 504, {"Content-Type": "application/json; charset=utf-8"}, [error_body], request_id
             except HTTPError as err:
                 if resp:
-                    resp.close()
+                    self.observability.close_live_response(request_id, resp)
                 self.concurrency.release(upstream_lock)
                 duration_ms = int((time.perf_counter() - started_at) * 1000)
                 raw = err.read().decode("utf-8", "ignore") if hasattr(err, "read") else str(err)
@@ -919,8 +1045,27 @@ class CandidateRuntime:
                 self.observability.add_log(path, candidate.label, str(err.code), self.preparation.debug_detail(candidate, requested_label, target_url, body_mode, body, payload_for_upstream, outbound_headers, detail, lock_wait_ms=lock_wait_ms, lock_release_reason="http_error"), duration_ms, group=group, request_id=request_id, attempt=attempt, event="error", cooldown_applied=False)
                 return err.code, headers, [raw.encode("utf-8")], request_id
             except (URLError, TimeoutError, OSError) as err:
+                # Dashboard cancellation closes the registered response to interrupt a
+                # blocked first-byte read.  That close commonly surfaces here as a
+                # transport error, but it is request-local cancellation, not upstream
+                # health evidence and must not enter fallback/cooldown handling.
+                if self.observability.cancellation_requested(request_id):
+                    if resp:
+                        self.observability.close_live_response(request_id, resp)
+                    lock_released = self.concurrency.release(upstream_lock)
+                    self._finalize_cancelled(
+                        request_id,
+                        path,
+                        requested_label,
+                        group=group,
+                        candidate=candidate,
+                        attempt=attempt,
+                        lock_released=lock_released,
+                    )
+                    error_body = json.dumps({"error": {"message": "请求已由用户终止", "type": "request_cancelled", "code": "manual_cancelled", "request_id": request_id}}, ensure_ascii=False).encode("utf-8")
+                    return 499, {"Content-Type": "application/json; charset=utf-8"}, [error_body], request_id
                 if resp:
-                    resp.close()
+                    self.observability.close_live_response(request_id, resp)
                 self.concurrency.release(upstream_lock)
                 duration_ms = int((time.perf_counter() - started_at) * 1000)
                 last_error = err

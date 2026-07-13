@@ -13,6 +13,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app import ArkProxyRouter, ConfigStore, RouteContext
+from linrouter_core.observability import ObservabilityService
+from linrouter_core.runtime.router_runtime import _read_sse_frame
 
 
 def get_free_port() -> int:
@@ -21,7 +23,7 @@ def get_free_port() -> int:
         return int(sock.getsockname()[1])
 
 
-def build_config(port: int, *, serial_protection: bool = False, stream_idle_timeout: int = 5) -> dict:
+def build_config(port: int, *, serial_protection: bool = False, stream_idle_timeout: int = 5, model_count: int = 1) -> dict:
     group_id = uuid.uuid4().hex
     return {
         "groups": [{
@@ -36,13 +38,13 @@ def build_config(port: int, *, serial_protection: bool = False, stream_idle_time
         }],
         "models": [{
             "id": uuid.uuid4().hex,
-            "name": "same-model",
+            "name": "same-model" if index == 0 else f"backup-model-{index}",
             "ep_id": "gpt-test",
             "upstream_model": "gpt-test",
             "group_id": group_id,
             "api_key": "sk-test",
             "usable": True,
-        }],
+        } for index in range(model_count)],
     }
 
 
@@ -103,6 +105,62 @@ class ConcurrentTerminalHandler(BaseHTTPRequestHandler):
         return
 
 
+class BlockingNonStreamHandler(BaseHTTPRequestHandler):
+    release = threading.Event()
+    started = threading.Event()
+    lock = threading.Lock()
+    request_count = 0
+
+    @classmethod
+    def reset(cls) -> None:
+        cls.release = threading.Event()
+        cls.started = threading.Event()
+        cls.request_count = 0
+
+    def do_POST(self) -> None:
+        self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        with type(self).lock:
+            type(self).request_count += 1
+            type(self).started.set()
+        type(self).release.wait(5)
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(b'{"id":"first-response"}')
+        self.wfile.flush()
+
+    def log_message(self, _format: str, *_args: object) -> None:
+        return
+
+
+class ReceivingResponseHandler(BaseHTTPRequestHandler):
+    body_release = threading.Event()
+    response_started = threading.Event()
+
+    @classmethod
+    def reset(cls) -> None:
+        cls.body_release = threading.Event()
+        cls.response_started = threading.Event()
+
+    def do_POST(self) -> None:
+        self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(b'{\"id\":\"cancelled-before-success\"}')))
+            self.end_headers()
+            self.wfile.flush()
+            type(self).response_started.set()
+            type(self).body_release.wait(5)
+            self.wfile.write(b'{"id":"cancelled-before-success"}')
+            self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            return
+
+    def log_message(self, _format: str, *_args: object) -> None:
+        return
+
+
 class ImmediateTerminalHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         content_length = int(self.headers.get("Content-Length") or 0)
@@ -143,6 +201,38 @@ class IdleAfterFirstChunkHandler(BaseHTTPRequestHandler):
         return
 
 
+class DelayedFirstChunkHandler(BaseHTTPRequestHandler):
+    started = threading.Event()
+    release = threading.Event()
+    lock = threading.Lock()
+    request_count = 0
+
+    @classmethod
+    def reset(cls) -> None:
+        cls.started = threading.Event()
+        cls.release = threading.Event()
+        cls.request_count = 0
+
+    def do_POST(self) -> None:
+        self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        with type(self).lock:
+            type(self).request_count += 1
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.end_headers()
+        self.wfile.flush()
+        type(self).started.set()
+        try:
+            type(self).release.wait(5)
+            self.wfile.write(b'data: {"type":"response.completed"}\n\n')
+            self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            return
+
+    def log_message(self, _format: str, *_args: object) -> None:
+        return
+
+
 def start_server(handler_type: type[BaseHTTPRequestHandler]) -> ThreadingHTTPServer:
     server = ThreadingHTTPServer(("127.0.0.1", get_free_port()), handler_type)
     server.daemon_threads = True
@@ -150,8 +240,30 @@ def start_server(handler_type: type[BaseHTTPRequestHandler]) -> ThreadingHTTPSer
     return server
 
 
-def stream_payload(content: str) -> dict:
-    return {"model": "same-model", "messages": [{"role": "user", "content": content}], "stream": True}
+def stream_payload(content: str, model: str = "same-model") -> dict:
+    return {"model": model, "messages": [{"role": "user", "content": content}], "stream": True}
+
+
+def test_sse_reader_forwards_only_complete_event_frames() -> None:
+    lines = iter([
+        b"event: response.created\n",
+        b"data: {\"type\":\"response.created\"}\n",
+        b"\n",
+    ])
+
+    frame = _read_sse_frame(lambda _timeout: next(lines, b""), 5)
+
+    assert frame == (
+        b"event: response.created\n"
+        b"data: {\"type\":\"response.created\"}\n\n"
+    )
+    assert frame.endswith(b"\n\n")
+
+
+def test_sse_reader_skips_leading_blank_lines_and_preserves_eof_buffer() -> None:
+    lines = iter([b"\n", b"data: partial\n"])
+
+    assert _read_sse_frame(lambda _timeout: next(lines, b""), 5) == b"data: partial\n"
 
 
 def test_waf_compatible_same_candidate_streams_run_in_parallel_and_finalize_before_eof() -> None:
@@ -186,6 +298,7 @@ def test_waf_compatible_same_candidate_streams_run_in_parallel_and_finalize_befo
             logs_by_request = {item.request_id: item for item in router.logs if item.request_id in {request_a, request_b}}
             assert "completion_signal=response.completed" in logs_by_request[request_a].detail
             assert "completion_signal=[DONE]" in logs_by_request[request_b].detail
+            assert all("upstream_terminal_received=true" in item.detail for item in logs_by_request.values())
             assert all("lifecycle=stream_done" in item.detail for item in logs_by_request.values())
             assert all("request_concurrency=parallel" in item.detail for item in logs_by_request.values())
             assert not any(item.event in {"waf_lock_timeout", "serial_protection_timeout"} for item in router.logs)
@@ -233,6 +346,7 @@ def test_stream_eof_remains_a_compatible_completion_signal() -> None:
             log = next(item for item in router.logs if item.request_id == request_id)
             assert "lifecycle=stream_done" in log.detail
             assert "completion_signal=eof" in log.detail
+            assert "upstream_terminal_missing=true" in log.detail
     finally:
         upstream.shutdown()
         upstream.server_close()
@@ -256,3 +370,205 @@ def test_post_first_byte_idle_timeout_is_not_recorded_as_client_disconnect() -> 
         IdleAfterFirstChunkHandler.release.set()
         upstream.shutdown()
         upstream.server_close()
+
+
+def test_dashboard_cancel_while_waiting_first_byte_isolated_from_health_and_fallback() -> None:
+    DelayedFirstChunkHandler.reset()
+    upstream = start_server(DelayedFirstChunkHandler)
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            router, context = make_router(tmp, upstream.server_address[1], serial_protection=True, model_count=2)
+            for model in ("same-model", "lin-router-auto"):
+                results: dict[str, tuple[int, dict[str, str], object, str]] = {}
+                request_thread = threading.Thread(
+                    target=lambda: results.setdefault("result", router.stream("/v1/chat/completions", stream_payload("delayed", model), context))
+                )
+                request_thread.start()
+                assert DelayedFirstChunkHandler.started.wait(1)
+                deadline = time.monotonic() + 1
+                request_id = ""
+                while time.monotonic() < deadline:
+                    waiting = [item for item in router.live_requests_payload()["requests"] if item["stage"] == "waiting_first_byte"]
+                    if waiting:
+                        request_id = waiting[0]["request_id"]
+                        break
+                    time.sleep(0.01)
+                assert request_id
+                assert router.cancel_live_request(request_id)["state"] == "cancellation_requested"
+                request_thread.join(1)
+                assert not request_thread.is_alive()
+
+                status, _headers, body, returned_request_id = results["result"]
+                assert status == 499
+                assert returned_request_id == request_id
+                assert json.loads(b"".join(body)) == {"error": {
+                    "message": "请求已由用户终止",
+                    "type": "request_cancelled",
+                    "code": "manual_cancelled",
+                    "request_id": request_id,
+                }}
+                cancelled = [item for item in router.logs if item.request_id == request_id]
+                assert len(cancelled) == 1
+                assert cancelled[0].event == "request_cancelled"
+                assert cancelled[0].failure_scope == "client_cancelled"
+                assert cancelled[0].cooldown_applied is False
+                assert "lock_released=true" in cancelled[0].detail
+                assert not any(item.request_id == request_id and item.event in {"network", "fallback", "cooldown", "serial_protection_timeout", "stream_timeout"} for item in router.logs)
+                assert all(model_item.cooldown_until == 0 for model_item in router.store.models)
+                assert router.live_requests_payload()["count"] == 0
+                assert DelayedFirstChunkHandler.request_count == 1
+                DelayedFirstChunkHandler.release.set()
+                DelayedFirstChunkHandler.reset()
+    finally:
+        DelayedFirstChunkHandler.release.set()
+        upstream.shutdown()
+        upstream.server_close()
+
+
+def test_dashboard_cancel_closes_only_target_stream_without_cooldown() -> None:
+    ConcurrentTerminalHandler.reset()
+    upstream = start_server(ConcurrentTerminalHandler)
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            router, context = make_router(tmp, upstream.server_address[1])
+            status, _headers, stream, request_id = router.stream("/v1/chat/completions", stream_payload("completed"), context)
+            assert status == 200
+            assert b"working" in next(stream)
+            assert router.cancel_live_request(request_id) == {
+                "ok": True,
+                "request_id": request_id,
+                "state": "cancellation_requested",
+                "message": "已发送终止指令，正在释放本地请求资源。",
+            }
+            assert router.cancel_live_request(request_id)["state"] == "cancellation_already_requested"
+            stream.close()
+            log = next(item for item in router.logs if item.request_id == request_id)
+            assert log.event == "request_cancelled"
+            assert log.failure_scope == "client_cancelled"
+            assert log.cooldown_applied is False
+            assert "lifecycle=manual_cancelled" in log.detail
+            assert router.live_requests_payload()["count"] == 0
+    finally:
+        ConcurrentTerminalHandler.release.set()
+        ConcurrentTerminalHandler.hold_open.set()
+        upstream.shutdown()
+        upstream.server_close()
+
+
+def test_dashboard_cancel_while_non_stream_receives_response_is_not_success_or_network_failure() -> None:
+    ReceivingResponseHandler.reset()
+    upstream = start_server(ReceivingResponseHandler)
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            router, context = make_router(tmp, upstream.server_address[1])
+            payload = {"model": "same-model", "messages": [{"role": "user", "content": "non-stream"}]}
+            result: dict[str, tuple[int, dict[str, str], bytes]] = {}
+            request_thread = threading.Thread(
+                target=lambda: result.setdefault("response", router.call("/v1/chat/completions", payload, context))
+            )
+            request_thread.start()
+            assert ReceivingResponseHandler.response_started.wait(1)
+            # The server has sent headers, but the client worker still has to
+            # return from urllib setup and publish its live-request entry.
+            deadline = time.monotonic() + 3
+            request_id = ""
+            while time.monotonic() < deadline:
+                active = router.live_requests_payload()["requests"]
+                if active:
+                    request_id = active[0]["request_id"]
+                    break
+                time.sleep(0.01)
+            assert request_id
+            assert router.cancel_live_request(request_id)["state"] == "cancellation_requested"
+            ReceivingResponseHandler.body_release.set()
+            request_thread.join(1)
+            assert not request_thread.is_alive()
+
+            status, _headers, body = result["response"]
+            assert status == 499
+            assert json.loads(body)["error"]["code"] == "manual_cancelled"
+            cancelled = [item for item in router.logs if item.request_id == request_id]
+            assert len(cancelled) == 1
+            assert cancelled[0].event == "request_cancelled"
+            assert cancelled[0].failure_scope == "client_cancelled"
+            assert cancelled[0].cooldown_applied is False
+            assert not any(item.request_id == request_id and item.event in {"ok", "network", "fallback", "cooldown"} for item in router.logs)
+            assert router.store.models[0].cooldown_until == 0
+            assert router.live_requests_payload()["count"] == 0
+    finally:
+        ReceivingResponseHandler.body_release.set()
+        upstream.shutdown()
+        upstream.server_close()
+
+
+def test_dashboard_cancel_while_non_stream_waits_for_serial_protection() -> None:
+    BlockingNonStreamHandler.reset()
+    upstream = start_server(BlockingNonStreamHandler)
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            router, context = make_router(tmp, upstream.server_address[1], serial_protection=True)
+            payload = {"model": "same-model", "messages": [{"role": "user", "content": "non-stream"}]}
+            results: dict[str, tuple[int, dict[str, str], bytes]] = {}
+            first = threading.Thread(target=lambda: results.setdefault("first", router.call("/v1/chat/completions", payload, context)))
+            first.start()
+            assert BlockingNonStreamHandler.started.wait(1)
+
+            second = threading.Thread(target=lambda: results.setdefault("second", router.call("/v1/chat/completions", payload, context)))
+            second.start()
+            deadline = time.monotonic() + 1
+            second_request_id = ""
+            while time.monotonic() < deadline:
+                waiting = [item for item in router.live_requests_payload()["requests"] if item["stage"] == "waiting_serial_protection"]
+                if waiting:
+                    second_request_id = waiting[0]["request_id"]
+                    break
+                time.sleep(0.01)
+            assert second_request_id
+            assert router.cancel_live_request(second_request_id)["state"] == "cancellation_requested"
+            second.join(1)
+            assert not second.is_alive()
+
+            status, _headers, body = results["second"]
+            assert status == 499
+            assert json.loads(body) == {"error": {
+                "message": "请求已由用户终止",
+                "type": "request_cancelled",
+                "code": "manual_cancelled",
+                "request_id": second_request_id,
+            }}
+            assert BlockingNonStreamHandler.request_count == 1
+            cancelled = next(item for item in router.logs if item.request_id == second_request_id)
+            assert cancelled.event == "request_cancelled"
+            assert cancelled.failure_scope == "client_cancelled"
+            assert cancelled.cooldown_applied is False
+            assert "lock_released=false" in cancelled.detail
+            assert not any(item.event == "serial_protection_timeout" and item.request_id == second_request_id for item in router.logs)
+            assert router.store.models[0].cooldown_until == 0
+
+            BlockingNonStreamHandler.release.set()
+            first.join(1)
+            assert not first.is_alive()
+            assert results["first"][0] == 200
+    finally:
+        BlockingNonStreamHandler.release.set()
+        upstream.shutdown()
+        upstream.server_close()
+
+
+def test_dashboard_cancellation_closes_registered_response_once() -> None:
+    class CloseCountingResponse:
+        def __init__(self) -> None:
+            self.close_calls = 0
+
+        def close(self) -> None:
+            self.close_calls += 1
+
+    with tempfile.TemporaryDirectory() as tmp:
+        observability = ObservabilityService(Path(tmp) / "logs.jsonl", now=time.time, sanitize_detail=lambda value: value)
+        response = CloseCountingResponse()
+        observability.start_live_request("cancel-once", "/v1/chat/completions", "same-model", stream=True)
+        observability.set_live_response("cancel-once", response)
+        assert observability.request_cancellation("cancel-once")["state"] == "cancellation_requested"
+        assert response.close_calls == 1
+        assert observability.close_live_response("cancel-once", response) is False
+        assert response.close_calls == 1

@@ -315,6 +315,9 @@ class ArkProxyRouter:
             finish=self._live_request_finish,
             add_log=self.add_log,
             patch_stream=self.patch_stream_lifecycle,
+            cancellation_requested=self._cancellation_requested,
+            set_response=self._set_live_response,
+            close_response=self._close_live_response,
         )
         self.runtime = CandidateRuntime(
             self.candidate_health, candidate_state, self.execution_policy, preparation,
@@ -489,6 +492,7 @@ class ArkProxyRouter:
         cooldown_applied: Optional[bool] = None,
         failure_scope: str = "",
         completion_signal: str = "",
+        final_event: str = "",
     ) -> bool:
         patched = self.observability.patch_stream_lifecycle(
             request_id, attempt, candidate_label, usage, usage_source,
@@ -496,7 +500,7 @@ class ArkProxyRouter:
             chunks_received=chunks_received, bytes_received=bytes_received, duration_ms=duration_ms,
             lock_wait_ms=lock_wait_ms, lock_release_reason=lock_release_reason,
             cooldown_applied=cooldown_applied, failure_scope=failure_scope,
-            completion_signal=completion_signal,
+            completion_signal=completion_signal, final_event=final_event,
         )
         self.log_write_error = self.observability.log_write_error
         return patched
@@ -1270,18 +1274,25 @@ class ArkProxyRouter:
         return candidate.group.provider_type == PROVIDER_RELAY and bool(getattr(candidate.group, "serial_protection", False))
 
     @staticmethod
-    def _release_lock(lock: Optional[threading.Lock]) -> None:
-        if lock:
-            lock.release()
+    def _release_lock(lock: Optional[threading.Lock]) -> bool:
+        if not lock:
+            return False
+        lock.release()
+        return True
 
-    def _acquire_upstream_lock(self, lock: Optional[threading.Lock], timeout: float = 10.0) -> Tuple[bool, int]:
-        """尝试获取显式串行保护锁，返回 (是否成功, 等待毫秒数)。"""
+    def _acquire_upstream_lock(self, lock: Optional[threading.Lock], timeout: float = 10.0, request_id: str = "") -> Tuple[bool, int]:
+        """Acquire serial protection in short waits so an active request can be cancelled promptly."""
         if not lock:
             return True, 0
         started = time.perf_counter()
-        acquired = lock.acquire(timeout=timeout)
-        wait_ms = int((time.perf_counter() - started) * 1000)
-        return acquired, wait_ms
+        while True:
+            remaining = timeout - (time.perf_counter() - started)
+            if remaining <= 0:
+                return False, int((time.perf_counter() - started) * 1000)
+            if lock.acquire(timeout=min(0.1, remaining)):
+                return True, int((time.perf_counter() - started) * 1000)
+            if request_id and self._cancellation_requested(request_id):
+                return False, int((time.perf_counter() - started) * 1000)
 
     @staticmethod
     def _append_detail(detail: str, suffix: str) -> str:
@@ -1297,6 +1308,24 @@ class ArkProxyRouter:
 
     def _live_request_finish(self, request_id: str, status: str = "done") -> None:
         self.observability.finish_live_request(request_id, status)
+
+    def _cancellation_requested(self, request_id: str) -> bool:
+        return self.observability.cancellation_requested(request_id)
+
+    def is_live_request_cancelled(self, request_id: str) -> bool:
+        return self.observability.cancellation_requested(request_id)
+
+    def _set_live_response(self, request_id: str, response: Any) -> None:
+        self.observability.set_live_response(request_id, response)
+
+    def _close_live_response(self, request_id: str, response: Any = None) -> bool:
+        return self.observability.close_live_response(request_id, response)
+
+    def cancel_live_request(self, request_id: str, source: str = "dashboard") -> Dict[str, Any]:
+        return self.observability.request_cancellation(request_id, source)
+
+    def record_stream_transport_event(self, request_id: str, event: str) -> None:
+        self.observability.record_stream_transport_event(request_id, event)
 
     def live_requests_payload(self) -> Dict[str, Any]:
         return self.observability.live_requests_payload()
@@ -1652,6 +1681,7 @@ class ArkProxyRouter:
 
 class RouterHandler(BaseHTTPRequestHandler):
     server_version = "LinRouter/2.0"
+    protocol_version = "HTTP/1.1"
     _all_models_failed_error_type = AllModelsFailedError
 
     @property
