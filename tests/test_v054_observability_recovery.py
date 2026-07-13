@@ -57,8 +57,8 @@ def test_v054_live_diagnose_and_recover_contracts():
             router._live_request_start("live-123456", "/v1/chat/completions", "agg-cheap", stream=True)
             router._live_request_update(
                 "live-123456",
-                stage="waiting_waf_lock",
-                stage_label="等待 WAF 锁",
+                stage="waiting_serial_protection",
+                stage_label="等待串行保护",
                 group="relay",
                 candidate="cheap",
                 possible_reason="候选正在处理大上下文请求",
@@ -66,12 +66,12 @@ def test_v054_live_diagnose_and_recover_contracts():
             status, live = get_json(port, "/api/live-requests")
             assert status == 200
             assert live["count"] == 1
-            assert live["requests"][0]["stage"] == "waiting_waf_lock"
+            assert live["requests"][0]["stage"] == "waiting_serial_protection"
             assert live["requests"][0]["request_id_short"] == "live-123"
 
             status, runtime = get_json(port, "/api/runtime-state")
             assert status == 200
-            assert runtime["live_requests"][0]["stage_label"] == "等待 WAF 锁"
+            assert runtime["live_requests"][0]["stage_label"] == "等待串行保护"
 
             router._live_request_finish("live-123456")
             status, live_after = get_json(port, "/api/live-requests")
@@ -128,7 +128,7 @@ def test_v054_live_diagnose_and_recover_contracts():
             model.cooldown_until = 9999999999
             model.usable = False
             server.store.save()
-            router._manual_probe_candidate = lambda candidate: (False, "waf_lock_wait_timeout", "raw upstream body must not be logged")
+            router._manual_probe_candidate = lambda candidate: (False, "serial_protection_wait_timeout", "raw upstream body must not be logged")
             status, busy_probe = post_json(port, "/api/models/m1/recover")
             assert status == 400
             assert busy_probe["code"] == "probe_failed"
@@ -186,7 +186,7 @@ def test_v054_frontend_contracts():
     assert "lin-router-sidebar-collapsed" not in app_js
     assert "sidebar-collapse" not in tree_js
     assert "实时请求观测" in dashboard_js
-    assert "waiting_waf_lock" in dashboard_js
+    assert "waiting_serial_protection" in dashboard_js
     assert "智能诊断" in logs_js
     assert "请求级错误 / 上游拒绝" in logs_js
     assert "formatDetailPreview(item.detail)" not in logs_js

@@ -9,21 +9,27 @@ def diagnose_logs(logs: List[RequestLog], sanitize_detail: Callable[[str], str])
     """Compute an explanation from completed records without changing runtime state."""
     text = "\n".join(f"{log.status} {log.event} {log.failure_scope} {log.detail}" for log in logs).lower()
     final = next(
-        (log for log in reversed(logs) if str(log.status).startswith("2") or log.event in {"error", "network", "stream_idle_timeout", "waf_lock_timeout"}),
+        (log for log in reversed(logs) if str(log.status).startswith("2") or log.event in {"error", "network", "stream_idle_timeout", "serial_protection_timeout", "waf_lock_timeout"}),
         logs[-1],
     )
     title, severity, root_cause = "请求已完成", "success", "request_completed"
     scope, suggestion = final.failure_scope or "request", "无需处理。"
     actions: List[Dict[str, str]] = []
     cooldown_applied = any(bool(log.cooldown_applied) for log in logs)
-    if "waf_lock_wait_timeout" in text or "candidate_busy" in text or "large_task_in_progress" in text:
-        title, severity, root_cause, scope = "候选忙 / 等待 WAF 锁超时", "warning", "candidate_busy", "local_lock"
-        suggestion = "候选正在处理大上下文请求，系统已尝试切换到下一个候选；通常无需清冷却。"
+    if "serial_protection_wait_timeout" in text or "waf_lock_wait_timeout" in text or "candidate_busy" in text or "large_task_in_progress" in text:
+        title, severity, root_cause, scope = "候选忙 / 串行保护等待超时", "warning", "candidate_busy", "local_lock"
+        suggestion = "该连接组已开启串行保护，系统已尝试切换到下一个候选；通常无需清冷却。"
+    elif "stream_failed" in text:
+        title, severity, root_cause, scope = "上游流式响应失败", "error", "stream_failed", "upstream"
+        suggestion = "上游已明确返回失败终态；已保留已收到的流内容，不会混入其他候选。"
+    elif "stream_incomplete" in text:
+        title, severity, root_cause, scope = "上游流式响应不完整", "warning", "stream_incomplete", "upstream"
+        suggestion = "上游已明确返回不完整终态；已保留已收到的流内容，不会混入其他候选。"
     elif "stream_idle_timeout" in text:
         title, severity, root_cause, scope = "上游流式响应空闲超时", "error", "stream_idle_timeout", "upstream"
         suggestion = "建议稍后重试，或对冷却中的单个模型/成员执行“重试恢复”。"
         actions.append({"type": "recover", "label": "重试恢复冷却对象"})
-    elif "read_timeout" in text or "timed out" in text or "timeout" in text and "waf_lock" not in text:
+    elif "read_timeout" in text or "timed out" in text or "timeout" in text and "waf_lock" not in text and "serial_protection" not in text:
         title, severity, root_cause, scope = "上游请求超时", "error", "upstream_timeout", "upstream"
         suggestion = "如果该候选已进入冷却，可单点重试恢复；如果频繁出现，建议降低优先级或检查中转站。"
         actions.append({"type": "recover", "label": "重试恢复冷却对象"})

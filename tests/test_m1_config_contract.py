@@ -32,7 +32,7 @@ def test_config_round_trip_preserves_complete_payload():
             "id": "g1", "name": "relay", "provider_type": "relay",
             "base_url": "https://relay.example/v1", "route_key": "lr-g1",
             "auto_model_name": "router-auto", "auto_model_cooldown_minutes": 7,
-            "stream_idle_timeout": 111, "waf_compatible": True,
+            "stream_idle_timeout": 111, "waf_compatible": True, "serial_protection": True,
             "waf_accept_policy": "all", "waf_client_mode": "auto",
             "reasoning_support": "supported", "upstream_models": [{"id": "m-up"}],
             "upstream_models_fetched_at": "2026-07-11 10:00:00",
@@ -89,6 +89,7 @@ def test_empty_and_legacy_group_defaults_remain_compatible():
     legacy = ConnectionGroup.from_dict({"id": "old", "name": "old"})
     assert explicit_empty.base_url == ""
     assert legacy.base_url
+    assert legacy.serial_protection is False
 
 
 def test_debug_capture_replay_uses_injected_usage_callbacks():

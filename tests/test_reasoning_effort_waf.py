@@ -386,7 +386,7 @@ def test_codex_max_and_ultra_are_preserved_through_codex_direct_path():
             upstream.shutdown()
             upstream.server_close()
 
-def test_waf_smart_mode_bypasses_codex_but_keeps_hermes_compatible():
+def test_waf_smart_mode_keeps_headers_independent_from_serial_protection():
     with tempfile.TemporaryDirectory() as tmp:
         config_path = Path(tmp) / "config.json"
         write_config(config_path, free_port())
@@ -413,9 +413,13 @@ def test_waf_smart_mode_bypasses_codex_but_keeps_hermes_compatible():
             assert codex_out["User-Agent"] == "Codex/1.0"
             assert codex_out["X-Codex-Beta-Features"] == "responses"
             assert router._waf_decision(group, hermes_headers) == "waf_compatible"
-            assert router._candidate_lock_enabled(candidate, hermes_headers) is True
+            assert router._candidate_lock_enabled(candidate, hermes_headers) is False
             assert hermes_out["user-agent"] != "Hermes/1.0"
             assert "Mozilla/5.0" in hermes_out["user-agent"]
+
+            group.serial_protection = True
+            assert router._candidate_lock_enabled(candidate, codex_headers) is True
+            assert router._candidate_lock_enabled(candidate, hermes_headers) is True
 
             body = b'{"model":"target-model","reasoning":{"effort":"high"}}'
             detail = router._debug_detail(candidate, "client-model", "https://relay.example/v1/responses", "raw", body, {"model": "target-model", "reasoning": {"effort": "high"}}, codex_out, "ok")
@@ -423,5 +427,6 @@ def test_waf_smart_mode_bypasses_codex_but_keeps_hermes_compatible():
             assert "waf_applied=false" in detail
             assert "waf_decision=codex_direct" in detail
             assert "client_family=codex" in detail
+            assert "request_concurrency=serial_protection" in detail
         finally:
             server.server_close()

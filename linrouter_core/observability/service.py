@@ -36,6 +36,7 @@ class ObservabilityService:
         self._sanitize_detail = sanitize_detail
         self._runtime_snapshot_provider = runtime_snapshot_provider
         self._repository = LogRepository(log_file, self._log_from_row)
+        self._logs_lock = threading.RLock()
         self._live_requests: Dict[str, Dict[str, Any]] = {}
         self._live_requests_lock = threading.Lock()
         self.load()
@@ -112,41 +113,44 @@ class ObservabilityService:
         request_id: str = "", attempt: int = 0, usage_source: str = "", cooldown_applied: bool = False,
         failure_scope: str = "",
     ) -> None:
-        detail = self._sanitize_detail(detail)
-        item = RequestLog(
-            self._now(), path, model, status, detail[:5000], duration_ms, prompt_tokens, completion_tokens,
-            total_tokens, cached_tokens, reasoning_tokens,
-            getattr(group, "id", "") if group else self.detail_value(detail, "group_id"),
-            getattr(group, "name", "") if group else self.detail_value(detail, "group_name"),
-            getattr(group, "provider_type", "") if group else self.detail_value(detail, "provider"),
-            event or self.infer_event(status, detail), request_id, attempt, usage_source,
-            requested_model=self.detail_value(detail, "requested"), resolved_as=self.detail_value(detail, "resolved_as"),
-            aggregate_model=self.detail_value(detail, "aggregate_model"), aggregate_id=self.detail_value(detail, "aggregate_id"),
-            aggregate_member_id=self.detail_value(detail, "aggregate_member_id"), selected_group=self.detail_value(detail, "selected_group"),
-            selected_model=self.detail_value(detail, "selected_model"), selected_upstream_model=self.detail_value(detail, "selected_upstream_model"),
-            selection_reason=self.detail_value(detail, "selection_reason"), fallback_index=int(self.detail_value(detail, "fallback_index") or 0),
-            fallback_chain=self.detail_value(detail, "fallback_chain"), member_cooled_down=self.detail_value(detail, "member_cooled_down") == "true",
-            cooldown_applied=cooldown_applied or self.detail_value(detail, "cooldown_applied") == "true",
-            failure_scope=failure_scope or self.detail_value(detail, "failure_scope") or "",
-        )
-        self.logs.insert(0, item)
-        self._append(item)
-        del self.logs[80:]
-        self._trim()
+        with self._logs_lock:
+            detail = self._sanitize_detail(detail)
+            item = RequestLog(
+                self._now(), path, model, status, detail[:5000], duration_ms, prompt_tokens, completion_tokens,
+                total_tokens, cached_tokens, reasoning_tokens,
+                getattr(group, "id", "") if group else self.detail_value(detail, "group_id"),
+                getattr(group, "name", "") if group else self.detail_value(detail, "group_name"),
+                getattr(group, "provider_type", "") if group else self.detail_value(detail, "provider"),
+                event or self.infer_event(status, detail), request_id, attempt, usage_source,
+                requested_model=self.detail_value(detail, "requested"), resolved_as=self.detail_value(detail, "resolved_as"),
+                aggregate_model=self.detail_value(detail, "aggregate_model"), aggregate_id=self.detail_value(detail, "aggregate_id"),
+                aggregate_member_id=self.detail_value(detail, "aggregate_member_id"), selected_group=self.detail_value(detail, "selected_group"),
+                selected_model=self.detail_value(detail, "selected_model"), selected_upstream_model=self.detail_value(detail, "selected_upstream_model"),
+                selection_reason=self.detail_value(detail, "selection_reason"), fallback_index=int(self.detail_value(detail, "fallback_index") or 0),
+                fallback_chain=self.detail_value(detail, "fallback_chain"), member_cooled_down=self.detail_value(detail, "member_cooled_down") == "true",
+                cooldown_applied=cooldown_applied or self.detail_value(detail, "cooldown_applied") == "true",
+                failure_scope=failure_scope or self.detail_value(detail, "failure_scope") or "",
+            )
+            self.logs.insert(0, item)
+            self._append(item)
+            del self.logs[80:]
+            self._trim()
 
     def _append(self, item: RequestLog) -> None:
-        try:
-            self._repository.append(item)
-        except Exception as exc:
-            self.log_write_error = f"日志写入失败: {exc}"
-            self.logs.insert(0, RequestLog(self._now(), "/system/log", "-", "warn", f"日志写入失败: {exc}; file={self.log_file}", group_name="系统", provider_type="system", event="system"))
-            del self.logs[80:]
+        with self._logs_lock:
+            try:
+                self._repository.append(item)
+            except Exception as exc:
+                self.log_write_error = f"日志写入失败: {exc}"
+                self.logs.insert(0, RequestLog(self._now(), "/system/log", "-", "warn", f"日志写入失败: {exc}; file={self.log_file}", group_name="系统", provider_type="system", event="system"))
+                del self.logs[80:]
 
     def trim(self, max_lines: int = 1000) -> None:
-        try:
-            self._repository.trim(max_lines)
-        except Exception as exc:
-            self.log_write_error = f"日志滚动失败: {exc}"
+        with self._logs_lock:
+            try:
+                self._repository.trim(max_lines)
+            except Exception as exc:
+                self.log_write_error = f"日志滚动失败: {exc}"
 
     def _trim(self) -> None:
         self.trim()
@@ -168,47 +172,53 @@ class ObservabilityService:
             return
 
     def _find_stream_log(self, request_id: str, attempt: Optional[int] = None, candidate_label: str = "") -> Optional[RequestLog]:
-        for item in self.logs:
-            if item.request_id != request_id or item.event != "stream_ok":
-                continue
-            if attempt is not None and item.attempt != attempt:
-                continue
-            if candidate_label and item.model != candidate_label:
-                continue
-            return item
-        return None
+        with self._logs_lock:
+            for item in self.logs:
+                if item.request_id != request_id or item.event != "stream_ok":
+                    continue
+                if attempt is not None and item.attempt != attempt:
+                    continue
+                if candidate_label and item.model != candidate_label:
+                    continue
+                return item
+            return None
 
     def patch_stream_lifecycle(
         self, request_id: str, attempt: int, candidate_label: str, usage: Tuple[int, int, int, int, int],
         usage_source: str, *, final_status: str, lifecycle: str, final_result: str, chunks_received: int,
         bytes_received: int, duration_ms: Optional[int] = None, lock_wait_ms: Optional[int] = None,
         lock_release_reason: str = "", cooldown_applied: Optional[bool] = None, failure_scope: str = "",
+        completion_signal: str = "",
     ) -> bool:
-        item = self._find_stream_log(request_id, attempt, candidate_label)
-        if not item:
-            return False
-        item.status = final_status
-        item.duration_ms = duration_ms if duration_ms is not None else item.duration_ms
-        item.prompt_tokens, item.completion_tokens, item.total_tokens, item.cached_tokens, item.reasoning_tokens = usage
-        item.usage_source = usage_source
-        if cooldown_applied is not None:
-            item.cooldown_applied = cooldown_applied
-        if failure_scope:
-            item.failure_scope = failure_scope
-        suffix_parts = ["stream_finalized=true", f"lifecycle={lifecycle}", f"final_result={final_result}", f"chunks_received={chunks_received}", f"bytes_received={bytes_received}", "lock_released=true"]
-        if lock_wait_ms is not None:
-            suffix_parts.append(f"lock_wait_ms={lock_wait_ms}")
-        if lock_release_reason:
-            suffix_parts.append(f"lock_release_reason={lock_release_reason}")
-        item.detail = self.append_detail(item.detail, "; ".join(suffix_parts))
-        self.rewrite_log_file()
-        return True
+        with self._logs_lock:
+            item = self._find_stream_log(request_id, attempt, candidate_label)
+            if not item:
+                return False
+            item.status = final_status
+            item.duration_ms = duration_ms if duration_ms is not None else item.duration_ms
+            item.prompt_tokens, item.completion_tokens, item.total_tokens, item.cached_tokens, item.reasoning_tokens = usage
+            item.usage_source = usage_source
+            if cooldown_applied is not None:
+                item.cooldown_applied = cooldown_applied
+            if failure_scope:
+                item.failure_scope = failure_scope
+            suffix_parts = ["stream_finalized=true", f"lifecycle={lifecycle}", f"final_result={final_result}", f"chunks_received={chunks_received}", f"bytes_received={bytes_received}", "lock_released=true"]
+            if completion_signal:
+                suffix_parts.append(f"completion_signal={completion_signal}")
+            if lock_wait_ms is not None:
+                suffix_parts.append(f"lock_wait_ms={lock_wait_ms}")
+            if lock_release_reason:
+                suffix_parts.append(f"lock_release_reason={lock_release_reason}")
+            item.detail = self.append_detail(item.detail, "; ".join(suffix_parts))
+            self.rewrite_log_file()
+            return True
 
     def rewrite_log_file(self) -> None:
-        try:
-            self._repository.rewrite_oldest_first(self.logs)
-        except Exception as exc:
-            self.log_write_error = f"日志回写失败: {exc}"
+        with self._logs_lock:
+            try:
+                self._repository.rewrite_oldest_first(self.logs)
+            except Exception as exc:
+                self.log_write_error = f"日志回写失败: {exc}"
 
     def export_logs_csv(self) -> str:
         output = io.StringIO()
@@ -251,9 +261,9 @@ class ObservabilityService:
                 row = dict(item)
                 elapsed_ms = int((now - float(row.get("started_at") or now)) * 1000)
                 row["elapsed_ms"] = elapsed_ms
-                row["slow"] = elapsed_ms >= 10000 or str(row.get("stage") or "") in {"waiting_waf_lock", "waiting_first_byte"} and elapsed_ms >= 5000
+                row["slow"] = elapsed_ms >= 10000 or str(row.get("stage") or "") in {"waiting_serial_protection", "waiting_first_byte"} and elapsed_ms >= 5000
                 if row["slow"] and not row.get("possible_reason"):
-                    row["possible_reason"] = {"waiting_waf_lock": "候选可能正在处理大上下文请求，正在等待 WAF 锁", "waiting_first_byte": "上游首包较慢，可能是模型正在执行复杂任务"}.get(str(row.get("stage") or ""), "请求耗时较长，请关注上游状态")
+                    row["possible_reason"] = {"waiting_serial_protection": "该连接组已开启串行保护，正在等待同一候选完成", "waiting_first_byte": "上游首包较慢，可能是模型正在执行复杂任务"}.get(str(row.get("stage") or ""), "请求耗时较长，请关注上游状态")
                 row["request_id_short"] = str(row.get("request_id") or "")[:8]
                 items.append(row)
         items.sort(key=lambda row: row.get("started_at") or 0, reverse=True)

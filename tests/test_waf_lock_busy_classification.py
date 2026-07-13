@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""验证 WAF lock 等待超时被分类为候选忙，而不是上游 timeout cooldown。"""
+"""验证显式串行保护等待超时被分类为候选忙，而不是上游 timeout cooldown。"""
 
 import json
 import socket
@@ -26,7 +26,7 @@ class SlowStreamHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b'data: {"choices":[{"delta":{"content":"busy"}}]}\n\n')
         self.wfile.flush()
-        time.sleep(12)
+        time.sleep(0.2)
         self.wfile.write(b'data: [DONE]\n\n')
         self.wfile.flush()
 
@@ -57,6 +57,7 @@ def build_config(port):
                 "route_key": "lr-busy",
                 "auto_model_name": "lin-router-auto",
                 "waf_compatible": True,
+                "serial_protection": True,
                 "stream_idle_timeout": 20,
             }
         ],
@@ -74,7 +75,7 @@ def build_config(port):
     }
 
 
-def test_waf_lock_timeout_is_candidate_busy_not_cooldown():
+def test_serial_protection_timeout_is_candidate_busy_not_cooldown():
     port = get_free_port()
     server = start_server(SlowStreamHandler, port)
 
@@ -102,15 +103,18 @@ def test_waf_lock_timeout_is_candidate_busy_not_cooldown():
         first_chunk = next(iterator)
         assert b"busy" in first_chunk
 
+        # 直接模拟等待失败，避免为验证显式串行保护分支等待十秒。
+        router.runtime.concurrency._acquire = lambda _lock: (False, 7)
         status2, _headers2, body2, = router.call("/v1/chat/completions", {"model": "busy-model", "messages": [{"role": "user", "content": "second"}]}, ctx)
         assert status2 == 503
-        assert "候选正在处理大上下文请求" in body2[0].decode("utf-8")
-        busy_logs = [log for log in router.logs if log.event == "waf_lock_timeout"]
-        assert busy_logs, "应记录 waf_lock_timeout 日志"
+        assert "串行保护" in body2[0].decode("utf-8")
+        busy_logs = [log for log in router.logs if log.event == "serial_protection_timeout"]
+        assert busy_logs, "应记录 serial_protection_timeout 日志"
         log = busy_logs[0]
         assert log.failure_scope == "busy"
         assert log.cooldown_applied is False
         assert "fallback_reason=large_task_in_progress" in log.detail
+        assert "request_concurrency=serial_protection" in log.detail
         assert store.models[0].cooldown_until == 0
 
         iterator.close()
@@ -121,4 +125,4 @@ def test_waf_lock_timeout_is_candidate_busy_not_cooldown():
 
 
 if __name__ == "__main__":
-    test_waf_lock_timeout_is_candidate_busy_not_cooldown()
+    test_serial_protection_timeout_is_candidate_busy_not_cooldown()

@@ -1,6 +1,6 @@
 # Lin Router v0.6 前端工程
 
-Vue 3/Vite/Pinia 前端重构隔离工程。它在开发期通过 Vite 代理调用既有 Python 服务，**不修改也不覆盖仓库根目录 `static/`**；旧静态前端仍是 v0.5.6 回滚资产。
+Vue 3/Vite/Pinia 前端重构隔离工程。它在开发期通过 Vite 代理调用既有 Python 服务，**不修改也不覆盖仓库根目录 `static/`**；旧静态前端仍作为回滚资产保留。
 
 ## 运行
 

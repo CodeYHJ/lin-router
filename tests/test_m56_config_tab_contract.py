@@ -107,7 +107,7 @@ def test_action_orchestration_preserves_existing_api_contracts():
     for payload_field in [
         "provider_type: mode", "base_url:", "ark_api_key:", "api_key:",
         "auto_model_cooldown_minutes:", "stream_idle_timeout:",
-        "reasoning_support:", "waf_client_mode:", "waf_compatible:",
+        "reasoning_support:", "waf_client_mode:", "waf_compatible:", "serial_protection:",
         "waf_accept_policy:", "group_id: groupId", "upstream_model:",
         "client_model_aliases:", "cooldown_minutes:", "strategy:",
     ]:

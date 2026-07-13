@@ -4,12 +4,12 @@ import json
 from pathlib import Path
 
 from app import ArkProxyRouter, ConfigStore
-from linrouter_core.runtime import WafLockState
+from linrouter_core.runtime import SerialProtectionState
 
 
 def _router(tmp_path: Path) -> ArkProxyRouter:
     config = {
-        "groups": [{"id": "g1", "name": "relay", "provider_type": "relay", "base_url": "https://relay.example/v1", "route_key": "key", "waf_compatible": True}],
+        "groups": [{"id": "g1", "name": "relay", "provider_type": "relay", "base_url": "https://relay.example/v1", "route_key": "key", "waf_compatible": True, "serial_protection": True}],
         "models": [
             {"id": "m1", "name": "first", "ep_id": "model-1", "group_id": "g1", "api_key": "key-1", "usable": True},
             {"id": "m2", "name": "second", "ep_id": "model-2", "group_id": "g1", "api_key": "key-2", "usable": True},
@@ -50,7 +50,7 @@ def test_m3a_error_classifier_and_health_facades_preserve_contract(tmp_path: Pat
     assert router.store.models[1].last_error == ""
 
 
-def test_m3a_waf_lock_facades_preserve_shared_lock_and_busy_state(tmp_path: Path) -> None:
+def test_m3a_serial_protection_facades_preserve_shared_lock_and_busy_state(tmp_path: Path) -> None:
     router = _router(tmp_path)
     candidate = next(router._iter_upstream_candidates(None, "g1"))
 
@@ -59,7 +59,7 @@ def test_m3a_waf_lock_facades_preserve_shared_lock_and_busy_state(tmp_path: Path
     assert lock is router._candidate_lock(candidate, {})
     router._mark_stream_active(candidate, 1)
     assert router._active_stream_count(candidate) == 1
-    assert "fallback_reason=large_task_in_progress" in router._waf_lock_busy_detail(candidate, b"small", 12)
+    assert "fallback_reason=large_task_in_progress" in router._serial_protection_busy_detail(candidate, b"small", 12)
     router._mark_stream_active(candidate, -1)
     assert router._active_stream_count(candidate) == 0
-    assert isinstance(router._runtime_locks, WafLockState)
+    assert isinstance(router._runtime_locks, SerialProtectionState)

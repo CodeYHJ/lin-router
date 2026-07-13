@@ -212,10 +212,12 @@ const LogsTab = {
     if (event === 'stream_ok' && item) {
       const finalResult = this.parseDetail(item.detail).final_result;
       if (finalResult === 'stream_done') return '首包成功 / 流式完成';
+      if (finalResult === 'stream_failed') return '首包成功 / 流式失败';
+      if (finalResult === 'stream_incomplete') return '首包成功 / 流式不完整';
       if (finalResult === 'stream_idle_timeout') return '首包成功 / 流式空闲超时';
       if (finalResult === 'client_disconnected') return '首包成功 / 客户端断开';
     }
-    const map = { ok:'成功', stream_ok:'首包成功', retry_ok:'重试成功', cooldown:'冷却切换', fallback:'自动切换', skip:'跳过', network:'网络错误', error:'错误', system:'系统', stream_timeout:'流式超时', waf_lock_timeout:'候选忙', stream_done:'流式完成', stream_idle_timeout:'流式空闲超时', client_disconnected:'客户端断开', manual_probe:'人工探测' };
+    const map = { ok:'成功', stream_ok:'首包成功', retry_ok:'重试成功', cooldown:'冷却切换', fallback:'自动切换', skip:'跳过', network:'网络错误', error:'错误', system:'系统', stream_timeout:'流式超时', serial_protection_timeout:'串行保护候选忙', waf_lock_timeout:'候选忙（旧版）', stream_done:'流式完成', stream_idle_timeout:'流式空闲超时', client_disconnected:'客户端断开', manual_probe:'人工探测' };
     return map[event] || event || '-';
   },
 
@@ -243,6 +245,8 @@ const LogsTab = {
       timeout: '请求超时',
       busy: '候选忙',
       streaming: '流式中',
+      stream_failed: '流式失败',
+      stream_incomplete: '流式不完整',
       client_disconnected: '客户端断开',
     };
     return map[value] || value || '-';
@@ -418,13 +422,16 @@ const LogsTab = {
     }
     if (event === 'stream_ok') {
       if (parsed.final_result === 'stream_done') return '流式响应已完成';
+      if (parsed.final_result === 'stream_failed') return '上游返回流式失败终态';
+      if (parsed.final_result === 'stream_incomplete') return '上游返回流式不完整终态';
       if (parsed.final_result === 'stream_idle_timeout') return '上游流式响应空闲超时';
       if (parsed.final_result === 'client_disconnected') return '客户端已断开连接';
       return '首包成功，流式响应仍在进行';
     }
     if (event === 'stream_done' || event === 'stream_finalized') return '流式响应已完成';
     if (event === 'client_disconnected') return '客户端已断开连接';
-    if (event === 'waf_lock_timeout') return '候选忙，等待锁超时后已切换';
+    if (event === 'serial_protection_timeout') return '该连接组已开启串行保护，候选忙后已切换';
+    if (event === 'waf_lock_timeout') return '候选忙，等待锁超时后已切换（旧版）';
     return this.userFacingErrorReason(item || {}, parsed);
   },
 
@@ -480,7 +487,8 @@ const LogsTab = {
     if (reason === 'large_task_in_progress') return '候选正在处理大上下文请求，调度切换';
     if (reason === 'candidate_busy') return '候选忙/等待锁超时，调度切换';
     if (reason === 'stream_idle_timeout') return '上游流式空闲超时，健康失败';
-    if (String(item.event || '') === 'waf_lock_timeout') return '候选忙/等待锁超时，调度切换';
+    if (String(item.event || '') === 'serial_protection_timeout') return '串行保护候选忙，调度切换';
+    if (String(item.event || '') === 'waf_lock_timeout') return '候选忙/等待锁超时，调度切换（旧版）';
     if (String(item.failure_scope || parsed.failure_scope || '') === 'upstream') return '上游超时/错误，健康失败';
     return this.skipReasonLabel(reason);
   },
@@ -490,7 +498,7 @@ const LogsTab = {
       .map(log => ({ log, parsed: this.parseDetail(log.detail) }))
       .filter(entry => {
         const event = String(entry.log.event || '');
-        return event === 'skip' || event === 'waf_lock_timeout' || event === 'stream_timeout' || event === 'cooldown' || event === 'fallback' || event === 'network';
+        return event === 'skip' || event === 'serial_protection_timeout' || event === 'waf_lock_timeout' || event === 'stream_timeout' || event === 'cooldown' || event === 'fallback' || event === 'network';
       });
     if (!related.length) return '';
     const rows = related.map(({ log, parsed }) => {
@@ -540,13 +548,19 @@ const LogsTab = {
 
   diagnosisFor(item, parsed) {
     const text = `${item.status || ''} ${item.event || ''} ${item.failure_scope || ''} ${item.detail || ''}`.toLowerCase();
-    if (text.includes('waf_lock_wait_timeout') || text.includes('candidate_busy') || text.includes('large_task_in_progress')) {
-      return { className: 'warning', title: '候选忙 / 等待锁超时', scope: 'local_lock', cooldown: '否', suggestion: '候选正在处理大上下文请求，系统会临时切换到下一个候选；通常无需清冷却。' };
+    if (text.includes('serial_protection_wait_timeout') || text.includes('waf_lock_wait_timeout') || text.includes('candidate_busy') || text.includes('large_task_in_progress')) {
+      return { className: 'warning', title: '候选忙 / 串行保护等待超时', scope: 'local_lock', cooldown: '否', suggestion: '该连接组已开启串行保护，系统会临时切换到下一个候选；通常无需清冷却。' };
+    }
+    if (text.includes('stream_failed')) {
+      return { className: 'danger', title: '上游流式响应失败', scope: 'upstream', cooldown: '否', suggestion: '上游已明确返回失败终态；已保留已收到的流内容，不会混入其他候选。' };
+    }
+    if (text.includes('stream_incomplete')) {
+      return { className: 'warning', title: '上游流式响应不完整', scope: 'upstream', cooldown: '否', suggestion: '上游已明确返回不完整终态；已保留已收到的流内容，不会混入其他候选。' };
     }
     if (text.includes('stream_idle_timeout')) {
       return { className: 'danger', title: '上游流式响应空闲超时', scope: 'upstream', cooldown: item.cooldown_applied ? '是' : '可能', suggestion: '建议稍后重试，或对冷却中的单个模型/成员点击“重试恢复”。' };
     }
-    if ((text.includes('timeout') || text.includes('read_timeout')) && !text.includes('waf_lock')) {
+    if ((text.includes('timeout') || text.includes('read_timeout')) && !text.includes('waf_lock') && !text.includes('serial_protection')) {
       return { className: 'danger', title: '上游请求超时', scope: 'upstream', cooldown: item.cooldown_applied ? '是' : '可能', suggestion: '若频繁出现，检查中转站状态；确认恢复后可单点重试恢复。' };
     }
     if (text.includes('waf_blocked') || text.includes('request_level') || text.includes('upstream_request_rejected')) {
@@ -638,9 +652,9 @@ const LogsTab = {
 
   userFacingErrorReason(item, parsed) {
     const text = `${item.status || ''} ${item.event || ''} ${item.failure_scope || ''} ${item.detail || ''}`.toLowerCase();
-    if (text.includes('waf_lock_wait_timeout') || text.includes('candidate_busy') || text.includes('large_task_in_progress')) return '候选正在处理请求，等待 WAF 锁超时后已尝试切换';
+    if (text.includes('serial_protection_wait_timeout') || text.includes('waf_lock_wait_timeout') || text.includes('candidate_busy') || text.includes('large_task_in_progress')) return '该连接组已开启串行保护，候选忙后已尝试切换';
     if (text.includes('stream_idle_timeout')) return '上游流式响应长时间无数据，已判定为空闲超时';
-    if (text.includes('read_timeout') || (text.includes('timeout') && !text.includes('waf_lock'))) return '上游响应超时';
+    if (text.includes('read_timeout') || (text.includes('timeout') && !text.includes('waf_lock') && !text.includes('serial_protection'))) return '上游响应超时';
     if (text.includes('waf_blocked')) return '上游中转站的 WAF 拦截了请求';
     if (text.includes('auth_error') || text.includes('401') || text.includes('403')) return '上游鉴权失败，请检查 API Key 或权限';
     if (text.includes('rate_limit') || text.includes('429')) return '上游触发限流，请稍后重试';
@@ -713,6 +727,8 @@ const LogsTab = {
     const timing = this.streamTiming(item);
     const streamLifecycle = {
       stream_done: '流式响应已完成',
+      stream_failed: '上游返回流式失败终态',
+      stream_incomplete: '上游返回流式不完整终态',
       stream_idle_timeout: '上游流式响应空闲超时',
       client_disconnected: '客户端已断开连接',
       streaming: '流式响应进行中',
@@ -745,6 +761,7 @@ const LogsTab = {
             <dt>流式耗时</dt><dd>${timing?.streamMilliseconds !== null && timing?.streamMilliseconds !== undefined ? this.formatDurationSeconds(timing.streamMilliseconds) : '-'}</dd>
             <dt>总耗时</dt><dd>${timing ? this.formatDurationSeconds(timing.totalMilliseconds) : '-'}</dd>
             <dt>流生命周期</dt><dd>${Utils.escapeHtml(streamLifecycle)}</dd>
+            <dt>完成信号</dt><dd>${Utils.escapeHtml(parsed.completion_signal || '-')}</dd>
             <dt>状态</dt><dd><span class="pill ${this.statusClass(item.status, item)}">${Utils.escapeHtml(this.statusLabel(item.status))}</span> ${Utils.escapeHtml(this.eventLabel(item.event, item))}</dd>
             <dt>请求 ID / 次</dt><dd>${Utils.escapeHtml(requestIdDisplay)} / ${Number(item.attempt || 0) || 1}</dd>
             <dt>成员 ID</dt><dd>${Utils.escapeHtml(memberIdDisplay)}</dd>
@@ -772,7 +789,8 @@ const LogsTab = {
             <dt>WAF 实际套用</dt><dd>${Utils.escapeHtml(this.boolLabel(parsed.waf_applied))}</dd>
             <dt>WAF 决策</dt><dd>${Utils.escapeHtml(this.wafDecisionLabel(parsed.waf_decision))}</dd>
             <dt>请求客户端</dt><dd>${Utils.escapeHtml(parsed.client_family || '-')}</dd>
-            <dt>WAF 锁</dt><dd>${Utils.escapeHtml(this.boolLabel(parsed.waf_lock_enabled))}</dd>
+            <dt>请求并发</dt><dd>${Utils.escapeHtml(parsed.request_concurrency === 'serial_protection' ? '串行保护' : parsed.request_concurrency === 'parallel' ? '允许并发' : '-')}</dd>
+            <dt>串行保护</dt><dd>${Utils.escapeHtml(this.boolLabel(parsed.serial_protection_enabled))}</dd>
             <dt>等待锁</dt><dd>${Utils.escapeHtml(parsed.lock_wait_ms ? parsed.lock_wait_ms + ' ms' : '-')}</dd>
             <dt>请求 API</dt><dd>${Utils.escapeHtml(parsed.request_api || '-')}</dd>
             <dt>请求推理强度</dt><dd>${Utils.escapeHtml(parsed.requested_reasoning_effort || 'unset')}</dd>

@@ -29,6 +29,8 @@ class ConnectionGroup:
     auto_model_cooldown_minutes: int = DEFAULT_AUTO_MODEL_COOLDOWN_MINUTES
     stream_idle_timeout: int = DEFAULT_STREAM_IDLE_TIMEOUT_SECONDS
     waf_compatible: bool = False
+    # Header 兼容与请求并发是两项独立策略。
+    serial_protection: bool = False
     waf_accept_policy: str = "default"
     waf_client_mode: str = "always"
     reasoning_support: str = "unknown"
@@ -49,6 +51,7 @@ class ConnectionGroup:
             auto_model_cooldown_minutes=int(data.get("auto_model_cooldown_minutes") or DEFAULT_AUTO_MODEL_COOLDOWN_MINUTES),
             stream_idle_timeout=max(0, min(MAX_STREAM_IDLE_TIMEOUT_SECONDS, int(data.get("stream_idle_timeout", DEFAULT_STREAM_IDLE_TIMEOUT_SECONDS) or 0))),
             waf_compatible=bool(data.get("waf_compatible", False)),
+            serial_protection=bool(data.get("serial_protection", False)),
             waf_accept_policy=str(data.get("waf_accept_policy") or "default"),
             waf_client_mode=str(data.get("waf_client_mode") or "always").lower(),
             reasoning_support=str(data.get("reasoning_support") or "unknown").lower(),

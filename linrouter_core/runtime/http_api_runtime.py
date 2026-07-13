@@ -334,6 +334,8 @@ def handle_post(handler: Any) -> None:
             payload["stream_idle_timeout"] = existing.stream_idle_timeout
         if existing and "waf_compatible" not in payload:
             payload["waf_compatible"] = existing.waf_compatible
+        if existing and "serial_protection" not in payload:
+            payload["serial_protection"] = existing.serial_protection
         if existing and "waf_accept_policy" not in payload:
             payload["waf_accept_policy"] = existing.waf_accept_policy
         if existing and "waf_client_mode" not in payload:

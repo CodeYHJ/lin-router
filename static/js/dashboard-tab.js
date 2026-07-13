@@ -21,7 +21,7 @@ const DashboardTab = {
     const fallbackCount = recent.filter(l => ['fallback', 'retry_ok'].includes(String(l.event || ''))).length;
     const busyCount = recent.filter(l => {
       const text = `${l.event || ''};${l.detail || ''}`;
-      return text.includes('candidate_busy') || text.includes('large_task_in_progress') || text.includes('waf_lock_timeout');
+      return text.includes('candidate_busy') || text.includes('large_task_in_progress') || text.includes('serial_protection_timeout') || text.includes('waf_lock_timeout');
     }).length;
     const upstreamTimeoutCount = recent.filter(l => `${l.event || ''};${l.detail || ''}`.includes('upstream_timeout') || `${l.detail || ''}`.includes('read_timeout') || `${l.detail || ''}`.includes('stream_idle_timeout')).length;
     const wafBlockedCount = recent.filter(l => `${l.event || ''};${l.detail || ''}`.includes('waf_blocked')).length;
@@ -183,12 +183,12 @@ const DashboardTab = {
     const map = {
       selecting_candidate: '选择候选',
       preparing_upstream: '准备上游请求',
-      waiting_waf_lock: '等待 WAF 锁',
+      waiting_serial_protection: '等待串行保护',
       connecting_upstream: '连接上游',
       waiting_first_byte: '等待首包',
       streaming: '接收流式响应',
       receiving_response: '接收响应',
-      candidate_busy: '候选忙/等待锁超时'
+      candidate_busy: '候选忙/串行保护等待超时'
     };
     return map[stage] || stage || '处理中';
   },

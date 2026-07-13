@@ -45,7 +45,7 @@ const App = {
 
   startRuntimeRefresh() {
     if (this._runtimeRefreshTimer) clearInterval(this._runtimeRefreshTimer);
-    this._runtimeRefreshTimer = setInterval(() => this.refreshRuntimeState(), 5000);
+    this._runtimeRefreshTimer = setInterval(() => this.refreshRuntimeState(), 1000);
   },
 
   async refreshRuntimeState() {

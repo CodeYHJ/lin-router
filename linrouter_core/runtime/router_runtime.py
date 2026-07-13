@@ -27,8 +27,8 @@ from linrouter_core.runtime.execution_runtime_ports import (
 )
 
 
-class WafLockState:
-    """Per-upstream WAF lock and active-stream state, independent of HTTP execution."""
+class SerialProtectionState:
+    """按上游候选管理串行保护锁与活跃流状态。"""
 
     def __init__(self) -> None:
         self.locks: Dict[str, threading.Lock] = {}
@@ -67,10 +67,15 @@ class WafLockState:
         active_streams = self.active_count(candidate)
         fallback_reason = "large_task_in_progress" if active_streams or len(body) > 131072 else "candidate_busy"
         return (
-            f"waf_lock_wait_timeout; fallback_reason={fallback_reason}; "
+            f"serial_protection_wait_timeout; fallback_reason={fallback_reason}; "
             f"failure_scope=busy; cooldown_applied=false; active_streams={active_streams}; "
-            f"lock_wait_ms={lock_wait_ms}; busy_hint=candidate_busy"
+            f"lock_wait_ms={lock_wait_ms}; busy_hint=candidate_busy; "
+            "request_concurrency=serial_protection"
         )
+
+
+# 兼容仍导入旧名称的外部集成。
+WafLockState = SerialProtectionState
 
 
 class ManagedStreamIterator:
@@ -246,10 +251,10 @@ class CandidateRuntime:
             upstream_lock = self.concurrency.candidate_lock(candidate, incoming_headers)
             started_at = time.perf_counter()
             if upstream_lock:
-                self.observability.update_live_request(request_id, stage="waiting_waf_lock", stage_label="等待 WAF 锁")
+                self.observability.update_live_request(request_id, stage="waiting_serial_protection", stage_label="等待串行保护")
             acquired, lock_wait_ms = self.concurrency.acquire(upstream_lock)
             if not acquired:
-                self.observability.update_live_request(request_id, stage="candidate_busy", stage_label="候选忙/等待锁超时", possible_reason="候选正在处理大上下文请求，已临时切换")
+                self.observability.update_live_request(request_id, stage="candidate_busy", stage_label="候选忙/串行保护等待超时", possible_reason="该连接组已开启串行保护，候选仍在处理请求，已临时切换")
                 duration_ms = int((time.perf_counter() - started_at) * 1000)
                 self.observability.add_log(
                     path,
@@ -260,14 +265,14 @@ class CandidateRuntime:
                     group=group,
                     request_id=request_id,
                     attempt=attempt,
-                    event="waf_lock_timeout",
+                    event="serial_protection_timeout",
                     cooldown_applied=False,
                     failure_scope="busy",
                 )
                 if auto_fallback:
                     continue
                 self.observability.finish_live_request(request_id, "error")
-                return 503, {"Content-Type": "application/json; charset=utf-8"}, [json.dumps({"error": {"message": "候选正在处理大上下文请求，已临时切换到下一个候选", "type": "timeout", "code": "waf_lock_wait_timeout", "request_id": request_id}}, ensure_ascii=False).encode("utf-8")]
+                return 503, {"Content-Type": "application/json; charset=utf-8"}, [json.dumps({"error": {"message": "该连接组已开启串行保护，候选仍在处理请求", "type": "candidate_busy", "code": "serial_protection_wait_timeout", "request_id": request_id}}, ensure_ascii=False).encode("utf-8")]
             try:
                 self.observability.update_live_request(request_id, stage="connecting_upstream", stage_label="连接上游")
                 resp = self.upstream.request("POST", target_url, outbound_headers, body, stream=False, timeout=120)
@@ -599,10 +604,10 @@ class CandidateRuntime:
             resp: Optional[Any] = None
             started_at = time.perf_counter()
             if upstream_lock:
-                self.observability.update_live_request(request_id, stage="waiting_waf_lock", stage_label="等待 WAF 锁")
+                self.observability.update_live_request(request_id, stage="waiting_serial_protection", stage_label="等待串行保护")
             acquired, lock_wait_ms = self.concurrency.acquire(upstream_lock)
             if not acquired:
-                self.observability.update_live_request(request_id, stage="candidate_busy", stage_label="候选忙/等待锁超时", possible_reason="候选正在处理大上下文请求，已临时切换")
+                self.observability.update_live_request(request_id, stage="candidate_busy", stage_label="候选忙/串行保护等待超时", possible_reason="该连接组已开启串行保护，候选仍在处理请求，已临时切换")
                 duration_ms = int((time.perf_counter() - started_at) * 1000)
                 self.observability.add_log(
                     path,
@@ -613,13 +618,13 @@ class CandidateRuntime:
                     group=group,
                     request_id=request_id,
                     attempt=attempt,
-                    event="waf_lock_timeout",
+                    event="serial_protection_timeout",
                     cooldown_applied=False,
                     failure_scope="busy",
                 )
                 if auto_fallback:
                     continue
-                error_body = json.dumps({"error": {"message": "候选正在处理大上下文请求，已临时切换到下一个候选", "type": "timeout", "code": "waf_lock_wait_timeout", "request_id": request_id}}, ensure_ascii=False).encode("utf-8")
+                error_body = json.dumps({"error": {"message": "该连接组已开启串行保护，候选仍在处理请求", "type": "candidate_busy", "code": "serial_protection_wait_timeout", "request_id": request_id}}, ensure_ascii=False).encode("utf-8")
                 self.observability.finish_live_request(request_id, "error")
                 return 503, {"Content-Type": "application/json; charset=utf-8"}, [error_body], request_id
             try:
@@ -672,9 +677,37 @@ class CandidateRuntime:
                 usage_total = latest_usage
                 chunks_received = 1
                 bytes_received = len(first_chunk)
-                stream_state = {"timeout": False, "completed_normally": False}
+                stream_state: Dict[str, Any] = {"timeout": False, "lifecycle": "", "completion_signal": ""}
                 release_reason = "client_disconnect"
                 finalized = False
+                pending_event_signal = ""
+
+                def terminal_signal_for(chunk: bytes) -> str:
+                    nonlocal pending_event_signal
+                    signal = self.stream_lifecycle.completion_signal(chunk)
+                    if signal.startswith("event:"):
+                        pending_event_signal = signal.split(":", 1)[1]
+                        return ""
+                    if signal:
+                        pending_event_signal = ""
+                        return signal
+                    if pending_event_signal and chunk.lstrip().startswith(b"data:"):
+                        signal = pending_event_signal
+                        pending_event_signal = ""
+                        return signal
+                    return ""
+
+                def mark_stream_terminal(signal: str) -> None:
+                    if signal in {"response.failed", "response.incomplete"}:
+                        stream_state["lifecycle"] = "stream_failed" if signal == "response.failed" else "stream_incomplete"
+                    else:
+                        stream_state["lifecycle"] = "stream_done"
+                    stream_state["completion_signal"] = signal
+
+                first_completion_signal = terminal_signal_for(first_chunk)
+                if first_completion_signal:
+                    mark_stream_terminal(first_completion_signal)
+                    release_reason = first_completion_signal
 
                 def finalize_stream() -> None:
                     nonlocal finalized
@@ -689,11 +722,16 @@ class CandidateRuntime:
                         lifecycle_status = "timeout"
                         lifecycle_result = "stream_idle_timeout"
                         lifecycle_scope = "upstream"
-                    elif stream_state["completed_normally"]:
+                    elif stream_state["lifecycle"] == "stream_done":
                         usage_source = "stream_final" if any(usage_total) else "missing"
                         lifecycle_status = "200"
                         lifecycle_result = "stream_done"
                         lifecycle_scope = ""
+                    elif stream_state["lifecycle"] in {"stream_failed", "stream_incomplete"}:
+                        usage_source = "stream_incomplete"
+                        lifecycle_status = str(stream_state["lifecycle"])
+                        lifecycle_result = str(stream_state["lifecycle"])
+                        lifecycle_scope = "upstream"
                     else:
                         usage_source = "stream_incomplete"
                         lifecycle_status = "client_disconnected"
@@ -714,15 +752,20 @@ class CandidateRuntime:
                         lock_wait_ms=lock_wait_ms,
                         lock_release_reason=release_reason,
                         failure_scope=lifecycle_scope,
+                        completion_signal=str(stream_state["completion_signal"]),
                     )
-                    self.observability.finish_live_request(request_id, "done" if stream_state["completed_normally"] else "ended")
+                    self.observability.finish_live_request(request_id, "done" if stream_state["lifecycle"] == "stream_done" else "ended")
                     self.concurrency.mark_stream_active(candidate, -1)
                     self.concurrency.release(upstream_lock)
 
                 def iterator() -> Iterator[bytes]:
                     nonlocal usage_total, chunks_received, bytes_received, release_reason
                     try:
+                        if first_completion_signal:
+                            finalize_stream()
                         yield first_chunk
+                        if first_completion_signal:
+                            return
                         while True:
                             try:
                                 chunk = self.stream_lifecycle.readline_with_idle_timeout(resp, idle_timeout)
@@ -731,15 +774,22 @@ class CandidateRuntime:
                                 release_reason = "stream_idle_timeout"
                                 break
                             if not chunk:
-                                stream_state["completed_normally"] = True
-                                release_reason = "stream_final" if any(usage_total) else "missing"
+                                mark_stream_terminal("eof")
+                                release_reason = "eof"
                                 break
                             chunks_received += 1
                             bytes_received += len(chunk)
                             usage = self.stream_lifecycle.usage_from_stream_chunk(chunk)
                             if any(usage):
                                 usage_total = usage
+                            completion_signal = terminal_signal_for(chunk)
+                            if completion_signal:
+                                mark_stream_terminal(completion_signal)
+                                release_reason = completion_signal
+                                finalize_stream()
                             yield chunk
+                            if completion_signal:
+                                break
                     finally:
                         finalize_stream()
 

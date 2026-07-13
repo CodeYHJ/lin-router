@@ -34,6 +34,7 @@ except Exception:  # certifi 未安装时回退到系统默认，Windows 不受�
 from linrouter_platform import get_platform
 from settings_store import SettingsStore
 from debug_capture import DebugCapture
+from upstream_client import StreamIdleTimeoutError as UpstreamStreamIdleTimeoutError
 
 
 from linrouter_core.config.constants import (
@@ -62,8 +63,8 @@ from linrouter_core.runtime import (
     CandidateRuntime,
     ExecutionPolicyService,
     NonStreamExecutionService,
+    SerialProtectionState,
     StreamExecutionService,
-    WafLockState,
 )
 from linrouter_core.runtime.http_api_runtime import handle_delete, handle_get, handle_post, handle_put
 from linrouter_core.runtime.execution_runtime_ports import (
@@ -228,7 +229,7 @@ class ArkProxyRouter:
             sanitize_detail=self._sanitize_detail,
         )
         self.log_write_error = self.observability.log_write_error
-        self._runtime_locks = WafLockState()
+        self._runtime_locks = SerialProtectionState()
         # 旧属性 facade：保留给运行时诊断和外部调用者。
         self.upstream_locks = self._runtime_locks.locks
         self.upstream_active_streams = self._runtime_locks.active_streams
@@ -297,7 +298,7 @@ class ArkProxyRouter:
             candidate_lock=self._candidate_lock,
             acquire=self._acquire_upstream_lock,
             release=self._release_lock,
-            busy_detail=self._waf_lock_busy_detail,
+            busy_detail=self._serial_protection_busy_detail,
             mark_stream_active=self._mark_stream_active,
         )
         stream_lifecycle = StreamLifecyclePort(
@@ -305,6 +306,7 @@ class ArkProxyRouter:
             readline=self._readline_with_idle_timeout,
             response_usage=self._usage_from_response,
             chunk_usage=self._usage_from_stream_chunk,
+            completion_signal=self._stream_completion_signal,
             mark_timeout=self._mark_stream_timeout,
         )
         observability = ObservabilityPort(
@@ -486,6 +488,7 @@ class ArkProxyRouter:
         lock_release_reason: str = "",
         cooldown_applied: Optional[bool] = None,
         failure_scope: str = "",
+        completion_signal: str = "",
     ) -> bool:
         patched = self.observability.patch_stream_lifecycle(
             request_id, attempt, candidate_label, usage, usage_source,
@@ -493,6 +496,7 @@ class ArkProxyRouter:
             chunks_received=chunks_received, bytes_received=bytes_received, duration_ms=duration_ms,
             lock_wait_ms=lock_wait_ms, lock_release_reason=lock_release_reason,
             cooldown_applied=cooldown_applied, failure_scope=failure_scope,
+            completion_signal=completion_signal,
         )
         self.log_write_error = self.observability.log_write_error
         return patched
@@ -696,6 +700,37 @@ class ArkProxyRouter:
         except Exception:
             return ArkProxyRouter._empty_usage()
         return ArkProxyRouter._usage_from_payload(payload)
+
+    @staticmethod
+    def _stream_completion_signal(chunk: bytes) -> str:
+        """解析结构化 SSE 终态信号，不依赖 TCP EOF。"""
+        text = chunk.decode("utf-8", "ignore").strip()
+        if not text:
+            return ""
+        event_signal = ""
+        for line in text.splitlines():
+            line = line.strip()
+            if line.startswith("data:"):
+                data = line[5:].strip()
+                if data == "[DONE]":
+                    return "[DONE]"
+                try:
+                    payload = json.loads(data)
+                except Exception:
+                    continue
+                signal = str(payload.get("type") or payload.get("event") or "").strip().lower()
+                if signal in {"response.completed", "response.failed", "response.incomplete"}:
+                    return signal
+                response = payload.get("response")
+                if isinstance(response, dict):
+                    status = str(response.get("status") or "").strip().lower()
+                    if status in {"completed", "failed", "incomplete"}:
+                        return f"response.{status}"
+            elif line.startswith("event:"):
+                signal = line[6:].strip().lower()
+                if signal in {"response.completed", "response.failed", "response.incomplete"}:
+                    event_signal = f"event:{signal}"
+        return event_signal
 
     def default_model(self) -> Optional[ModelConfig]:
         return next((m for m in self.store.models if m.usable), None)
@@ -1097,7 +1132,8 @@ class ArkProxyRouter:
         content_type = lower_headers.get("content-type", "")
         user_agent = lower_headers.get("user-agent", "")
         user_agent_family = self._user_agent_family(user_agent)
-        waf_lock_enabled = waf_applied
+        serial_protection_enabled = self._candidate_lock_enabled(candidate, headers)
+        request_concurrency = "serial_protection" if serial_protection_enabled else "parallel"
         http_client = getattr(self, "_upstream_client", None) and getattr(self._upstream_client, "client_type", "urllib") or "urllib"
         http_version = getattr(resp, "http_version", "") if resp else ""
         extra = (
@@ -1110,7 +1146,8 @@ class ArkProxyRouter:
             f"; waf_applied={str(waf_applied).lower()}"
             f"; waf_decision={'waf_compatible' if waf_applied else self._waf_decision(candidate.group, headers)}"
             f"; client_family={self._incoming_client_family(headers)}"
-            f"; waf_lock_enabled={'true' if waf_lock_enabled else 'false'}"
+            f"; serial_protection_enabled={str(serial_protection_enabled).lower()}"
+            f"; request_concurrency={request_concurrency}"
             f"; http_client={http_client}"
             f"; upstream_http_version={http_version or '-'}"
         )
@@ -1222,11 +1259,15 @@ class ArkProxyRouter:
     def _mark_stream_active(self, candidate: UpstreamCandidate, delta: int) -> None:
         self._runtime_locks.mark_stream_active(candidate, delta)
 
-    def _waf_lock_busy_detail(self, candidate: UpstreamCandidate, body: bytes, lock_wait_ms: int) -> str:
+    def _serial_protection_busy_detail(self, candidate: UpstreamCandidate, body: bytes, lock_wait_ms: int) -> str:
         return self._runtime_locks.busy_detail(candidate, body, lock_wait_ms)
 
+    # 兼容旧 facade；WAF Header 策略不再管理此状态。
+    def _waf_lock_busy_detail(self, candidate: UpstreamCandidate, body: bytes, lock_wait_ms: int) -> str:
+        return self._serial_protection_busy_detail(candidate, body, lock_wait_ms)
+
     def _candidate_lock_enabled(self, candidate: UpstreamCandidate, incoming_headers: Optional[Dict[str, str]] = None) -> bool:
-        return self._waf_decision(candidate.group, incoming_headers or {}) == "waf_compatible"
+        return candidate.group.provider_type == PROVIDER_RELAY and bool(getattr(candidate.group, "serial_protection", False))
 
     @staticmethod
     def _release_lock(lock: Optional[threading.Lock]) -> None:
@@ -1234,7 +1275,7 @@ class ArkProxyRouter:
             lock.release()
 
     def _acquire_upstream_lock(self, lock: Optional[threading.Lock], timeout: float = 10.0) -> Tuple[bool, int]:
-        """尝试获取 WAF lock，返回 (是否成功, 等待毫秒数)。"""
+        """尝试获取显式串行保护锁，返回 (是否成功, 等待毫秒数)。"""
         if not lock:
             return True, 0
         started = time.perf_counter()
@@ -1282,7 +1323,7 @@ class ArkProxyRouter:
         upstream_lock = self._candidate_lock(candidate)
         acquired, _ = self._acquire_upstream_lock(upstream_lock, timeout=5.0)
         if not acquired:
-            return False, "waf_lock_wait_timeout", "候选忙，等待 WAF 锁超时"
+            return False, "serial_protection_wait_timeout", "该连接组已开启串行保护，候选仍在处理请求"
         try:
             with self._upstream_client.request("POST", target_url, headers, body, stream=False, timeout=20) as resp:
                 resp.read()
@@ -1301,8 +1342,8 @@ class ArkProxyRouter:
     @staticmethod
     def _manual_probe_summary(reason: str, detail: str) -> str:
         normalized_reason = str(reason or '').lower()
-        if normalized_reason == 'waf_lock_wait_timeout':
-            return '候选忙，等待 WAF 锁超时；未判定为上游故障。'
+        if normalized_reason in {'serial_protection_wait_timeout', 'waf_lock_wait_timeout'}:
+            return '该连接组已开启串行保护，候选仍在处理请求；未判定为上游故障。'
         if normalized_reason.startswith('server_error_'):
             return f'上游服务暂时异常（HTTP {normalized_reason.rsplit("_", 1)[-1]}）。'
         if normalized_reason.startswith('http_'):
@@ -1315,7 +1356,7 @@ class ArkProxyRouter:
 
     @staticmethod
     def _manual_probe_failure_scope(reason: str) -> Tuple[str, bool]:
-        if str(reason or '').lower() == 'waf_lock_wait_timeout':
+        if str(reason or '').lower() in {'serial_protection_wait_timeout', 'waf_lock_wait_timeout'}:
             return 'local_lock', False
         return 'upstream', True
 
@@ -1338,7 +1379,7 @@ class ArkProxyRouter:
             summary = self._manual_probe_summary(reason, detail)
             probe_request_id = f"manual-probe-{uuid.uuid4().hex}"
             self.add_log("/api/models/recover", model.name, "probe_failed", f"manual_probe=true; model_id={model.id}; probe_result=failed; reason={reason}; summary={summary}; cooldown_applied={str(cooldown_applied).lower()}; failure_scope={failure_scope}", group=group, request_id=probe_request_id, event="manual_probe", usage_source="manual_probe", cooldown_applied=cooldown_applied, failure_scope=failure_scope)
-            message = "候选正忙，等待 WAF 锁超时；模型保持当前状态，请稍后重试。" if not cooldown_applied else "最小探测未通过，模型保持冷却，请稍后重试或检查上游服务。"
+            message = "该连接组已开启串行保护，候选正忙；模型保持当前状态，请稍后重试。" if not cooldown_applied else "最小探测未通过，模型保持冷却，请稍后重试或检查上游服务。"
             return {"ok": False, "message": message, "code": "probe_failed", "before": before, "model": asdict(model)}
         model.cooldown_until = 0
         model.cooldown_reason = ""
@@ -1374,7 +1415,7 @@ class ArkProxyRouter:
             summary = self._manual_probe_summary(reason, detail)
             probe_request_id = f"manual-probe-{uuid.uuid4().hex}"
             self.add_log("/api/aggregate-members/recover", model.name, "probe_failed", f"manual_probe=true; aggregate_member_id={member.id}; probe_result=failed; reason={reason}; summary={summary}; cooldown_applied={str(cooldown_applied).lower()}; failure_scope={failure_scope}", group=group, request_id=probe_request_id, event="manual_probe", usage_source="manual_probe", cooldown_applied=cooldown_applied, failure_scope=failure_scope)
-            message = "候选正忙，等待 WAF 锁超时；成员保持当前状态，请稍后重试。" if not cooldown_applied else "最小探测未通过，成员保持冷却，请稍后重试或检查上游服务。"
+            message = "该连接组已开启串行保护，候选正忙；成员保持当前状态，请稍后重试。" if not cooldown_applied else "最小探测未通过，成员保持冷却，请稍后重试或检查上游服务。"
             return {"ok": False, "message": message, "code": "probe_failed", "before": before, "member": asdict(member)}
         member.cooldown_until = 0
         member.cooldown_reason = ""
@@ -1551,30 +1592,33 @@ class ArkProxyRouter:
     @staticmethod
     def _readline_with_idle_timeout(resp: Any, timeout_seconds: int) -> bytes:
         # UpstreamResponse 等包装对象支持带超时的 readline
-        if hasattr(resp, "readline") and callable(getattr(resp, "readline")):
-            try:
-                return resp.readline(timeout_seconds)
-            except TypeError:
-                pass
-        if timeout_seconds <= 0:
-            return resp.readline()
-        result: queue.Queue[Any] = queue.Queue(maxsize=1)
-
-        def read_once() -> None:
-            try:
-                result.put(resp.readline())
-            except Exception as exc:
-                result.put(exc)
-
-        worker = threading.Thread(target=read_once, daemon=True)
-        worker.start()
         try:
-            item = result.get(timeout=timeout_seconds)
-        except queue.Empty as exc:
+            if hasattr(resp, "readline") and callable(getattr(resp, "readline")):
+                try:
+                    return resp.readline(timeout_seconds)
+                except TypeError:
+                    pass
+            if timeout_seconds <= 0:
+                return resp.readline()
+            result: queue.Queue[Any] = queue.Queue(maxsize=1)
+
+            def read_once() -> None:
+                try:
+                    result.put(resp.readline())
+                except Exception as exc:
+                    result.put(exc)
+
+            worker = threading.Thread(target=read_once, daemon=True)
+            worker.start()
+            try:
+                item = result.get(timeout=timeout_seconds)
+            except queue.Empty as exc:
+                raise StreamIdleTimeoutError("stream_idle_timeout") from exc
+            if isinstance(item, Exception):
+                raise item
+            return item
+        except UpstreamStreamIdleTimeoutError as exc:
             raise StreamIdleTimeoutError("stream_idle_timeout") from exc
-        if isinstance(item, Exception):
-            raise item
-        return item
 
     @staticmethod
     def _body_for_upstream(payload: Dict[str, Any], raw_body: bytes | None, requested_model: str | None, target_model: str) -> Tuple[bytes, str]:
@@ -1957,6 +2001,7 @@ class RouterHandler(BaseHTTPRequestHandler):
             auto_model_cooldown_minutes=source.auto_model_cooldown_minutes if source.provider_type == PROVIDER_RELAY else 0,
             stream_idle_timeout=source.stream_idle_timeout,
             waf_compatible=source.waf_compatible,
+            serial_protection=source.serial_protection,
             waf_accept_policy=source.waf_accept_policy,
             waf_client_mode=source.waf_client_mode,
             reasoning_support=source.reasoning_support,
@@ -2160,7 +2205,7 @@ class RouterHandler(BaseHTTPRequestHandler):
                 event_blob = f"{log.event};{log.detail};{reason}"
                 if reason in {"member_cooling", "underlying_model_cooling"}:
                     cooldown_skip_count += 1
-                if "candidate_busy" in event_blob or "large_task_in_progress" in event_blob or log.event == "waf_lock_timeout":
+                if "candidate_busy" in event_blob or "large_task_in_progress" in event_blob or log.event in {"serial_protection_timeout", "waf_lock_timeout"}:
                     busy_switch_count += 1
                     had_prior_runtime_issue = True
                 if log.event in {"fallback", "cooldown", "network", "stream_timeout", "stream_idle_timeout"} or log.failure_scope in {"upstream", "candidate", "busy", "local_lock"}:

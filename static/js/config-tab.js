@@ -21,6 +21,7 @@ const ConfigTab = {
       stream_idle_timeout: 120,
       reasoning_support: 'unknown',
       waf_compatible: false,
+      serial_protection: false,
       waf_client_mode: 'always',
       waf_accept_policy: 'default',
     };
@@ -168,13 +169,21 @@ const ConfigTab = {
               <span>仅中转站 WAF 兼容</span>
             </label>
           </div>
+          <div class="form-row" id="group-concurrency-row">
+            <label>请求并发</label>
+            <div class="radio-group">
+              <label class="radio"><input type="radio" name="group-request-concurrency" value="parallel" ${g?.serial_protection ? '' : 'checked'}><span>允许并发（推荐）</span></label>
+              <label class="radio"><input type="radio" name="group-request-concurrency" value="serial" ${g?.serial_protection ? 'checked' : ''}><span>串行保护</span></label>
+            </div>
+            <div class="form-hint">允许同一模型同时处理多个请求。仅当渠道明确要求串行或并发会触发风控时，才开启串行保护。</div>
+          </div>
           <div class="form-row hidden" id="group-waf-client-mode-row">
             <label>WAF 客户端策略</label>
             <select id="group-waf-client-mode">
               <option value="always" ${(g?.waf_client_mode || 'always') === 'always' ? 'selected' : ''}>始终使用 WAF 兼容</option>
               <option value="auto_bypass_codex" ${g?.waf_client_mode === 'auto_bypass_codex' ? 'selected' : ''}>智能兼容（Codex 直连 Header）</option>
             </select>
-            <div class="form-hint">智能模式会识别 Codex UA 或 x-codex-* Header；仅跳过 Header 改写和 WAF 锁，不改请求体。</div>
+            <div class="form-hint">智能模式会识别 Codex UA 或 x-codex-* Header；仅跳过 Header 改写，不改请求体或请求并发策略。</div>
           </div>
           <div class="form-row hidden" id="group-waf-policy-row">
             <label>Accept 策略</label>

@@ -19,7 +19,7 @@ from test_cooldown_classification import (
     test_group_auto_500_cooldown_and_fallback as assert_recoverable_failure_fallback,
 )
 from test_waf_lock_busy_classification import (
-    test_waf_lock_timeout_is_candidate_busy_not_cooldown as assert_waf_lock_busy_contract,
+    test_serial_protection_timeout_is_candidate_busy_not_cooldown as assert_serial_protection_busy_contract,
 )
 
 
@@ -69,5 +69,5 @@ def test_m3b_explicit_request_error_does_not_fallback() -> None:
         Path(config_path).unlink(missing_ok=True)
 
 
-def test_m3b_waf_lock_wait_preserves_busy_contract() -> None:
-    assert_waf_lock_busy_contract()
+def test_m3b_serial_protection_wait_preserves_busy_contract() -> None:
+    assert_serial_protection_busy_contract()

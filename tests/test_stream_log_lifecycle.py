@@ -177,6 +177,7 @@ def test_finished_stream_keeps_one_primary_log_with_first_byte_and_usage():
             assert "first_byte_ms=" in item.detail
             assert "lifecycle=stream_done" in item.detail
             assert "final_result=stream_done" in item.detail
+            assert "completion_signal=[DONE]" in item.detail
             assert not any(
                 log.request_id == request_id and log.event in {"stream_done", "stream_idle_timeout", "client_disconnected"}
                 for log in router.logs

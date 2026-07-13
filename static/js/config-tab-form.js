@@ -49,6 +49,7 @@ const ConfigTabForm = {
     const cooldownRow = document.getElementById('group-cooldown-row');
     const streamTimeoutRow = document.getElementById('group-stream-timeout-row');
     const wafRow = document.getElementById('group-waf-row');
+    const concurrencyRow = document.getElementById('group-concurrency-row');
     const wafClientModeRow = document.getElementById('group-waf-client-mode-row');
     const wafPolicyRow = document.getElementById('group-waf-policy-row');
     const hint = document.getElementById('group-mode-hint');
@@ -59,6 +60,7 @@ const ConfigTabForm = {
     if (cooldownRow) cooldownRow.classList.remove('hidden');
     if (streamTimeoutRow) streamTimeoutRow.classList.remove('hidden');
     if (wafRow) wafRow.classList.toggle('hidden', mode !== 'relay');
+    if (concurrencyRow) concurrencyRow.classList.toggle('hidden', mode !== 'relay');
     const wafChecked = document.getElementById('group-waf')?.checked || false;
     if (wafClientModeRow) wafClientModeRow.classList.toggle('hidden', mode !== 'relay' || !wafChecked);
     if (wafPolicyRow) wafPolicyRow.classList.toggle('hidden', mode !== 'relay' || !wafChecked);
@@ -109,6 +111,8 @@ const ConfigTabForm = {
       base_url: document.getElementById('group-base')?.value.trim() || '',
       ark_api_key: mode === 'ark' ? key : '',
       api_key: mode === 'proxy' ? key : '',
+      serial_protection: mode === 'relay'
+        && document.querySelector('input[name="group-request-concurrency"]:checked')?.value === 'serial',
     };
   },
 

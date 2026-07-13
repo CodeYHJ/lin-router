@@ -82,6 +82,8 @@ const ConfigTabActions = {
         ? (document.getElementById('group-waf-client-mode')?.value || 'always')
         : 'always',
       waf_compatible: mode === 'relay' ? document.getElementById('group-waf').checked : false,
+      serial_protection: mode === 'relay'
+        && document.querySelector('input[name="group-request-concurrency"]:checked')?.value === 'serial',
       waf_accept_policy: mode === 'relay' && document.getElementById('group-waf').checked
         ? (document.getElementById('group-waf-policy')?.value || 'default')
         : 'default',

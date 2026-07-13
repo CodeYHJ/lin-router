@@ -51,6 +51,7 @@ export function toGroupPayload(form, existing = {}) {
     stream_idle_timeout: existing.stream_idle_timeout ?? 120,
     reasoning_support: existing.reasoning_support || 'unknown',
     waf_compatible: existing.waf_compatible === true,
+    serial_protection: existing.serial_protection === true,
     waf_client_mode: existing.waf_client_mode || 'always',
     waf_accept_policy: existing.waf_accept_policy || 'default',
     ...(isNewGroup ? {} : { id: existing.id, route_key: existing.route_key }),
