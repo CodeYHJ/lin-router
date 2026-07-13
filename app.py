@@ -56,7 +56,7 @@ from linrouter_core.config.models import AggregateMember, AggregateModel, Connec
 from linrouter_core.config.store import ConfigStore
 from linrouter_core.observability import ObservabilityService, RequestLog
 from linrouter_core.contracts import AllModelsFailedError, RouteContext, StreamIdleTimeoutError, UpstreamCandidate
-from linrouter_core.contracts.execution_ports import CandidateErrorClassification, ExecutionDependencies
+from linrouter_core.contracts.execution_ports import CandidateErrorClassification
 from linrouter_core.runtime import (
     CandidateHealthService,
     CandidateRuntime,
@@ -66,6 +66,15 @@ from linrouter_core.runtime import (
     WafLockState,
 )
 from linrouter_core.runtime.http_api_runtime import handle_delete, handle_get, handle_post, handle_put
+from linrouter_core.runtime.execution_runtime_ports import (
+    CandidateStatePort,
+    ConcurrencyPort as RuntimeConcurrencyPort,
+    DebugCapturePort,
+    ExecutionFaults,
+    ObservabilityPort,
+    RequestPreparationPort,
+    StreamLifecyclePort,
+)
 from linrouter_core.runtime.app_runtime import (
     create_application_server,
     ensure_initial_config as _ensure_initial_config,
@@ -244,11 +253,7 @@ class ArkProxyRouter:
             candidate_type=UpstreamCandidate,
             log_aggregate_member_skip=self._log_aggregate_member_skip,
         )
-        self.runtime = CandidateRuntime(self, self.candidate_health, self.execution_policy)
-        # v0.6 composition boundary: the legacy facade owns no execution loop.
-        dependencies: ExecutionDependencies = self
-        self.non_stream_execution = NonStreamExecutionService(dependencies, self.runtime)
-        self.stream_execution = StreamExecutionService(dependencies, self.runtime)
+        # The compatibility facade only composes ports; execution loops are owned by CandidateRuntime.
         self.upstream_adapter = upstream_adapter or UpstreamAdapter(_ssl_context)
         self._upstream_client = self._create_upstream_client()
         # 供 DebugCapture 的旧两参数构造路径读取；避免 debug_capture.py 反向 import app。
@@ -262,6 +267,61 @@ class ArkProxyRouter:
             empty_usage=self._empty_usage,
             usage_from_stream_chunk=self._usage_from_stream_chunk,
         )
+        candidate_state = CandidateStatePort(
+            refresh=lambda: getattr(self.store, "refresh_expired_cooldowns", lambda: None)(),
+            find_group=lambda group_id: getattr(self.store, "find_group", lambda _group_id: None)(group_id),
+            route_group_id=self._route_group_id,
+            resolve_aggregate=self._resolve_aggregate,
+            iter_candidates=self._iter_upstream_candidates,
+            iter_aggregate=self._iter_aggregate_candidates,
+            aggregate_cooldown_seconds=self._aggregate_cooldown_seconds,
+            set_aggregate_cooldown=self._set_aggregate_member_cooldown,
+            set_cooldown=self._set_cooldown,
+            set_unusable=self._set_unusable,
+            mark_success=self._mark_success,
+            mark_aggregate_success=self._mark_aggregate_member_success,
+            mark_unusable=self._mark_unusable,
+        )
+        preparation = RequestPreparationPort(
+            resolve_url=self._resolve_url,
+            tools_enabled=self._tools_order_enabled,
+            normalize_tools=self._normalize_tools_order,
+            body_for=self._body_for_upstream,
+            headers_for=self._headers_for,
+            aggregate_log_suffix=self._aggregate_log_suffix,
+            debug_detail=self._debug_detail,
+            short_error=self._short_error,
+            fingerprint=self._payload_fingerprint,
+        )
+        concurrency = RuntimeConcurrencyPort(
+            candidate_lock=self._candidate_lock,
+            acquire=self._acquire_upstream_lock,
+            release=self._release_lock,
+            busy_detail=self._waf_lock_busy_detail,
+            mark_stream_active=self._mark_stream_active,
+        )
+        stream_lifecycle = StreamLifecyclePort(
+            idle_timeout=self._stream_idle_timeout_seconds,
+            readline=self._readline_with_idle_timeout,
+            response_usage=self._usage_from_response,
+            chunk_usage=self._usage_from_stream_chunk,
+            mark_timeout=self._mark_stream_timeout,
+        )
+        observability = ObservabilityPort(
+            start=self._live_request_start,
+            update=self._live_request_update,
+            finish=self._live_request_finish,
+            add_log=self.add_log,
+            patch_stream=self.patch_stream_lifecycle,
+        )
+        self.runtime = CandidateRuntime(
+            self.candidate_health, candidate_state, self.execution_policy, preparation,
+            self._upstream_client, concurrency, stream_lifecycle, observability,
+            DebugCapturePort(self.debug_capture.capture),
+            ExecutionFaults(AllModelsFailedError, StreamIdleTimeoutError, RouteContext),
+        )
+        self.non_stream_execution = NonStreamExecutionService(self.runtime)
+        self.stream_execution = StreamExecutionService(self.runtime)
 
     def _create_upstream_client(self) -> "UpstreamClient":
         from upstream_client import UpstreamClient

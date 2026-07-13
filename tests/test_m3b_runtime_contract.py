@@ -30,7 +30,8 @@ def test_m3b_call_facade_delegates_to_runtime_executor() -> None:
 
     assert "self.non_stream_execution.execute" in call_source
     assert "self._candidates.execute_non_stream" in service_source
-    assert "_upstream_client.request" in executor_source
+    assert "self.upstream.request" in executor_source
+    assert "self.dependencies" not in executor_source
     assert "except HTTPError" in executor_source
     assert "except (URLError, TimeoutError, OSError)" in executor_source
 

@@ -16,6 +16,7 @@ from settings_store import SettingsStore
 HOST = "127.0.0.1"
 APP_TITLE = "Lin Router"
 
+
 def create_tray_icon() -> Any:
     """返回托盘图标，使用跨平台动态生成实现。"""
     return get_platform().create_tray_icon()
@@ -26,10 +27,10 @@ def copy_to_clipboard(text: str) -> bool:
     return get_platform().copy_to_clipboard(text)
 
 
-def focus_existing_instance(port: int) -> bool:
+def focus_existing_instance(port: int, host: str = HOST) -> bool:
     """尝试打开已有实例的管理页面。"""
     try:
-        url = f"http://{HOST}:{port}"
+        url = f"http://{host}:{port}"
         urllib.request.urlopen(url, timeout=1.0)
         webbrowser.open(url)
         return True
@@ -38,12 +39,19 @@ def focus_existing_instance(port: int) -> bool:
 
 
 class LinRouterTray:
-    def __init__(self, tray_mode: bool = False, config_path: Optional[Path] = None) -> None:
+    def __init__(
+        self,
+        tray_mode: bool = False,
+        config_path: Optional[Path] = None,
+        host: str = HOST,
+        port: int = DEFAULT_START_PORT,
+    ) -> None:
         self.tray_mode = tray_mode
         self.server: Optional[Any] = None
         self.server_thread: Optional[threading.Thread] = None
-        self.port = DEFAULT_START_PORT
-        self.ui_url = f"http://{HOST}:{self.port}"
+        self.host = host
+        self.port = port
+        self.ui_url = f"http://{self.host}:{self.port}"
         self.base_url = f"{self.ui_url}/v1"
         self.config_path = config_path or self.resolve_config_path()
         self.settings_store = SettingsStore(self.config_path)
@@ -58,12 +66,12 @@ class LinRouterTray:
     def start_server(self) -> bool:
         try:
             from app import create_server
-            self.server, self.port, self.config_path = create_server(HOST, DEFAULT_START_PORT, self.config_path)
+            self.server, self.port, self.config_path = create_server(self.host, self.port, self.config_path)
             self.log_file = self.server.router.log_file
         except Exception as exc:
             print(f"启动失败：{exc}")
             return False
-        self.ui_url = f"http://{HOST}:{self.port}"
+        self.ui_url = f"http://{self.host}:{self.port}"
         self.base_url = f"{self.ui_url}/v1"
         self.server_thread = threading.Thread(target=self.server.serve_forever, name="LinRouterServer", daemon=True)
         self.server_thread.start()
@@ -159,7 +167,7 @@ class LinRouterTray:
         self.tray_icon = Icon(
             "LinRouter",
             icon_image,
-            f"{APP_TITLE} ({HOST}:{self.port})",
+            f"{APP_TITLE} ({self.host}:{self.port})",
             menu=self._build_menu(None, None),
         )
 
@@ -176,26 +184,38 @@ class LinRouterTray:
         self.open_ui()
 
 
-def main() -> None:
+def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Lin Router desktop tray")
     parser.add_argument("--tray", action="store_true", help="启动后最小化到系统托盘，不自动打开浏览器")
+    parser.add_argument("--host", default=HOST, help="监听地址（默认 127.0.0.1）")
+    parser.add_argument("--port", default=DEFAULT_START_PORT, type=int, help=f"监听端口（默认 {DEFAULT_START_PORT}）")
     # 默认不指定 --config，由 resolve_config_path 固定到项目根目录，避免跟随当前工作目录
     parser.add_argument("--config", default=None, help="配置文件路径（默认使用项目根目录 lin-router-config.json）")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+    raw_args = argv if argv is not None else sys.argv[1:]
+    args.isolated_launch = "--host" in raw_args or "--port" in raw_args
+    return args
 
-    # 单实例保护
-    guard = get_platform().create_single_instance_guard()
-    if not guard.acquire():
-        # 已有实例在运行，尝试打开其管理页面后退出
-        focus_existing_instance(DEFAULT_START_PORT)
-        sys.exit(0)
+
+def main(argv: Optional[list[str]] = None) -> None:
+    args = parse_args(argv)
+
+    guard = None
+    if not args.isolated_launch:
+        # 默认无隔离参数时保持原单实例保护契约。
+        guard = get_platform().create_single_instance_guard()
+        if not guard.acquire():
+            # 已有实例在运行，尝试打开其管理页面后退出
+            focus_existing_instance(DEFAULT_START_PORT)
+            sys.exit(0)
 
     try:
         config_path = Path(args.config) if args.config else None
-        app = LinRouterTray(tray_mode=args.tray, config_path=config_path)
+        app = LinRouterTray(tray_mode=args.tray, config_path=config_path, host=args.host, port=args.port)
         app.run()
     finally:
-        guard.release()
+        if guard is not None:
+            guard.release()
 
 
 if __name__ == "__main__":

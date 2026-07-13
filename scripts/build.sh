@@ -98,7 +98,10 @@ build_windows_zip() {
     return 1
   fi
   rm -f "$zip_file"
-  python - "$source_exe" "$zip_file" <<'PY'
+  local source_exe_win zip_file_win
+  source_exe_win="$(to_windows_path "$source_exe")"
+  zip_file_win="$(to_windows_path "$zip_file")"
+  python - "$source_exe_win" "$zip_file_win" <<'PY'
 from pathlib import Path
 import sys
 import zipfile
@@ -112,7 +115,14 @@ PY
 }
 
 run_release_guard() {
-  python "$RELEASE_GUARD" "$@"
+  local release_guard_win
+  release_guard_win="$(to_windows_path "$RELEASE_GUARD")"
+  local converted_paths=()
+  local path
+  for path in "$@"; do
+    converted_paths+=("$(to_windows_path "$path")")
+  done
+  python "$release_guard_win" "${converted_paths[@]}"
 }
 
 find_inno_compiler() {
@@ -169,10 +179,15 @@ build_windows_installer() {
       "/DAppOutputDir=$dist_dir_win" \
       "$installer_script_win"
   else
-    python "$SELF_INSTALLER_BUILDER" \
-      --source-exe "$source_exe" \
-      --output "$output_file" \
-      --project-root "$PROJECT_ROOT"
+    local self_installer_builder_win source_exe_win output_file_win project_root_win
+    self_installer_builder_win="$(to_windows_path "$SELF_INSTALLER_BUILDER")"
+    source_exe_win="$(to_windows_path "$source_exe")"
+    output_file_win="$(to_windows_path "$output_file")"
+    project_root_win="$(to_windows_path "$PROJECT_ROOT")"
+    python "$self_installer_builder_win" \
+      --source-exe "$source_exe_win" \
+      --output "$output_file_win" \
+      --project-root "$project_root_win"
   fi
 
   echo "Windows 安装包构建完成：$output_file"
@@ -188,7 +203,8 @@ case "$TARGET" in
       echo "生成 Windows 图标..."
       generate_icon win32 "$ICON_PATH"
     fi
-    python -m PyInstaller --noconfirm --clean "$PROJECT_ROOT/LinRouter.spec"
+    spec_file="$(to_windows_path "$PROJECT_ROOT/LinRouter.spec")"
+    python -m PyInstaller --noconfirm --clean "$spec_file"
     # 若旧产物仍存在，先尝试删除以避免 mv 失败
     rm -f "$DIST_DIR/LinRouter_windows.exe"
     mv "$DIST_DIR/LinRouter.exe" "$DIST_DIR/LinRouter_windows.exe"

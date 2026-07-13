@@ -70,7 +70,8 @@ def test_m3c_stream_facade_delegates_with_original_argument_order() -> None:
     assert "self._candidates.execute_stream(path, payload, route, incoming_headers, raw_body)" in service_source
     assert "yield " not in facade_source
     assert "except " not in facade_source
-    assert "router._upstream_client.request" in executor_source
+    assert "self.upstream.request" in executor_source
+    assert "self.dependencies" not in executor_source
     assert "yield first_chunk" in executor_source
     assert "finally:" in executor_source
 

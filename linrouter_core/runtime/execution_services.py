@@ -8,15 +8,13 @@ from __future__ import annotations
 
 from typing import Any, Dict, Iterable, Optional, Tuple
 
-from linrouter_core.contracts.execution_ports import ExecutionDependencies
 from .router_runtime import CandidateRuntime
 
 
 class NonStreamExecutionService:
-    """Owns the non-stream execution entry point behind an explicit dependency."""
+    """Owns the non-stream execution entry point behind the runtime coordinator."""
 
-    def __init__(self, dependencies: ExecutionDependencies, candidates: CandidateRuntime) -> None:
-        self._dependencies = dependencies
+    def __init__(self, candidates: CandidateRuntime) -> None:
         self._candidates = candidates
 
     def execute(
@@ -33,8 +31,7 @@ class NonStreamExecutionService:
 class StreamExecutionService:
     """Owns the stream execution entry point and returns the runtime iterator unchanged."""
 
-    def __init__(self, dependencies: ExecutionDependencies, candidates: CandidateRuntime) -> None:
-        self._dependencies = dependencies
+    def __init__(self, candidates: CandidateRuntime) -> None:
         self._candidates = candidates
 
     def execute(

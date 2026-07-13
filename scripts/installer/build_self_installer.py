@@ -60,8 +60,8 @@ def create_shortcut(shortcut_path: Path, target_path: Path, working_dir: Path) -
         return False
     shortcut_path.parent.mkdir(parents=True, exist_ok=True)
     try:
-        import win32com.client  # type: ignore
-        shell = win32com.client.Dispatch("WScript.Shell")
+        win32com_client = __import__("win32com.client", fromlist=("client",))
+        shell = win32com_client.Dispatch("WScript.Shell")
         shortcut = shell.CreateShortcut(str(shortcut_path))
         shortcut.TargetPath = str(target_path)
         shortcut.WorkingDirectory = str(working_dir)

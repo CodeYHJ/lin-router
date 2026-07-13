@@ -51,3 +51,42 @@ def test_v060_legacy_facade_only_delegates_execution_entries() -> None:
     assert "self._candidates.execute_non_stream" in inspect.getsource(NonStreamExecutionService.execute)
     assert "self._candidates.execute_stream" in inspect.getsource(StreamExecutionService.execute)
     assert "router: Any" not in inspect.getsource(CandidateRuntime.__init__)
+
+
+def test_v060_runtime_uses_all_final_owner_ports_without_wide_bridge() -> None:
+    runtime_source = inspect.getsource(CandidateRuntime)
+    adapters_source = (ROOT / "linrouter_core/runtime/execution_runtime_ports.py").read_text(encoding="utf-8")
+    production_sources = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (ROOT / "linrouter_core").rglob("*.py")
+    )
+
+    assert "ExecutionDependencies" not in production_sources
+    assert "self.dependencies" not in runtime_source
+    for dependency in (
+        "candidate_health",
+        "candidate_state",
+        "policy",
+        "preparation",
+        "upstream",
+        "concurrency",
+        "stream_lifecycle",
+        "observability",
+        "debug_capture",
+        "faults",
+    ):
+        assert f"self.{dependency}" in runtime_source
+
+    for port in (
+        "CandidateStatePort",
+        "RequestPreparationPort",
+        "ConcurrencyPort",
+        "StreamLifecyclePort",
+        "ObservabilityPort",
+        "DebugCapturePort",
+        "ExecutionFaults",
+    ):
+        assert f"class {port}" in adapters_source or f"class {port}" == "class ExecutionFaults"
+    assert "import app" not in adapters_source
+    assert "from app import" not in adapters_source
+    assert "RouterHandler" not in adapters_source
