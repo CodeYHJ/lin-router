@@ -67,12 +67,18 @@
 .logs-table th:nth-child(2) { width: 110px; }
 .logs-table th:nth-child(3) { width: 110px; }
 .logs-table th:nth-child(4) { width: 70px; }
-.logs-table th:nth-child(5) { width: 80px; }
-.logs-table th:nth-child(6) { width: 80px; }
-.logs-table th:nth-child(7) { width: 70px; }
+.logs-table th:nth-child(5) { width: 96px; }
+.logs-table th:nth-child(6) { width: 70px; }
+.logs-table th:nth-child(7) { width: 108px; }
 .logs-table th:nth-child(8) { width: 140px; }
 .logs-table th:nth-child(9) { width: auto; }
 .logs-table th:nth-child(10) { width: 60px; }
+
+.logs-table td.log-multiline {
+  white-space: pre-line;
+  line-height: 1.45;
+  vertical-align: top;
+}
 
 .help-tip {
   cursor: help;
@@ -205,27 +211,15 @@
 }
 
 .log-waf-hint-closed {
-  background: #fff7ed;
-  border-color: #fdba74;
-  color: #9a3412;
+  background: var(--warning-bg);
+  border-color: var(--warning-border);
+  color: var(--warning);
 }
 
 .log-waf-hint-open {
-  background: #fef2f2;
-  border-color: #fca5a5;
-  color: #991b1b;
-}
-
-[data-theme="dark"] .log-waf-hint-closed {
-  background: #431407;
-  border-color: #9a3412;
-  color: #fdba74;
-}
-
-[data-theme="dark"] .log-waf-hint-open {
-  background: #450a0a;
-  border-color: #991b1b;
-  color: #fca5a5;
+  background: var(--danger-bg);
+  border-color: var(--danger-border);
+  color: var(--danger);
 }
 
 .log-waf-hint-title {
@@ -285,20 +279,11 @@
   margin-bottom: 2px;
 }
 
-.diagnosis-card.success { border-color: rgba(34, 197, 94, 0.35); background: rgba(34, 197, 94, 0.08); }
-.diagnosis-card.warning { border-color: rgba(245, 158, 11, 0.4); background: rgba(245, 158, 11, 0.08); }
-.diagnosis-card.danger { border-color: rgba(239, 68, 68, 0.35); background: rgba(239, 68, 68, 0.08); }
-.diagnosis-card.info { border-color: rgba(59, 130, 246, 0.35); background: rgba(59, 130, 246, 0.08); }
+.diagnosis-card.success { border-color: var(--success-border); background: var(--success-bg); }
+.diagnosis-card.warning { border-color: var(--warning-border); background: var(--warning-bg); }
+.diagnosis-card.danger { border-color: var(--danger-border); background: var(--danger-bg); }
+.diagnosis-card.info { border-color: var(--info-border); background: var(--info-bg); }
 
 .log-technical-details { margin-top: 10px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg-secondary); }
 .log-technical-details summary { cursor: pointer; color: var(--text-secondary); font-weight: 600; }
 .log-technical-details .log-detail-raw { margin-top: 10px; }
-
-.reasoning-support-warning {
-  margin-top: 8px !important;
-  padding: 8px 10px;
-  border: 1px solid #f3c56b;
-  border-radius: 8px;
-  background: #fff8e6;
-  color: #8a5a00 !important;
-}

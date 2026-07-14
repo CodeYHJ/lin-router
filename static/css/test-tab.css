@@ -43,8 +43,8 @@
   flex: 1;
   margin: 0;
   padding: 12px;
-  background: #0f172a;
-  color: #d9e2ff;
+  background: var(--code-bg);
+  color: var(--code-text);
   border-radius: var(--radius-sm);
   overflow: auto;
   font-family: var(--font-mono);

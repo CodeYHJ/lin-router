@@ -1,29 +1,43 @@
 const SettingsPanel = {
+  _lastFocused: null,
+  _keyHandler: null,
+
   open() {
     let panel = document.getElementById('settings-panel');
+    const wasHidden = !panel || panel.classList.contains('hidden');
     if (!panel) {
       panel = document.createElement('div');
       panel.id = 'settings-panel';
       panel.className = 'settings-panel hidden';
       document.body.appendChild(panel);
     }
+    if (wasHidden) this._lastFocused = document.activeElement;
     panel.innerHTML = this.render();
     panel.classList.remove('hidden');
     this.attachEvents(panel);
+    this.bindFocusTrap(panel);
   },
 
   close() {
-    document.getElementById('settings-panel')?.classList.add('hidden');
+    const panel = document.getElementById('settings-panel');
+    if (!panel || panel.classList.contains('hidden')) return;
+    panel.classList.add('hidden');
+    if (this._keyHandler) document.removeEventListener('keydown', this._keyHandler);
+    this._keyHandler = null;
+    if (this._lastFocused?.isConnected && typeof this._lastFocused.focus === 'function') {
+      this._lastFocused.focus({ preventScroll: true });
+    }
+    this._lastFocused = null;
   },
 
   render() {
     const s = Store.state.settings || {};
     return `
       <div class="settings-backdrop"></div>
-      <div class="settings-drawer">
+      <div class="settings-drawer" role="dialog" aria-modal="true" aria-labelledby="settings-title" tabindex="-1">
         <div class="settings-header">
-          <h2>设置</h2>
-          <button type="button" class="settings-close" id="settings-close">×</button>
+          <h2 id="settings-title">设置</h2>
+          <button type="button" class="settings-close" id="settings-close" aria-label="关闭设置">×</button>
         </div>
         <div class="settings-body">
           <section class="settings-section">
@@ -136,7 +150,7 @@ const SettingsPanel = {
           <section class="settings-section">
             <h3>关于</h3>
             <div class="settings-about">
-              <div class="settings-about-row"><span>版本</span><span>v0.6.0</span></div>
+              <div class="settings-about-row"><span>版本</span><span>v0.6.2</span></div>
               <div class="settings-about-row"><span>项目地址</span><a href="https://github.com/dawnliming/lin-router" target="_blank" rel="noopener">GitHub</a></div>
             </div>
           </section>
@@ -183,6 +197,36 @@ const SettingsPanel = {
     panel.querySelector('#setting-debug-capture-last-body')?.addEventListener('change', e => this.updateCheckboxSetting(e, 'debug_capture_last_body'));
 
     this.syncExperimentalUI(panel);
+  },
+
+  bindFocusTrap(panel) {
+    if (this._keyHandler) document.removeEventListener('keydown', this._keyHandler);
+    const drawer = panel.querySelector('.settings-drawer');
+    this._keyHandler = event => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        this.close();
+        return;
+      }
+      if (event.key !== 'Tab') return;
+      const focusable = [...drawer.querySelectorAll('button:not(:disabled), [href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])')];
+      if (!focusable.length) {
+        event.preventDefault();
+        drawer.focus();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener('keydown', this._keyHandler);
+    setTimeout(() => drawer.querySelector('#settings-close')?.focus(), 0);
   },
 
   syncExperimentalUI(panel) {

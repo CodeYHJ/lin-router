@@ -10,6 +10,8 @@ const LogsTab = {
   _lastRenderSignature: '',
   _openDetailKey: '',
   _detailEventsBound: false,
+  _currentOnlySelectionKey: '',
+  _allCurrentOnlyLogs: null,
 
   refresh() {
     const panel = document.getElementById('panel-logs');
@@ -114,7 +116,7 @@ const LogsTab = {
     ['log-start', 'log-end', 'log-group', 'log-status'].forEach(id => {
       panel.querySelector(`#${id}`)?.addEventListener('change', () => this.readFilters());
     });
-    panel.querySelector('#logs-current-only')?.addEventListener('change', e => { this.currentOnly = e.target.checked; this.renderRows(); });
+    panel.querySelector('#logs-current-only')?.addEventListener('change', e => this.setCurrentOnly(e.target.checked));
     panel.querySelector('#logs-auto-refresh')?.addEventListener('change', e => { this.setAutoRefresh(e.target.checked); });
     panel.querySelector('#logs-refresh')?.addEventListener('click', () => this.manualRefresh());
     panel.querySelector('#logs-clear')?.addEventListener('click', () => this.clear());
@@ -148,6 +150,49 @@ const LogsTab = {
     }
   },
 
+  currentOnlySelectionKey() {
+    if (!this.currentOnly) return '';
+    const selected = Store.selected || {};
+    return `${selected.type || ''}:${selected.id || ''}`;
+  },
+
+  syncCurrentOnlySelection() {
+    const key = this.currentOnlySelectionKey();
+    if (key === this._currentOnlySelectionKey) return false;
+    this._currentOnlySelectionKey = key;
+    this.page = 0;
+    this._openDetailKey = '';
+    return true;
+  },
+
+  setCurrentOnly(enabled) {
+    this.currentOnly = !!enabled;
+    this._currentOnlySelectionKey = this.currentOnly ? this.currentOnlySelectionKey() : '';
+    this.page = 0;
+    this._openDetailKey = '';
+    this.manualRefresh();
+  },
+
+  shouldUseLocalCurrentOnlyPagination() {
+    const selected = Store.selected || {};
+    // 后端已有连接组筛选；模型/聚合筛选需要保留完整历史后再分页，避免总数与当前页不一致。
+    return this.currentOnly && ['model', 'aggregate'].includes(selected.type) && !!selected.id;
+  },
+
+  hasCurrentOnlyGroupConflict() {
+    const selected = Store.selected || {};
+    return this.currentOnly && selected.type === 'group' && !!selected.id
+      && !!this.filters.group && this.filters.group !== selected.id;
+  },
+
+  syncPageToTotal() {
+    const lastPage = Math.max(0, Math.ceil(this.total / this.pageSize) - 1);
+    if (this.page <= lastPage) return false;
+    this.page = lastPage;
+    this._openDetailKey = '';
+    return true;
+  },
+
   async autoRefreshTick() {
     if (!this.autoRefresh) return;
     // 只在当前是 logs tab 时刷新
@@ -157,19 +202,50 @@ const LogsTab = {
   },
 
   async manualRefresh(silent = false) {
+    this.syncCurrentOnlySelection();
     if (silent && this.page !== 0) return;
+    if (this.hasCurrentOnlyGroupConflict()) {
+      this._allCurrentOnlyLogs = null;
+      this.total = 0;
+      Store.update({ logs: [] });
+      this.renderRows(true);
+      this.renderPagination();
+      return;
+    }
     try {
-      const params = {
-        offset: this.page * this.pageSize,
-        limit: this.pageSize,
-        group: this.filters.group,
-        status: this.filters.status,
-        start: this.filters.start,
-        end: this.filters.end,
-      };
-      const data = await API.getLogs(params, { silent });
-      this.total = Number(data.total || 0);
-      Store.update({ logs: data.logs || [] });
+      if (this.shouldUseLocalCurrentOnlyPagination()) {
+        const all = await API.getLogs({
+          offset: 0,
+          // 日志保留上限为 5000；先取得服务端已筛选的完整窗口，再按模型/聚合筛选与分页。
+          limit: 5000,
+          group: this.filters.group,
+          status: this.filters.status,
+          start: this.filters.start,
+          end: this.filters.end,
+        }, { silent });
+        const source = all?.logs || [];
+        this._allCurrentOnlyLogs = source;
+        const filtered = this.filterSourceLogs(source);
+        this.total = filtered.length;
+        this.syncPageToTotal();
+        const offset = this.page * this.pageSize;
+        Store.update({ logs: filtered.slice(offset, offset + this.pageSize) });
+      } else {
+        const selected = Store.selected || {};
+        const params = {
+          offset: this.page * this.pageSize,
+          limit: this.pageSize,
+          group: this.currentOnly && selected.type === 'group' ? selected.id : this.filters.group,
+          status: this.filters.status,
+          start: this.filters.start,
+          end: this.filters.end,
+        };
+        const data = await API.getLogs(params, { silent });
+        this._allCurrentOnlyLogs = null;
+        this.total = Number(data.total || 0);
+        if (this.syncPageToTotal()) return this.manualRefresh(silent);
+        Store.update({ logs: data.logs || [] });
+      }
       this.renderRows(true);
       this.renderPagination();
     } catch (err) {
@@ -203,12 +279,17 @@ const LogsTab = {
     this.filters.group = document.getElementById('log-group')?.value || '';
     this.filters.status = document.getElementById('log-status')?.value || '';
     this.page = 0;
+    this._openDetailKey = '';
     this.manualRefresh();
   },
 
   filterLogs() {
     const logs = Store.state.logs || [];
-    return logs.filter(item => this.matches(item) && !this.isStableConfigSkip(item) && item.usage_source !== 'manual_probe');
+    return this.filterSourceLogs(logs);
+  },
+
+  filterSourceLogs(logs) {
+    return (logs || []).filter(item => this.matches(item) && !this.isStableConfigSkip(item) && item.usage_source !== 'manual_probe');
   },
 
   isStableConfigSkip(item) {
@@ -219,12 +300,14 @@ const LogsTab = {
 
   requestRelatedLogs(item) {
     if (!item?.request_id) return [];
-    return (Store.state.logs || []).filter(log => log.request_id === item.request_id && log !== item);
+    const source = this._allCurrentOnlyLogs || Store.state.logs || [];
+    return source.filter(log => log.request_id === item.request_id && log !== item);
   },
 
   resetFilters() {
     this.filters = { start: '', end: '', group: '', status: '' };
     this.page = 0;
+    this._openDetailKey = '';
     this.render();
   },
 
@@ -234,11 +317,21 @@ const LogsTab = {
     const t = this.itemTime(item);
     if (start && t < start) return false;
     if (end && t > end) return false;
+    const selected = Store.selected || {};
     if (this.filters.group && item.group_id !== this.filters.group) return false;
     if (this.currentOnly) {
-      const sel = Store.selected;
-      if (sel.type === 'group' && item.group_id !== sel.id) return false;
-      if (sel.type === 'model' && item.model !== Store.getModel(sel.id)?.name) return false;
+      const sel = selected;
+      if (sel.type === 'group' && sel.id && item.group_id !== sel.id) return false;
+      if (sel.type === 'model' && sel.id) {
+        const model = Store.getModel(sel.id);
+        const names = new Set([model?.name, model?.upstream_model, model?.ep_id].filter(Boolean));
+        const logNames = [item.model, item.requested_model, item.selected_model, item.selected_upstream_model];
+        if (!logNames.some(name => names.has(name))) return false;
+      }
+      if (sel.type === 'aggregate' && sel.id) {
+        const aggregate = Store.getAggregate(sel.id);
+        if (item.aggregate_id !== sel.id && item.aggregate_model !== aggregate?.name && item.model !== aggregate?.name) return false;
+      }
     }
     const status = String(item.status || '');
     const event = String(item.event || '');
@@ -270,6 +363,112 @@ const LogsTab = {
     }
     const map = { ok:'成功', stream_ok:'首完整帧成功', retry_ok:'重试成功', cooldown:'冷却切换', fallback:'自动切换', skip:'跳过', network:'网络错误', protocol:'协议错误', stream_protocol_error:'上游流式协议错误', error:'错误', system:'系统', stream_timeout:'流式超时', serial_protection_timeout:'串行保护候选忙', waf_lock_timeout:'候选忙（旧版）', stream_done:'流式完成', stream_idle_timeout:'流式空闲超时', client_disconnected:'客户端断开', manual_probe:'人工探测' };
     return map[event] || event || '-';
+  },
+
+  isStreamRecord(item, parsed = this.parseDetail(item?.detail)) {
+    const event = String(item?.event || '');
+    const finalResult = String(parsed.final_result || parsed.lifecycle || '');
+    return event.startsWith('stream')
+      || ['request_cancelled', 'stream_disconnected_before_completion'].includes(event)
+      || finalResult.startsWith('stream_')
+      || parsed.stream_started_at_ms !== undefined
+      || parsed.first_complete_frame_ms !== undefined;
+  },
+
+  streamTerminalLabel(item, parsed) {
+    const finalResult = String(parsed.final_result || parsed.lifecycle || '').toLowerCase();
+    const event = String(item?.event || '').toLowerCase();
+    const completionSignal = String(parsed.completion_signal || '').toLowerCase();
+    const map = {
+      stream_done: '流式完成',
+      done: '流式完成',
+      stream_failed: '流式失败',
+      stream_incomplete: '流式不完整',
+      stream_idle_timeout: '流式超时',
+      client_disconnected: '客户端断开',
+      manual_cancelled: '客户端已取消',
+    };
+    if (map[finalResult]) return map[finalResult];
+    if (['response.completed', '[done]', 'eof'].includes(completionSignal)) return '流式完成';
+    if (completionSignal === 'response.failed') return '流式失败';
+    if (completionSignal === 'response.incomplete') return '流式不完整';
+    if (event === 'stream_timeout') return '流式超时';
+    if (['request_cancelled', 'stream_disconnected_before_completion', 'client_disconnected'].includes(event)) return '客户端断开';
+    if (event === 'stream_done' || event === 'stream_finalized') return '流式完成';
+    return '流式进行中';
+  },
+
+  finalLifecycle(parsed) {
+    return String(parsed.final_result || parsed.lifecycle || '').toLowerCase();
+  },
+
+  isHttpSuccess(item) {
+    return /^2\d\d$/.test(String(item?.status || ''));
+  },
+
+  isExplicitFailureTerminal(item, parsed) {
+    const lifecycle = this.finalLifecycle(parsed);
+    if (['stream_failed', 'stream_incomplete', 'stream_idle_timeout', 'client_disconnected', 'manual_cancelled', 'cancelled'].includes(lifecycle)) return true;
+    if (['response.failed', 'response.incomplete'].includes(String(parsed.completion_signal || '').toLowerCase())) return true;
+    const event = String(item?.event || '').toLowerCase();
+    return ['stream_timeout', 'stream_protocol_error', 'stream_disconnected_before_completion', 'request_cancelled'].includes(event);
+  },
+
+  isSuccessfulRecord(item, parsed) {
+    // 聚合 fallback 的旧错误可能留在 detail；最终 2xx 和终态才代表本条记录的结论。
+    return this.isHttpSuccess(item) && !this.isExplicitFailureTerminal(item, parsed);
+  },
+
+  structuredDiagnosticText(item, parsed) {
+    const fields = [
+      item?.status,
+      item?.event,
+      item?.failure_scope,
+      parsed.failure_scope,
+      parsed.reason,
+      parsed.log_reason,
+      parsed.error,
+      parsed.error_code,
+      parsed.error_type,
+      parsed.auth_error,
+      parsed.code,
+      parsed.type,
+      parsed.category,
+      parsed.failure_reason,
+      parsed.fallback_reason,
+      parsed.waf_blocked,
+      this.finalLifecycle(parsed),
+    ];
+    return fields.filter(value => value !== undefined && value !== null).join(' ').toLowerCase();
+  },
+
+  isCurrentAuthFailure(item, parsed) {
+    const status = String(item?.status || '').trim().toLowerCase();
+    if (status === 'auth_error' || /(^|\D)(401|403)(?:\D|$)/.test(status)) return true;
+    if (String(parsed.auth_error || '').toLowerCase() === 'true') return true;
+    const authValues = [
+      parsed.error,
+      parsed.error_code,
+      parsed.error_type,
+      parsed.auth_error,
+      parsed.code,
+      parsed.type,
+      parsed.reason,
+      parsed.log_reason,
+      parsed.category,
+      parsed.failure_reason,
+    ].map(value => String(value || '').toLowerCase());
+    return authValues.some(value => /(^|[_:-])(auth(?:entication|orization)?(?:_error)?|invalid[_-]?api[_-]?key|unauthorized|forbidden)(?:$|[_:-])/.test(value));
+  },
+
+  eventSummary(item) {
+    const parsed = this.parseDetail(item?.detail);
+    if (!this.isStreamRecord(item, parsed)) return this.eventLabel(item?.event, item);
+    const terminal = this.streamTerminalLabel(item, parsed);
+    const hasFirstFrame = ['stream_ok', 'stream_done', 'stream_finalized'].includes(String(item?.event || ''))
+      || Number(parsed.chunks_received || 0) > 0
+      || parsed.first_complete_frame_ms !== undefined;
+    return hasFirstFrame ? `首包完成\n${terminal}` : terminal;
   },
 
   renderPayloadWarnings(parsed) {
@@ -319,7 +518,12 @@ const LogsTab = {
     const cached = Number(item.cached_tokens || 0);
     if (!total && !input && !output && !cached) return '-';
     const hit = input ? Math.round((cached / input) * 100) : 0;
-    return `输入 ${input} / 输出 ${output} / 命中 ${cached} (${hit}%) / total ${total}`;
+    return [
+      `输入：${input}`,
+      `输出：${output}`,
+      `命中：${cached}（命中率 ${hit}%）`,
+      `总计：${total}`,
+    ].join('\n');
   },
 
   parseDetail(detail) {
@@ -365,12 +569,24 @@ const LogsTab = {
 
   durationSummary(item) {
     const timing = this.streamTiming(item);
-    if (!timing || !timing.totalMilliseconds) return '-';
-    if (timing.primaryMilliseconds === null) return `总 ${this.formatDurationSeconds(timing.totalMilliseconds)}`;
-    return `${timing.primaryLabel} ${this.formatDurationSeconds(timing.primaryMilliseconds)} / 后续 ${this.formatDurationSeconds(timing.streamMilliseconds)} / 总 ${this.formatDurationSeconds(timing.totalMilliseconds)}`;
+    if (!timing) return '-';
+    const parsed = this.parseDetail(item?.detail);
+    if (!this.isStreamRecord(item, parsed)) return `总：${this.formatDurationSeconds(timing.totalMilliseconds)}`;
+    const firstLabel = timing.primaryLabel || '首完整帧';
+    const first = timing.primaryMilliseconds === null ? '-' : this.formatDurationSeconds(timing.primaryMilliseconds);
+    const remaining = timing.streamMilliseconds === null ? '-' : this.formatDurationSeconds(timing.streamMilliseconds);
+    return [
+      `${firstLabel}：${first}`,
+      `后续：${remaining}`,
+      `总：${this.formatDurationSeconds(timing.totalMilliseconds)}`,
+    ].join('\n');
   },
 
   renderRows(keepScroll = false) {
+    if (this.syncCurrentOnlySelection()) {
+      this.manualRefresh(true);
+      return;
+    }
     const tbody = document.getElementById('log-tbody');
     const empty = document.getElementById('logs-empty');
     const wrap = document.querySelector('.logs-table-wrap');
@@ -385,6 +601,7 @@ const LogsTab = {
     if (filtered.length === 0) {
       tbody.innerHTML = '';
       empty.classList.remove('hidden');
+      this._openDetailKey = '';
       return;
     }
     empty.classList.add('hidden');
@@ -435,7 +652,17 @@ const LogsTab = {
   },
 
   rowKey(item) {
-    return [item.request_id || item.time || '', item.event || '', item.fallback_index || 0, item.aggregate_member_id || '', item.status || ''].join('|');
+    const parsed = this.parseDetail(item?.detail);
+    // 流记录会在终态写回 status/event；键只使用创建时不变的身份字段，避免刷新时丢失已展开详情。
+    const streamIdentity = this.isStreamRecord(item, parsed) ? 'stream' : (item.event || 'event');
+    return [
+      item.request_id || 'no-request-id',
+      item.attempt || 0,
+      item.time || '',
+      item.aggregate_member_id || item.selected_model || item.model || '',
+      item.fallback_index || 0,
+      streamIdentity,
+    ].join('|');
   },
 
   rowSignature(item) {
@@ -449,10 +676,10 @@ const LogsTab = {
         <td class="tiny">${Utils.escapeHtml(this.groupName(item))}</td>
         <td>${Utils.escapeHtml(item.model || '-')}</td>
         <td><span class="pill ${this.statusClass(item.status, item)}">${Utils.escapeHtml(this.statusLabel(item.status))}</span></td>
-        <td class="tiny">${Utils.escapeHtml(this.eventLabel(item.event, item))}</td>
+        <td class="tiny log-multiline">${Utils.escapeHtml(this.eventSummary(item))}</td>
         <td class="tiny">${Number(item.attempt || 0) || 1}</td>
-        <td class="tiny">${Utils.escapeHtml(this.durationSummary(item))}</td>
-        <td class="tiny">${Utils.escapeHtml(this.tokenSummary(item))}</td>
+        <td class="tiny log-multiline">${Utils.escapeHtml(this.durationSummary(item))}</td>
+        <td class="tiny log-multiline">${Utils.escapeHtml(this.tokenSummary(item))}</td>
         <td class="tiny result-text log-detail-preview" title="${Utils.escapeHtml(this.formatDetailPreview(item))}" data-log-detail-preview-key="${Utils.escapeHtml(key)}">${Utils.escapeHtml(this.formatDetailPreview(item))}</td>
         <td><button type="button" data-log-detail-key="${Utils.escapeHtml(key)}">查看</button></td>
       </tr>
@@ -468,6 +695,7 @@ const LogsTab = {
     const willOpen = row.classList.contains('hidden');
     document.querySelectorAll('[data-log-detail-row]').forEach(r => r.classList.add('hidden'));
     row.classList.toggle('hidden', !willOpen);
+    this._openDetailKey = willOpen ? key : '';
   },
 
   formatDetailPreview(item) {
@@ -495,7 +723,7 @@ const LogsTab = {
 
   formatJsonBlock(value) {
     if (!value) return '-';
-    const str = Utils.redactSensitive(String(value));
+    const str = this.redactDiagnosticEvidence(value);
     // 尝试把分号键值对或 JSON 字符串格式化显示
     let formatted = Utils.escapeHtml(str);
     // 如果有 model=... 这类键值对，高亮关键 key
@@ -511,9 +739,28 @@ const LogsTab = {
 
   detailSummary(detail, maxLen = 500) {
     if (!detail) return '-';
-    const text = Utils.redactSensitive(String(detail)).replace(/;/g, '; ');
+    const text = this.redactDiagnosticEvidence(detail).replace(/;/g, '; ');
     const clipped = text.length > maxLen ? text.slice(0, maxLen) + '…' : text;
     return Utils.escapeHtml(clipped);
+  },
+
+  redactDiagnosticEvidence(value) {
+    let text = Utils.redactSensitive(String(value || ''));
+    // 历史日志可能早于后端脱敏规则；前端展开证据时不展示完整上游地址或 Header。
+    text = text.replace(/((?:out_)?headers\s*=\s*)\([^)]*\)/gi, '$1[REDACTED_HEADERS]');
+    text = text.replace(/((?:upstream_endpoint|target_url|url)\s*=\s*)https?:\/\/[^;\s]+/gi, '$1[REDACTED_URL]');
+    return text;
+  },
+
+  safeEndpoint(value) {
+    const text = String(value || '').trim();
+    if (!text || text === '-') return '-';
+    try {
+      const url = new URL(text);
+      return url.pathname || '/';
+    } catch (_) {
+      return text.replace(/^https?:\/\/[^/\s]+/i, '').split(/[?#]/, 1)[0] || '-';
+    }
   },
 
   firstValue(...values) {
@@ -587,8 +834,8 @@ const LogsTab = {
     `;
   },
 
-  renderWafHint(parsed) {
-    if (parsed.waf_blocked !== 'true') return '';
+  renderWafHint(parsed, diagnosis = null) {
+    if (parsed.waf_blocked !== 'true' || diagnosis?.title === '请求成功' || diagnosis?.title === '请求级错误 / 上游拒绝') return '';
     const message = '上游中转站拦截了本次请求。';
     const suggestion = parsed.suggestion || '';
     const wafOn = parsed.waf_compatible === 'true';
@@ -605,36 +852,41 @@ const LogsTab = {
   },
 
   diagnosisFor(item, parsed) {
-    const text = `${item.status || ''} ${item.event || ''} ${item.failure_scope || ''} ${item.detail || ''}`.toLowerCase();
+    if (this.isSuccessfulRecord(item, parsed)) {
+      return { className: 'success', title: '请求成功', scope: '-', cooldown: '否', suggestion: '无需处理。' };
+    }
+
+    const lifecycle = this.finalLifecycle(parsed);
+    const text = this.structuredDiagnosticText(item, parsed);
+    if (lifecycle === 'manual_cancelled' || String(item.failure_scope || parsed.failure_scope || '') === 'client_cancelled' || String(item.event || '') === 'request_cancelled') {
+      return { className: 'info', title: '客户端已取消请求', scope: 'request', cooldown: '否', suggestion: '请求由客户端主动终止，未判定为上游健康失败。' };
+    }
+    if (lifecycle === 'stream_failed') {
+      return { className: 'danger', title: '上游流式响应失败', scope: 'upstream', cooldown: '否', suggestion: '上游已明确返回失败终态；已保留已收到的流内容，不会混入其他候选。' };
+    }
+    if (lifecycle === 'stream_incomplete') {
+      return { className: 'warning', title: '上游流式响应不完整', scope: 'upstream', cooldown: '否', suggestion: '上游已明确返回不完整终态；已保留已收到的流内容，不会混入其他候选。' };
+    }
+    if (lifecycle === 'stream_idle_timeout' || String(item.event || '') === 'stream_timeout') {
+      return { className: 'danger', title: '上游流式响应空闲超时', scope: 'upstream', cooldown: item.cooldown_applied ? '是' : '可能', suggestion: '建议稍后重试，或对冷却中的单个模型/成员点击“重试恢复”。' };
+    }
     if (text.includes('serial_protection_wait_timeout') || text.includes('waf_lock_wait_timeout') || text.includes('candidate_busy') || text.includes('large_task_in_progress')) {
       return { className: 'warning', title: '候选忙 / 串行保护等待超时', scope: 'local_lock', cooldown: '否', suggestion: '该连接组已开启串行保护，系统会临时切换到下一个候选；通常无需清冷却。' };
     }
-    if (text.includes('stream_failed')) {
-      return { className: 'danger', title: '上游流式响应失败', scope: 'upstream', cooldown: '否', suggestion: '上游已明确返回失败终态；已保留已收到的流内容，不会混入其他候选。' };
-    }
-    if (text.includes('stream_incomplete')) {
-      return { className: 'warning', title: '上游流式响应不完整', scope: 'upstream', cooldown: '否', suggestion: '上游已明确返回不完整终态；已保留已收到的流内容，不会混入其他候选。' };
-    }
-    if (text.includes('stream_idle_timeout')) {
-      return { className: 'danger', title: '上游流式响应空闲超时', scope: 'upstream', cooldown: item.cooldown_applied ? '是' : '可能', suggestion: '建议稍后重试，或对冷却中的单个模型/成员点击“重试恢复”。' };
-    }
-    if ((text.includes('timeout') || text.includes('read_timeout')) && !text.includes('waf_lock') && !text.includes('serial_protection')) {
-      return { className: 'danger', title: '上游请求超时', scope: 'upstream', cooldown: item.cooldown_applied ? '是' : '可能', suggestion: '若频繁出现，检查中转站状态；确认恢复后可单点重试恢复。' };
+    if (this.isCurrentAuthFailure(item, parsed)) {
+      return { className: 'danger', title: '鉴权失败', scope: 'candidate', cooldown: '否', suggestion: '检查连接组或模型的 API Key / Route Key 是否正确。' };
     }
     if (text.includes('waf_blocked') || text.includes('request_level') || text.includes('upstream_request_rejected')) {
       return { className: 'warning', title: '请求级错误 / 上游拒绝', scope: 'request', cooldown: '否', suggestion: '请检查请求参数、内容策略或 WAF 兼容设置；这不会被诊断为模型健康失败。' };
     }
-    if (text.includes('auth_error') || text.includes('401') || text.includes('403')) {
-      return { className: 'danger', title: '鉴权失败', scope: 'candidate', cooldown: '否', suggestion: '检查连接组或模型的 API Key / Route Key 是否正确。' };
-    }
     if (text.includes('rate_limit') || text.includes('429')) {
       return { className: 'warning', title: '上游限流', scope: 'upstream', cooldown: item.cooldown_applied ? '是' : '否', suggestion: '稍后重试，或临时切换到其他候选。' };
     }
+    if ((text.includes('timeout') || text.includes('read_timeout')) && !text.includes('waf_lock') && !text.includes('serial_protection')) {
+      return { className: 'danger', title: '上游请求超时', scope: 'upstream', cooldown: item.cooldown_applied ? '是' : '可能', suggestion: '若频繁出现，检查中转站状态；确认恢复后可单点重试恢复。' };
+    }
     if (text.includes('server_error') || text.includes('network') || String(item.status || '').startsWith('5')) {
       return { className: 'danger', title: '上游健康失败', scope: item.failure_scope || parsed.failure_scope || 'upstream', cooldown: item.cooldown_applied ? '是' : '否', suggestion: '真实上游故障会进入冷却；确认恢复后可单点重试。' };
-    }
-    if (String(item.status || '').startsWith('2')) {
-      return { className: 'success', title: '请求成功', scope: item.failure_scope || '-', cooldown: '否', suggestion: '无需处理。' };
     }
     return { className: 'info', title: '需要关注', scope: item.failure_scope || parsed.failure_scope || 'request', cooldown: item.cooldown_applied ? '是' : '否', suggestion: '请结合候选过滤详情和脱敏摘要继续排查。' };
   },
@@ -654,11 +906,6 @@ const LogsTab = {
     return '-';
   },
 
-  reasoningSupportLabel(value) {
-    const map = { supported: '已验证支持', unsupported: '不支持', unknown: '未知' };
-    return map[String(value || 'unknown')] || '未知';
-  },
-
   reasoningPreservedLabel(value) {
     if (String(value) === 'true') return '是';
     if (String(value) === 'false') return '否';
@@ -675,31 +922,14 @@ const LogsTab = {
     return map[String(value || '')] || '-';
   },
 
-  reasoningWarning(parsed) {
-    const effort = String(parsed.requested_reasoning_effort || 'unset');
-    if (effort === 'unset') return '';
-    if (String(parsed.reasoning_preserved) === 'false') {
-      return '推理强度字段未被完整保留，请检查请求体转换路径。';
-    }
-    if (String(parsed.reasoning_value_status) === 'unrecognized') {
-      return '请求携带了尚未纳入已知枚举的推理强度；Lin Router 已原样透传，日志仅保留脱敏摘要。';
-    }
-    if (['unknown', 'unsupported'].includes(String(parsed.upstream_reasoning_support || 'unknown'))) {
-      return '当前中转渠道未确认支持推理强度，实际可能按上游默认值执行。';
-    }
-    return '';
-  },
-
-  renderDiagnosisCard(item, parsed) {
-    const d = this.diagnosisFor(item, parsed);
-    const reasoningWarning = this.reasoningWarning(parsed);
+  renderDiagnosisCard(item, parsed, diagnosis = this.diagnosisFor(item, parsed)) {
+    const d = diagnosis;
     return `
       <div class="diagnosis-card ${d.className}">
         <div>
           <div class="diagnosis-eyebrow">智能诊断</div>
           <strong>${Utils.escapeHtml(d.title)}</strong>
           <p>${Utils.escapeHtml(d.suggestion)}</p>
-          ${reasoningWarning ? `<p class="reasoning-support-warning">${Utils.escapeHtml(reasoningWarning)}</p>` : ''}
         </div>
         <dl>
           <dt>影响范围</dt><dd>${Utils.escapeHtml(this.failureScopeLabel(d.scope))}</dd>
@@ -709,17 +939,17 @@ const LogsTab = {
   },
 
   userFacingErrorReason(item, parsed) {
+    if (this.isSuccessfulRecord(item, parsed)) return '请求成功';
     const text = `${item.status || ''} ${item.event || ''} ${item.failure_scope || ''} ${item.detail || ''}`.toLowerCase();
     if (text.includes('serial_protection_wait_timeout') || text.includes('waf_lock_wait_timeout') || text.includes('candidate_busy') || text.includes('large_task_in_progress')) return '该连接组已开启串行保护，候选忙后已尝试切换';
     if (text.includes('stream_idle_timeout')) return '上游流式响应长时间无数据，已判定为空闲超时';
     if (text.includes('read_timeout') || (text.includes('timeout') && !text.includes('waf_lock') && !text.includes('serial_protection'))) return '上游响应超时';
+    if (this.isCurrentAuthFailure(item, parsed)) return '上游鉴权失败，请检查 API Key 或权限';
     if (text.includes('waf_blocked')) return '上游中转站的 WAF 拦截了请求';
-    if (text.includes('auth_error') || text.includes('401') || text.includes('403')) return '上游鉴权失败，请检查 API Key 或权限';
     if (text.includes('rate_limit') || text.includes('429')) return '上游触发限流，请稍后重试';
     if (text.includes('request_level') || text.includes('upstream_request_rejected')) return '请求参数或内容策略被上游拒绝';
     if (text.includes('network')) return '连接上游网络失败';
     if (text.includes('server_error') || String(item.status || '').startsWith('5')) return '上游服务暂时异常';
-    if (String(item.status || '').startsWith('2')) return '请求成功';
     if (parsed.skip_reason) return this.skipReasonLabel(parsed.skip_reason);
     return '请求未完成，请查看下方诊断与技术细节';
   },
@@ -802,8 +1032,8 @@ const LogsTab = {
   detailHtml(item) {
     const parsed = this.parseDetail(item.detail);
     const debugMode = Store.state.settings?.debug_mode === true;
-    const safeDetail = item.detail ? Utils.redactSensitive(String(item.detail)) : '';
-    const wafHint = this.renderWafHint(parsed);
+    const diagnosis = this.diagnosisFor(item, parsed);
+    const wafHint = this.renderWafHint(parsed, diagnosis);
     const isAggregate = parsed.resolved_as && parsed.resolved_as.startsWith('aggregate');
     const routeSteps = isAggregate ? this.aggregateRouteSteps(parsed, item) : [
       parsed.requested ? Utils.escapeHtml(parsed.requested) : Utils.escapeHtml(item.requested_model || item.model || 'lin-router-auto'),
@@ -813,12 +1043,10 @@ const LogsTab = {
     ];
     const aggregateChain = isAggregate ? this.renderAggregateChain(parsed) : '';
     const candidateFilterDetails = this.renderCandidateFilterDetails(item);
-    const diagnosisCard = this.renderDiagnosisCard(item, parsed);
-    const requestIdDisplay = debugMode ? (item.request_id || '-') : this.shortId(item.request_id || '-');
-    const memberIdDisplay = debugMode ? this.firstValue(item.aggregate_member_id, parsed.aggregate_member_id) : this.shortId(this.firstValue(item.aggregate_member_id, parsed.aggregate_member_id));
-    const errorReason = this.userFacingErrorReason(item, parsed);
+    const diagnosisCard = this.renderDiagnosisCard(item, parsed, diagnosis);
+    const requestIdDisplay = this.shortId(item.request_id || '-');
+    const memberIdDisplay = this.shortId(this.firstValue(item.aggregate_member_id, parsed.aggregate_member_id));
     const fallbackReason = this.userFacingFallbackReason(item, parsed);
-    const cooldownApplied = this.firstValue(item.cooldown_applied, parsed.cooldown_applied, parsed.cooldown_reason ? 'true' : 'false');
     const timing = this.streamTiming(item);
     const streamObservations = this.streamObservationDetails(parsed, timing);
     const streamLifecycle = {
@@ -829,19 +1057,24 @@ const LogsTab = {
       client_disconnected: '客户端已断开连接',
       streaming: '流式响应进行中',
     }[parsed.final_result || parsed.lifecycle || ''] || '-';
+    const fallbackEvidence = this.fallbackChainValue(parsed, item);
+    const debugFallback = !aggregateChain && fallbackEvidence !== '-'
+      ? `<dt>Fallback Chain</dt><dd class="log-detail-raw">${this.formatJsonBlock(fallbackEvidence)}</dd>`
+      : '';
+    const debugTransport = !streamObservations ? `
+          <dt>上游 HTTP 版本</dt><dd>${Utils.escapeHtml(parsed.upstream_http_version || '-')}</dd>
+          <dt>Header Policy</dt><dd>${Utils.escapeHtml(parsed.header_policy || '-')}</dd>
+          <dt>HTTP 客户端</dt><dd>${Utils.escapeHtml(parsed.http_client || '-')}</dd>` : '';
     const deepDiagnostics = debugMode ? `
       <div class="log-detail-block log-detail-raw-block">
         <h4>调试模式：深度诊断（已脱敏）</h4>
         <dl>
           <dt>完整 Request ID</dt><dd>${Utils.escapeHtml(item.request_id || '-')}</dd>
           <dt>完整 Member ID</dt><dd>${Utils.escapeHtml(this.firstValue(item.aggregate_member_id, parsed.aggregate_member_id))}</dd>
-          <dt>Fallback Chain</dt><dd class="log-detail-raw">${this.formatJsonBlock(this.fallbackChainValue(parsed, item))}</dd>
-          <dt>详情原文</dt><dd class="log-detail-raw">${this.formatJsonBlock(safeDetail || '-')}</dd>
-          <dt>上游 HTTP 版本</dt><dd>${Utils.escapeHtml(parsed.upstream_http_version || '-')}</dd>
-          <dt>Header Policy</dt><dd>${Utils.escapeHtml(parsed.header_policy || '-')}</dd>
           <dt>Body Fingerprint</dt><dd>${Utils.escapeHtml(this.firstValue(parsed.fingerprint, parsed.body_fingerprint))}</dd>
-          <dt>HTTP 客户端</dt><dd>${Utils.escapeHtml(parsed.http_client || '-')}</dd>
           <dt>Tools 排序</dt><dd>${Utils.escapeHtml(parsed.tools_normalized || '-')}</dd>
+          ${debugFallback}
+          ${debugTransport}
         </dl>
       </div>
     ` : '';
@@ -871,17 +1104,14 @@ const LogsTab = {
             <dt>连接组</dt><dd>${Utils.escapeHtml(this.firstValue(parsed.group_name, parsed.selected_group, this.groupName(item)))}</dd>
             <dt>实际模型</dt><dd>${Utils.escapeHtml(this.firstValue(parsed.selected_model, parsed.model, item.selected_model, item.model))}</dd>
             <dt>上游模型</dt><dd>${Utils.escapeHtml(this.firstValue(parsed.selected_upstream_model, parsed.model))}</dd>
-            <dt>上游端点</dt><dd>${Utils.escapeHtml(parsed.upstream_endpoint || '-')}</dd>
+            <dt>上游端点</dt><dd>${Utils.escapeHtml(this.safeEndpoint(parsed.upstream_endpoint))}</dd>
           </dl>
         </div>
         ${streamObservations}
         <div class="log-detail-block">
-          <h4>诊断信息</h4>
+          <h4>请求证据</h4>
           <dl>
-            <dt>错误原因</dt><dd>${Utils.escapeHtml(errorReason)}</dd>
             <dt>Fallback 原因</dt><dd>${Utils.escapeHtml(fallbackReason)}</dd>
-            <dt>影响范围</dt><dd>${Utils.escapeHtml(this.failureScopeLabel(this.firstValue(item.failure_scope, parsed.failure_scope, '')))}</dd>
-            <dt>触发冷却</dt><dd>${Utils.escapeHtml(String(cooldownApplied) === 'true' ? '是' : '否')}</dd>
             <dt>WAF 兼容</dt><dd>${Utils.escapeHtml(parsed.waf_compatible || '-')}</dd>
             <dt>WAF 策略</dt><dd>${Utils.escapeHtml(parsed.waf_client_mode || '-')}</dd>
             <dt>WAF 实际套用</dt><dd>${Utils.escapeHtml(this.boolLabel(parsed.waf_applied))}</dd>
@@ -895,7 +1125,6 @@ const LogsTab = {
             <dt>推理字段来源</dt><dd>${Utils.escapeHtml(parsed.reasoning_field_source || 'none')}</dd>
             <dt>推理强度状态</dt><dd>${Utils.escapeHtml(this.reasoningValueStatusLabel(parsed.reasoning_value_status))}</dd>
             <dt>推理字段已保留</dt><dd>${Utils.escapeHtml(this.reasoningPreservedLabel(parsed.reasoning_preserved))}</dd>
-            <dt>上游推理支持</dt><dd>${Utils.escapeHtml(this.reasoningSupportLabel(parsed.upstream_reasoning_support))}</dd>
             <dt>请求体模式</dt><dd>${Utils.escapeHtml(parsed.body_mode || parsed.body || '-')}</dd>
             <dt>Payload 预警</dt><dd>${this.renderPayloadWarnings(parsed)}</dd>
           </dl>
@@ -903,7 +1132,7 @@ const LogsTab = {
       </div>
       ${aggregateChain}
       ${candidateFilterDetails}
-      ${this.renderTechnicalDetails(item.detail)}
+      ${debugMode ? '' : this.renderTechnicalDetails(item.detail)}
 
       ${deepDiagnostics}
     `;

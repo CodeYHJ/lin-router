@@ -1,0 +1,266 @@
+/* 公共组件层：保留既有 class 名，避免页面级样式继续各自定义基础交互。 */
+.btn-primary,
+.btn-secondary,
+.btn-danger,
+.btn-recover,
+.utility-btn {
+  min-height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-1);
+  padding: 6px 12px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-control);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 20px;
+  transition: background-color .15s ease, border-color .15s ease, color .15s ease, transform .15s ease;
+}
+
+.btn-primary {
+  background: var(--accent);
+  color: var(--accent-contrast);
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+.btn-secondary,
+.utility-btn {
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  border-color: var(--border);
+}
+
+.btn-secondary:hover:not(:disabled),
+.utility-btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+}
+
+.btn-danger {
+  background: var(--danger-bg);
+  color: var(--danger);
+  border-color: var(--danger-border);
+}
+
+.btn-danger:hover:not(:disabled) {
+  background: var(--danger);
+  color: var(--accent-contrast);
+  border-color: var(--danger);
+}
+
+.btn-recover {
+  background: var(--success);
+  color: var(--accent-contrast);
+}
+
+.btn-recover:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--success) 86%, #000);
+}
+
+.btn-primary:active:not(:disabled),
+.btn-secondary:active:not(:disabled),
+.btn-danger:active:not(:disabled),
+.btn-recover:active:not(:disabled),
+.utility-btn:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.btn-primary[aria-busy="true"]::before,
+.btn-secondary[aria-busy="true"]::before,
+.btn-danger[aria-busy="true"]::before,
+.btn-recover[aria-busy="true"]::before {
+  content: "";
+  width: 12px;
+  height: 12px;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: var(--radius-round);
+  animation: spin .7s linear infinite;
+}
+
+.btn-sm {
+  min-height: 28px;
+  padding: 3px 8px;
+  font-size: 12px;
+  line-height: 20px;
+}
+
+.btn-icon,
+.icon-btn {
+  width: 32px;
+  min-width: 32px;
+  height: 32px;
+  min-height: 32px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+  line-height: 1;
+}
+
+.btn-icon:hover:not(:disabled),
+.icon-btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+  border-color: var(--border-strong);
+}
+
+.btn-icon.btn-danger {
+  color: var(--danger);
+  border-color: var(--danger-border);
+  background: var(--danger-bg);
+}
+
+.btn-icon.btn-danger:hover:not(:disabled) {
+  color: var(--accent-contrast);
+  background: var(--danger);
+  border-color: var(--danger);
+}
+
+.form-card,
+.panel-card {
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-container);
+  padding: var(--space-5);
+}
+
+.form-card h3,
+.panel-card h3 {
+  margin: 0 0 var(--space-4);
+  font-size: 14px;
+  font-weight: 650;
+  color: var(--text-primary);
+}
+
+.table-wrap,
+.table-shell {
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-container);
+  background: var(--bg-primary);
+}
+
+.table-shell table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.status-tag,
+.pill,
+.connection-status-badge,
+.batch-status {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: fit-content;
+  min-height: 22px;
+  padding: 2px 7px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 16px;
+  white-space: nowrap;
+}
+
+.pill { margin-left: 6px; }
+
+.status-tag.success,
+.pill.success,
+.batch-status-new {
+  color: var(--success);
+  background: var(--success-bg);
+  border-color: var(--success-border);
+}
+
+.status-tag.warning,
+.pill.warning,
+.pill.cooldown,
+.batch-status-dup,
+.connection-status-badge.needs_attention,
+.connection-status-badge.needs_completion,
+.connection-status-badge.needs_model_completion,
+.connection-status-badge.cooldown {
+  color: var(--warning);
+  background: var(--warning-bg);
+  border-color: var(--warning-border);
+}
+
+.status-tag.danger,
+.pill.danger,
+.batch-status-invalid {
+  color: var(--danger);
+  background: var(--danger-bg);
+  border-color: var(--danger-border);
+}
+
+.status-tag.info,
+.pill.info,
+.connection-status-badge {
+  color: var(--accent);
+  background: var(--accent-light);
+  border-color: color-mix(in srgb, var(--accent) 32%, var(--border));
+}
+
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 320px;
+  padding: var(--space-8);
+  text-align: center;
+  color: var(--text-primary);
+}
+
+.empty-state h2 {
+  margin: 0 0 var(--space-2);
+  font-size: 20px;
+  line-height: 28px;
+}
+
+.empty-icon {
+  margin-bottom: var(--space-4);
+  font-size: 40px;
+  color: var(--text-tertiary);
+}
+
+.empty-subtitle,
+.empty-hint {
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.empty-subtitle { margin: 0 0 var(--space-5); }
+.empty-hint { color: var(--text-tertiary); }
+.empty-hint code {
+  padding: 1px 5px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+}
+
+.empty-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--space-2);
+}
+
+.field-error,
+.error-text {
+  color: var(--danger);
+  font-size: 12px;
+  line-height: 1.5;
+}

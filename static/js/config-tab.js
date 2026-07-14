@@ -1,6 +1,14 @@
 const ConfigTab = {
+  defaultProviderBaseUrls: {
+    ark: 'https://ark.cn-beijing.volces.com/api/v3',
+    relay: 'https://www.codeok.cc/v1',
+    proxy: '',
+  },
   defaultRelayBaseUrl: 'https://www.codeok.cc/v1',
   _newGroupDraft: null,
+  _drafts: new Map(),
+  _draftDirty: new Set(),
+  _draftBaselines: new Map(),
 
   onShow() {
     const panel = document.getElementById('panel-config');
@@ -10,6 +18,7 @@ const ConfigTab = {
   },
 
   startNewGroup() {
+    this.clearDraft({ type: 'group', id: null });
     this._newGroupDraft = {
       name: '新连接组',
       provider_type: 'relay',
@@ -19,7 +28,6 @@ const ConfigTab = {
       auto_model_name: '',
       auto_model_cooldown_minutes: 5,
       stream_idle_timeout: 120,
-      reasoning_support: 'unknown',
       waf_compatible: false,
       serial_protection: false,
       waf_client_mode: 'always',
@@ -30,18 +38,35 @@ const ConfigTab = {
     this.render();
   },
 
+  providerBaseUrl(provider) {
+    return this.defaultProviderBaseUrls[provider] ?? '';
+  },
+
+  providerBasePlaceholder(provider) {
+    return this.providerBaseUrl(provider) || 'https://example.com/v1';
+  },
+
+  systemDefaultProvider(value) {
+    const normalized = String(value || '').trim();
+    if (!normalized) return '';
+    return Object.entries(this.defaultProviderBaseUrls)
+      .find(([, baseUrl]) => baseUrl && normalized === baseUrl)?.[0] || '';
+  },
+
+  isSystemDefaultBaseUrl(value, provider) {
+    const normalized = String(value || '').trim();
+    const defaultUrl = this.providerBaseUrl(provider);
+    return Boolean(defaultUrl) && normalized === defaultUrl;
+  },
+
   render() {
     const panel = document.getElementById('panel-config');
     const sel = Store.selected;
-    // 清理 pending 的自动保存，避免切换后旧表单的自动保存误写新对象
+    // 清理旧的定时器，运行态刷新只 patch 状态，不触碰草稿控件。
     clearTimeout(this._autoSaveTimer);
     this._autoSaveTimer = null;
     this.setSaveStatus('');
-    // 重新渲染前保留用户正在编辑的表单值，但只在“同一对象重渲染”时恢复，切换对象不恢复旧值
-    const oldForm = panel?.querySelector('.config-form');
-    const oldSelectedType = oldForm?.dataset.selectedType;
-    const oldSelectedId = oldForm?.dataset.selectedId;
-    const formValues = this._captureFormValues();
+    const formValues = this._draftValues(sel);
     this._stopCooldownTimer();
     const isNewGroupDraft = this.isNewGroupDraft(sel);
     if (this._newGroupDraft && !isNewGroupDraft) this._newGroupDraft = null;
@@ -50,9 +75,10 @@ const ConfigTab = {
       this.attachEmptyEvents(panel);
       return;
     }
-    const item = isNewGroupDraft
+    const rawItem = isNewGroupDraft
       ? this._newGroupDraft
       : (sel.type === 'group' ? Store.getGroup(sel.id) : (sel.type === 'model' ? Store.getModel(sel.id) : Store.getAggregate(sel.id)));
+    const item = this._itemWithDraft(sel, rawItem);
     const title = item ? Utils.escapeHtml(item.display_name || item.name) : (sel.type === 'group' ? '新建连接组' : (sel.type === 'model' ? '新建模型' : '新建聚合模型'));
 
     panel.innerHTML = `
@@ -72,10 +98,12 @@ const ConfigTab = {
         </div>
       </div>
     `;
-    const sameSelection = oldSelectedType === sel.type && oldSelectedId === sel.id;
-    this._restoreFormValues(sameSelection ? formValues : {});
+    const form = panel.querySelector('.config-form');
+    if (!formValues && form) this._rememberDraftBaseline(sel, form);
+    this._restoreFormValues(formValues || {});
     this.attachEvents(panel);
     this.syncUIFromState();
+    if (formValues) this.setSaveStatus('draft');
     this._startCooldownTimer();
   },
 
@@ -107,11 +135,12 @@ const ConfigTab = {
 
   renderGroupSection(sel = Store.selected) {
     const storedGroup = sel.type === 'group' && sel.id ? Store.getGroup(sel.id) : null;
-    const g = storedGroup || (this.isNewGroupDraft(sel) ? this._newGroupDraft : null);
+    const g = this._itemWithDraft(sel, storedGroup || (this.isNewGroupDraft(sel) ? this._newGroupDraft : null));
     const isDraft = !storedGroup && Boolean(g);
     const provider = g?.provider_type || 'relay';
     const baseUrl = g?.base_url || '';
-    const usesDefaultRelayBaseUrl = provider === 'relay' && this.isDefaultRelayBaseUrl(baseUrl);
+    const usesSystemDefault = this.isSystemDefaultBaseUrl(baseUrl, provider);
+    const systemDefaultProvider = this.systemDefaultProvider(baseUrl);
     return `
       <form class="config-form" id="group-form" data-type="group" data-selected-type="group" data-selected-id="${g?.id || ''}">
         <input type="hidden" id="group-id" value="${g?.id || ''}">
@@ -131,8 +160,8 @@ const ConfigTab = {
           </div>
           <div class="form-row">
             <label>Base URL</label>
-            <input id="group-base" value="${Utils.escapeHtml(baseUrl)}" placeholder="https://example.com/v1" data-codeok-default="${usesDefaultRelayBaseUrl ? 'true' : 'false'}">
-            <div class="form-hint ${usesDefaultRelayBaseUrl ? '' : 'hidden'}" id="group-base-default-note">默认第三方地址，可修改</div>
+            <input id="group-base" value="${Utils.escapeHtml(baseUrl)}" placeholder="${Utils.escapeHtml(this.providerBasePlaceholder(provider))}" data-provider="${Utils.escapeHtml(provider)}" data-system-default-provider="${Utils.escapeHtml(systemDefaultProvider)}">
+            <div class="form-hint ${usesSystemDefault ? '' : 'hidden'}" id="group-base-default-note">系统默认地址，可修改</div>
           </div>
           <div class="form-row" id="group-key-row">
             <label id="group-key-label">Ark API Key</label>
@@ -142,8 +171,6 @@ const ConfigTab = {
             </div>
           </div>
         </section>
-        ${g ? this.renderGroupWorkflow(g, { isDraft }) : ''}
-        ${g && !isDraft ? this.renderSpeedTestCard('group', g.id, '连接组测速', '测速连接组') : ''}
         <details class="form-card advanced-config" id="group-advanced-card">
           <summary>高级配置</summary>
           <div class="advanced-config-body">
@@ -154,15 +181,6 @@ const ConfigTab = {
           <div class="form-row" id="group-stream-timeout-row">
             <label>流式空闲超时秒</label>
             <input id="group-stream-timeout" type="number" min="0" max="600" step="1" value="${g?.stream_idle_timeout ?? 120}">
-          </div>
-          <div class="form-row" id="group-reasoning-support-row">
-            <label>推理强度支持</label>
-            <select id="group-reasoning-support">
-              <option value="unknown" ${(g?.reasoning_support || 'unknown') === 'unknown' ? 'selected' : ''}>未知（尚未验证）</option>
-              <option value="supported" ${g?.reasoning_support === 'supported' ? 'selected' : ''}>已验证支持</option>
-              <option value="unsupported" ${g?.reasoning_support === 'unsupported' ? 'selected' : ''}>不支持</option>
-            </select>
-            <div class="form-hint">仅标记渠道能力，不会改写 Hermes 的推理强度字段。</div>
           </div>
           <div class="form-row" id="group-waf-row">
             <label class="checkbox">
@@ -208,7 +226,7 @@ const ConfigTab = {
             <label>本地路由 Key</label>
             <div class="input-with-btn">
               <input id="group-route-key" value="${Utils.escapeHtml(g?.route_key || '')}" readonly>
-              <button type="button" id="group-copy-route-key" title="复制路由 Key">📋</button>
+              <button type="button" id="group-copy-route-key" class="btn-secondary btn-sm" title="复制路由 Key">复制</button>
             </div>
           </div><div class="form-hint group-route-key-hint">客户端使用此 Key 访问本机 Lin Router，不是上游 API Key。</div>` : '<div class="form-hint">保存连接组后会生成本地路由 Key。</div>'}
           <div class="form-row">
@@ -225,6 +243,8 @@ const ConfigTab = {
             </div>
           </div>
         </section>
+        ${g ? this.renderGroupWorkflow(g, { isDraft }) : ''}
+        ${g && !isDraft ? this.renderSpeedTestCard('group', g.id, '连接组测速', '测速连接组') : ''}
       </form>
     `;
   },
@@ -254,7 +274,7 @@ const ConfigTab = {
   },
 
   renderModelSection(sel = Store.selected) {
-    const m = sel.type === 'model' ? Store.getModel(sel.id) : null;
+    const m = this._itemWithDraft(sel, sel.type === 'model' ? Store.getModel(sel.id) : null);
     const groupId = m?.group_id || Store.state.groups?.[0]?.id || '';
     const group = Store.getGroup(groupId);
     const isArk = group?.provider_type === 'ark';
@@ -352,7 +372,7 @@ const ConfigTab = {
   },
 
   renderAggregateSection(sel = Store.selected) {
-    const a = sel.type === 'aggregate' ? Store.getAggregate(sel.id) : null;
+    const a = this._itemWithDraft(sel, sel.type === 'aggregate' ? Store.getAggregate(sel.id) : null);
     return `
       <form class="config-form" id="aggregate-form" data-type="aggregate" data-selected-type="aggregate" data-selected-id="${a?.id || ''}">
         <input type="hidden" id="aggregate-id" value="${a?.id || ''}">
@@ -375,10 +395,6 @@ const ConfigTab = {
           <div class="form-row">
             <label>显示名</label>
             <input id="aggregate-display-name" value="${Utils.escapeHtml(a?.display_name || '')}" placeholder="可选，用于界面展示">
-          </div>
-          <div class="form-row">
-            <label>描述</label>
-            <textarea id="aggregate-description" rows="2" placeholder="可选">${Utils.escapeHtml(a?.description || '')}</textarea>
           </div>
           <div class="form-row">
             <label>客户端公开模型别名</label>
@@ -930,9 +946,8 @@ const ConfigTab = {
       this.bindGroupWorkflowActions(panel);
       ['#group-name', '#group-base', '#group-key'].forEach(selector => {
         panel.querySelector(selector)?.addEventListener('input', () => this.onGroupDraftInput());
-        panel.querySelector(selector)?.addEventListener('blur', () => this.validateGroupForm({ focus: false }));
       });
-      this.bindAutoSave(groupForm, () => this.autoSaveGroup());
+      this.bindAutoSave(groupForm);
     }
 
     // 模型表单
@@ -956,7 +971,7 @@ const ConfigTab = {
       panel.querySelector('#model-recover')?.addEventListener('click', () => this.onRecoverModel());
       panel.querySelector('#model-fetch')?.addEventListener('click', () => this.onFetchUpstream());
       panel.querySelector('#model-test')?.addEventListener('click', () => this.openQuickTest(document.getElementById('model-id')?.value));
-      this.bindAutoSave(modelForm, () => this.autoSaveModel());
+      this.bindAutoSave(modelForm);
     }
 
     // 聚合模型表单
@@ -978,7 +993,7 @@ const ConfigTab = {
         el.addEventListener('click', () => this.onAggregateMemberAction(el.dataset.action, el.dataset.memberId));
       });
       this.bindAggregateMemberDragAndDrop(panel);
-      this.bindAutoSave(aggregateForm, () => this.autoSaveAggregate());
+      this.bindAutoSave(aggregateForm);
     }
 
     // 批量导入
@@ -994,7 +1009,10 @@ const ConfigTab = {
     const el = document.getElementById('save-status');
     if (!el) return;
     el.className = 'save-status';
-    if (status === 'saving') {
+    if (status === 'draft') {
+      el.textContent = '有未保存草稿';
+      el.classList.add('draft');
+    } else if (status === 'saving') {
       el.textContent = '保存中…';
       el.classList.add('saving');
     } else if (status === 'saved') {
@@ -1013,6 +1031,82 @@ const ConfigTab = {
 
   // 捕获当前表单中用户已编辑的值，用于重新渲染后恢复
 
+  _captureCurrentDraft() {
+    const form = document.querySelector('#panel-config .config-form');
+    if (!form) return;
+    const selection = {
+      type: form.dataset.selectedType || Store.selected.type,
+      id: form.dataset.selectedId || null,
+    };
+    this.captureDraft(form, selection);
+  },
+
+  _rememberDraftBaseline(selection, form) {
+    if (!form) return;
+    const key = ConfigTabForm.draftKey(this, selection);
+    this._draftBaselines.set(key, this._captureFormValues(form));
+  },
+
+  _draftValues(selection = Store.selected) {
+    return this.draftValues(selection);
+  },
+
+  _itemWithDraft(selection, item) {
+    const values = this._draftValues(selection);
+    if (!item || !values) return item;
+    if (selection.type === 'group') {
+      const provider = values['group-provider'] || item.provider_type;
+      const key = values['group-key'] ?? this.groupKeyValue(item);
+      const serial = values['__radio:group-request-concurrency'];
+      return {
+        ...item,
+        name: values['group-name'] ?? item.name,
+        provider_type: provider,
+        base_url: values['group-base'] ?? item.base_url,
+        ark_api_key: provider === 'ark' ? key : '',
+        api_key: provider === 'proxy' ? key : '',
+        auto_model_name: values['group-auto-model-name'] ?? item.auto_model_name,
+        auto_model_cooldown_minutes: values['group-cooldown'] ?? item.auto_model_cooldown_minutes,
+        stream_idle_timeout: values['group-stream-timeout'] ?? item.stream_idle_timeout,
+        waf_compatible: values['group-waf'] ?? item.waf_compatible,
+        serial_protection: serial ? serial === 'serial' : item.serial_protection,
+        waf_client_mode: values['group-waf-client-mode'] ?? item.waf_client_mode,
+        waf_accept_policy: values['group-waf-policy'] ?? item.waf_accept_policy,
+      };
+    }
+    if (selection.type === 'model') {
+      const groupId = values['model-group'] || item.group_id;
+      const group = Store.getGroup(groupId);
+      const upstream = values['model-upstream'] ?? values['model-ep'] ?? item.upstream_model ?? item.ep_id;
+      return {
+        ...item,
+        name: values['model-name'] ?? item.name,
+        group_id: groupId,
+        ep_id: values['model-ep'] ?? (['relay', 'proxy'].includes(group?.provider_type) ? upstream : item.ep_id),
+        upstream_model: values['model-upstream'] ?? item.upstream_model,
+        api_key: values['model-key'] ?? item.api_key,
+        price_group: values['model-price'] ?? item.price_group,
+        price_input: values['model-price-input'] ?? item.price_input,
+        price_output: values['model-price-output'] ?? item.price_output,
+        usable: values['model-usable'] ?? item.usable,
+      };
+    }
+    if (selection.type === 'aggregate') {
+      return {
+        ...item,
+        name: values['aggregate-name'] ?? item.name,
+        display_name: values['aggregate-display-name'] ?? item.display_name,
+        client_model_aliases: values['aggregate-client-model-aliases'] !== undefined
+          ? String(values['aggregate-client-model-aliases']).split(/[\n,]+/).map(value => value.trim()).filter(Boolean)
+          : item.client_model_aliases,
+        enabled: values['aggregate-enabled'] ?? item.enabled,
+        cooldown_minutes: values['aggregate-cooldown'] ?? item.cooldown_minutes,
+        strategy: values['aggregate-strategy'] ?? item.strategy,
+      };
+    }
+    return item;
+  },
+
   isNewGroupDraft(...args) { return ConfigTabForm.isNewGroupDraft(this, ...args); },
   isDefaultRelayBaseUrl(...args) { return ConfigTabForm.isDefaultRelayBaseUrl(this, ...args); },
   groupKeyValue(...args) { return ConfigTabForm.groupKeyValue(this, ...args); },
@@ -1027,6 +1121,9 @@ const ConfigTab = {
   refreshGroupWorkflowFromDraft(...args) { return ConfigTabForm.refreshGroupWorkflowFromDraft(this, ...args); },
   bindGroupWorkflowActions(...args) { return ConfigTabForm.bindGroupWorkflowActions(this, ...args); },
   onGroupDraftInput(...args) { return ConfigTabForm.onGroupDraftInput(this, ...args); },
+  captureDraft(...args) { return ConfigTabForm.captureDraft(this, ...args); },
+  draftValues(...args) { return ConfigTabForm.draftValues(this, ...args); },
+  clearDraft(...args) { return ConfigTabForm.clearDraft(this, ...args); },
   bindAutoSave(...args) { return ConfigTabForm.bindAutoSave(this, ...args); },
   _captureFormValues(...args) { return ConfigTabForm._captureFormValues(this, ...args); },
   _restoreFormValues(...args) { return ConfigTabForm._restoreFormValues(this, ...args); },

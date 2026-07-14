@@ -38,7 +38,8 @@ def test_config_tab_module_boundaries_and_script_order():
     assert 'ConfigTabForm.validateGroupForm(this, ...args)' in config_js
     assert 'ConfigTabActions.onGroupSubmit(this, ...args)' in config_js
     assert 'const stillViewingSavedGroup = Tabs.current === \'config\'' in actions_js
-    assert 'if (explicitSubmit && stillViewingSavedGroup)' in actions_js
+    assert 'if (stillViewingSavedGroup)' in actions_js
+    assert 'explicitSubmit' not in actions_js
     assert 'ConfigTabRuntimeView.onRuntimeStateUpdate(this, ...args)' in config_js
     assert 'ConfigTabForm.bindGlobalEvents(this)' in config_js
     assert 'ConfigTabRuntimeView.dispose(this)' in config_js
@@ -107,11 +108,38 @@ def test_action_orchestration_preserves_existing_api_contracts():
     for payload_field in [
         "provider_type: mode", "base_url:", "ark_api_key:", "api_key:",
         "auto_model_cooldown_minutes:", "stream_idle_timeout:",
-        "reasoning_support:", "waf_client_mode:", "waf_compatible:", "serial_protection:",
+        "waf_client_mode:", "waf_compatible:", "serial_protection:",
         "waf_accept_policy:", "group_id: groupId", "upstream_model:",
         "client_model_aliases:", "cooldown_minutes:", "strategy:",
     ]:
         assert payload_field in actions_js
+    assert "reasoning_support:" not in actions_js
+
+
+def test_u1_config_draft_provider_and_aggregate_description_contract():
+    config_js = (ROOT / "static/js/config-tab.js").read_text(encoding="utf-8")
+    form_js = (ROOT / "static/js/config-tab-form.js").read_text(encoding="utf-8")
+    actions_js = (ROOT / "static/js/config-tab-actions.js").read_text(encoding="utf-8")
+    tree_js = (ROOT / "static/js/tree.js").read_text(encoding="utf-8")
+    css = (ROOT / "static/css/config-tab.css").read_text(encoding="utf-8")
+
+    assert "_drafts: new Map()" in config_js
+    assert "localStorage" not in form_js
+    assert "sessionStorage" not in form_js
+    assert "dispatchEvent(new Event('submit'))" not in form_js
+    assert "https://ark.cn-beijing.volces.com/api/v3" in config_js
+    assert "https://www.codeok.cc/v1" in config_js
+    assert "proxy: ''" in config_js
+    assert 'id="group-reasoning-support"' not in config_js
+    assert "reasoning_support:" not in actions_js
+    assert 'id="aggregate-description"' not in config_js
+    assert "description:" not in actions_js
+    assert "a.description" not in tree_js
+    assert ".form-row > .form-hint" in css
+
+    group_section = config_js.split("renderGroupSection", 1)[1].split("renderGroupWorkflow", 1)[0]
+    assert group_section.index('基础配置') < group_section.index('group-advanced-card')
+    assert group_section.index('group-advanced-card') < group_section.index('>其他<')
 
 
 def test_form_global_listener_and_runtime_dispose_are_idempotent():
@@ -124,7 +152,12 @@ const document = {
   addEventListener(type, handler) { listeners.set(type, handler); },
   removeEventListener(type, handler) { if (listeners.get(type) === handler) listeners.delete(type); },
 };
-const context = { document, clearTimeout() {}, clearInterval() {}, setInterval() { return 1; } };
+const windowListeners = new Map();
+const window = {
+  addEventListener(type, handler) { windowListeners.set(type, handler); },
+  removeEventListener(type, handler) { if (windowListeners.get(type) === handler) windowListeners.delete(type); },
+};
+const context = { document, window, clearTimeout() {}, clearInterval() {}, setInterval() { return 1; } };
 vm.runInNewContext(source, context);
 let outsideCalls = 0;
 const controller = { _onUpstreamOutsideClick() { outsideCalls += 1; }, _stopCooldownTimer() { this.timerStopped = true; }, _autoSaveTimer: 7 };
@@ -136,6 +169,7 @@ if (outsideCalls !== 1) throw new Error('listener did not preserve controller bi
 context.form.dispose(controller);
 context.form.dispose(controller);
 if (listeners.size !== 0 || controller._upstreamOutsideClickHandler) throw new Error('global listener was not disposed');
+if (!windowListeners.has('beforeunload')) throw new Error('draft unload guard was removed when leaving config tab');
 context.runtime.dispose(controller);
 if (!controller.timerStopped || controller._autoSaveTimer !== null) throw new Error('runtime timers were not disposed');
 console.log('M56_LIFECYCLE_OK');

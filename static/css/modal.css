@@ -1,86 +1,76 @@
 .modal-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.45);
+  z-index: var(--z-overlay);
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 1000;
-  padding: 20px;
+  padding: var(--space-5);
+  background: var(--overlay-scrim);
 }
 
-.modal-overlay.hidden {
-  display: none;
-}
+.modal-overlay.hidden { display: none; }
 
 .modal-dialog {
+  width: min(100%, 460px);
+  max-height: min(720px, calc(100vh - 40px));
+  overflow: hidden auto;
   background: var(--bg-primary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-overlay);
   box-shadow: var(--shadow-lg);
-  width: 100%;
-  max-width: 420px;
-  overflow: hidden;
 }
 
-.modal-dialog.modal-wide {
-  max-width: 960px;
-}
+.modal-dialog.modal-wide { width: min(100%, 960px); }
 
-.modal-dialog.modal-wide .modal-body {
-  padding: 16px 20px;
-}
+.modal-dialog.modal-wide .modal-body { padding: var(--space-4) var(--space-5); }
 
 .modal-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 16px 20px;
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-5);
   border-bottom: 1px solid var(--border);
 }
 
 .modal-header h3 {
   margin: 0;
-  font-size: 16px;
-  font-weight: 600;
   color: var(--text-primary);
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 24px;
 }
 
 .modal-close {
-  width: 28px;
-  height: 28px;
-  display: flex;
+  width: 30px;
+  min-width: 30px;
+  height: 30px;
+  min-height: 30px;
+  display: inline-flex;
   align-items: center;
   justify-content: center;
-  border-radius: var(--radius-sm);
+  padding: 0;
   color: var(--text-secondary);
-  font-size: 18px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-control);
+  font-size: 20px;
   line-height: 1;
 }
 
-.modal-close:hover {
-  background: var(--bg-hover);
-  color: var(--text-primary);
-}
+.modal-close:hover { color: var(--text-primary); background: var(--bg-hover); border-color: var(--border); }
 
 .modal-body {
-  padding: 20px;
+  padding: var(--space-5);
+  color: var(--text-primary);
   font-size: 14px;
   line-height: 1.6;
-  color: var(--text-primary);
 }
 
 .modal-footer {
   display: flex;
+  flex-wrap: wrap;
   justify-content: flex-end;
-  gap: 10px;
-  padding: 12px 20px 20px;
-}
-
-.modal-footer button {
-  padding: 8px 16px;
-  border-radius: var(--radius-sm);
-  font-weight: 500;
-  font-size: 13px;
-  cursor: pointer;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-5) var(--space-5);
 }

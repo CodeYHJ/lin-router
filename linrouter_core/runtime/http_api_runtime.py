@@ -32,6 +32,14 @@ from linrouter_core.runtime.config_api_runtime import (
 from linrouter_core.runtime.handler_runtime import handle_proxy_request
 
 
+_GROUP_VERIFICATION_FIELDS = ("provider_type", "base_url", "ark_api_key", "api_key")
+_MODEL_VERIFICATION_FIELDS = ("group_id", "ep_id", "upstream_model", "api_key")
+
+
+def _connectivity_fields_changed(before: Any, after: Any, fields: tuple[str, ...]) -> bool:
+    return bool(before) and any(str(getattr(before, field, "") or "") != str(getattr(after, field, "") or "") for field in fields)
+
+
 def handle_get(handler: Any) -> None:
     parsed = urlparse(handler.path)
     if parsed.path == "/":
@@ -395,6 +403,9 @@ def handle_post(handler: Any) -> None:
             group.api_key = ""
         if group.provider_type == PROVIDER_ARK:
             group.api_key = ""
+        group_verification_changed = _connectivity_fields_changed(existing, group, _GROUP_VERIFICATION_FIELDS)
+        if group_verification_changed:
+            handler.store.invalidate_group_verification(group.id)
         handler.store.upsert_group(group)
         handler._send_json({"ok": True, "group": asdict(group)})
         return
@@ -431,12 +442,19 @@ def handle_post(handler: Any) -> None:
             model.upstream_model = model.ep_id
         if group.provider_type not in {PROVIDER_RELAY, PROVIDER_PROXY}:
             model.upstream_model = ""
+        model_verification_changed = _connectivity_fields_changed(existing, model, _MODEL_VERIFICATION_FIELDS)
+        if model_verification_changed:
+            model.last_success_at = ""
+            model.last_checked_at = ""
+            model.last_error = ""
         # 模型名/ep_id 不得与所属连接组的自动路由模型名冲突，避免路由歧义
         auto_name = handler.router.group_auto_model_name(group)
         if auto_name in {model.name, model.ep_id}:
             handler._send_json({"ok": False, "message": f"模型名/ep_id 与连接组自动路由模型名 '{auto_name}' 冲突"}, status=400)
             return
         handler.store.upsert_model(model)
+        if model_verification_changed:
+            handler.store.invalidate_model_member_verification(model.id)
         if group.provider_type in {PROVIDER_RELAY, PROVIDER_PROXY}:
             group.upstream_models = []
             group.upstream_models_fetched_at = ""

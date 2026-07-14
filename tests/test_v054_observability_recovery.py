@@ -195,13 +195,13 @@ def test_v054_frontend_contracts():
     assert "最小探测未通过，候选保持冷却" in logs_js
     assert "probe_failed: '探测失败'" in logs_js
     assert "manual_probe:'人工探测'" in logs_js
-    assert "当前中转渠道未确认支持推理强度" in logs_js
     assert "requested_reasoning_effort" in logs_js
     assert "reasoningPreservedLabel" in logs_js
     assert "reasoningValueStatusLabel" in logs_js
     assert "不适用（未携带字段）" in logs_js
     assert "未识别，日志已脱敏" in logs_js
-    assert "group-reasoning-support" in config_sources
+    assert "group-reasoning-support" not in config_sources
+    assert "upstream_reasoning_support" not in logs_js
     assert "aggregate-client-model-aliases" in config_sources
     assert r"split(/[\n,]+/)" in config_sources
     assert "panel.querySelector('#group-waf')?.addEventListener('change'" in config_sources

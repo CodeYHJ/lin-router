@@ -1,14 +1,67 @@
 const ConfigTabForm = {
+  draftKey(controller, selection = Store.selected) {
+    const type = selection?.type || 'group';
+    return `${type}:${selection?.id || 'new'}`;
+  },
+
+  captureDraft(controller, form = document.querySelector('#panel-config .config-form'), selection = Store.selected) {
+    if (!form) return;
+    const values = this._captureFormValues(controller, form);
+    if (!Object.keys(values).length) return;
+    controller._drafts ||= new Map();
+    const key = this.draftKey(controller, selection);
+    const baseline = controller._draftBaselines?.get(key);
+    if (baseline && this.sameFormValues(values, baseline)) {
+      controller._drafts.delete(key);
+      controller._draftDirty?.delete(key);
+      if (selection.type === Store.selected.type && selection.id === Store.selected.id) controller.setSaveStatus('');
+      return;
+    }
+    controller._drafts.set(key, values);
+    controller._draftDirty ||= new Set();
+    controller._draftDirty.add(key);
+    controller.setSaveStatus('draft');
+  },
+
+  draftValues(controller, selection = Store.selected) {
+    return controller._drafts?.get(this.draftKey(controller, selection)) || null;
+  },
+
+  clearDraft(controller, selection = Store.selected) {
+    const key = this.draftKey(controller, selection);
+    controller._drafts?.delete(key);
+    controller._draftDirty?.delete(key);
+    controller._draftBaselines?.delete(key);
+  },
+
+  sameFormValues(left, right) {
+    const leftKeys = Object.keys(left || {});
+    const rightKeys = Object.keys(right || {});
+    if (leftKeys.length !== rightKeys.length) return false;
+    return leftKeys.every(key => left[key] === right[key]);
+  },
+
   bindGlobalEvents(controller) {
-    if (controller._upstreamOutsideClickHandler) return;
-    controller._upstreamOutsideClickHandler = event => controller._onUpstreamOutsideClick(event);
-    document.addEventListener('mousedown', controller._upstreamOutsideClickHandler);
+    if (!controller._upstreamOutsideClickHandler) {
+      controller._upstreamOutsideClickHandler = event => controller._onUpstreamOutsideClick(event);
+      document.addEventListener('mousedown', controller._upstreamOutsideClickHandler);
+    }
+    if (!controller._draftBeforeUnloadHandler && typeof window !== 'undefined') {
+      controller._draftBeforeUnloadHandler = event => {
+        if (!controller._draftDirty?.size) return;
+        event.preventDefault();
+        event.returnValue = '';
+      };
+      window.addEventListener('beforeunload', controller._draftBeforeUnloadHandler);
+    }
   },
 
   dispose(controller) {
-    if (!controller._upstreamOutsideClickHandler) return;
-    document.removeEventListener('mousedown', controller._upstreamOutsideClickHandler);
-    controller._upstreamOutsideClickHandler = null;
+    if (controller._upstreamOutsideClickHandler) {
+      document.removeEventListener('mousedown', controller._upstreamOutsideClickHandler);
+      controller._upstreamOutsideClickHandler = null;
+    }
+    // beforeunload 属于应用级草稿保护；离开配置 Tab 仍要保留，避免用户在首页刷新时静默丢稿。
   },
 
   isNewGroupDraft(controller, selection = Store.selected) {
@@ -79,22 +132,25 @@ const ConfigTabForm = {
     const note = document.getElementById('group-base-default-note');
     if (!input || !note) return;
     const mode = document.getElementById('group-provider')?.value || 'relay';
-    const remainsDefault = mode === 'relay'
-      && input.dataset.codeokDefault === 'true'
-      && controller.isDefaultRelayBaseUrl(input.value);
-    if (!remainsDefault) input.dataset.codeokDefault = 'false';
+    const remainsDefault = controller.isSystemDefaultBaseUrl(input.value, mode);
     note.classList.toggle('hidden', !remainsDefault);
   },
 
   onGroupProviderChange(controller) {
     const baseInput = document.getElementById('group-base');
-    if (baseInput?.dataset.codeokDefault === 'true') {
-      baseInput.value = '';
-      baseInput.dataset.codeokDefault = 'false';
+    const nextProvider = document.getElementById('group-provider')?.value || 'relay';
+    if (baseInput) {
+      const current = baseInput.value.trim();
+      const previousProvider = baseInput.dataset.provider || nextProvider;
+      const canReplace = !current || Boolean(baseInput.dataset.systemDefaultProvider)
+        || controller.isSystemDefaultBaseUrl(current, previousProvider);
+      if (canReplace) baseInput.value = controller.providerBaseUrl(nextProvider);
+      baseInput.dataset.provider = nextProvider;
+      baseInput.dataset.systemDefaultProvider = controller.systemDefaultProvider(baseInput.value);
     }
     controller.syncGroupModeUI();
     controller.refreshGroupWorkflowFromDraft();
-    controller.autoSaveGroup();
+    controller.captureDraft();
   },
 
   groupStateFromForm(controller) {
@@ -139,28 +195,37 @@ const ConfigTabForm = {
   },
 
   onGroupDraftInput(controller) {
+    const input = document.getElementById('group-base');
+    const mode = document.getElementById('group-provider')?.value || 'relay';
+    if (input && input.value.trim() !== controller.providerBaseUrl(mode)) {
+      input.dataset.systemDefaultProvider = '';
+    }
     controller.updateDefaultRelayBaseUrlHint();
     controller.refreshGroupWorkflowFromDraft();
   },
 
-  bindAutoSave(controller, form, callback) {
+  bindAutoSave(controller, form) {
     if (!form) return;
     form.querySelectorAll('input, select, textarea').forEach(el => {
-      // 聚合成员字段有独立保存逻辑，避免 autoSaveAggregate 的 blur 事件与成员保存竞争
+      // 失焦/变更只保存进程内草稿，正式保存统一由显式 submit 触发。
       const cls = el.className || '';
-      if (cls.includes('aggregate-member-price')) return;
-      const event = el.tagName === 'SELECT' || el.type === 'checkbox' ? 'change' : 'blur';
-      el.addEventListener(event, () => callback());
+      if (cls.includes('aggregate-member-price') || el.id === 'aggregate-stats-limit') return;
+      ['input', 'change', 'blur'].forEach(event => {
+        el.addEventListener(event, () => this.captureDraft(controller, form));
+      });
     });
   },
 
-  _captureFormValues(controller) {
+  _captureFormValues(controller, form = document.getElementById('panel-config')) {
     const values = {};
-    const panel = document.getElementById('panel-config');
-    if (!panel) return values;
-    panel.querySelectorAll('input, select, textarea').forEach(el => {
+    if (!form) return values;
+    form.querySelectorAll('input, select, textarea').forEach(el => {
+      if (el.type === 'radio') {
+        if (el.name && el.checked) values[`__radio:${el.name}`] = el.value;
+        return;
+      }
       if (!el.id) return;
-      if (el.type === 'checkbox' || el.type === 'radio') values[el.id] = el.checked;
+      if (el.type === 'checkbox') values[el.id] = el.checked;
       else values[el.id] = el.value;
     });
     return values;
@@ -171,6 +236,13 @@ const ConfigTabForm = {
   _restoreFormValues(controller, values) {
     if (!values) return;
     Object.entries(values).forEach(([id, value]) => {
+      if (id.startsWith('__radio:')) {
+        const name = id.slice('__radio:'.length).replace(/"/g, '\\"');
+        document.querySelectorAll(`input[type="radio"][name="${name}"]`).forEach(el => {
+          el.checked = el.value === value;
+        });
+        return;
+      }
       const el = document.getElementById(id);
       if (!el) return;
       if (el.type === 'checkbox' || el.type === 'radio') el.checked = Boolean(value);
@@ -194,8 +266,7 @@ const ConfigTabForm = {
     const error = document.createElement('div');
     error.className = 'field-error';
     error.textContent = message;
-    const control = input.closest('.input-with-btn') || input.parentElement;
-    control?.appendChild(error);
+    row.appendChild(error);
   },
 
   validateGroupForm(controller, { focus = false } = {}) {
@@ -234,38 +305,14 @@ const ConfigTabForm = {
   },
 
   autoSaveGroup(controller) {
-    const id = document.getElementById('group-id')?.value;
-    if (!id) {
-      controller.syncNewGroupDraftFromForm(controller.groupStateFromForm());
-      return;
-    }
-    clearTimeout(controller._autoSaveTimer);
-    controller.setSaveStatus('saving');
-    controller._autoSaveTimer = setTimeout(() => {
-      const form = document.getElementById('group-form');
-      if (form) form.dispatchEvent(new Event('submit'));
-    }, 500);
+    controller.captureDraft(document.getElementById('group-form'));
   },
 
   autoSaveModel(controller) {
-    const id = document.getElementById('model-id')?.value;
-    if (!id) return; // 新建不自动保存
-    clearTimeout(controller._autoSaveTimer);
-    controller.setSaveStatus('saving');
-    controller._autoSaveTimer = setTimeout(() => {
-      const form = document.getElementById('model-form');
-      if (form) form.dispatchEvent(new Event('submit'));
-    }, 500);
+    controller.captureDraft(document.getElementById('model-form'));
   },
 
   autoSaveAggregate(controller) {
-    const id = document.getElementById('aggregate-id')?.value;
-    if (!id) return; // 新建不自动保存
-    clearTimeout(controller._autoSaveTimer);
-    controller.setSaveStatus('saving');
-    controller._autoSaveTimer = setTimeout(() => {
-      const form = document.getElementById('aggregate-form');
-      if (form) form.dispatchEvent(new Event('submit'));
-    }, 500);
+    controller.captureDraft(document.getElementById('aggregate-form'));
   }
 };

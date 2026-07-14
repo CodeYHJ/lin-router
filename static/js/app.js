@@ -77,18 +77,21 @@ const App = {
     const topbar = document.getElementById('topbar');
     topbar.innerHTML = `
       <div class="topbar-left">
-        <span class="status-dot" id="status-dot" title="运行中"></span>
-        <span class="copy-chip" id="server-addr" title="点击复制兼容 OpenAI 的接口地址（自动带 /v1）">${window.location.origin}/v1</span>
+        <span class="service-status" id="service-status" title="本地代理服务运行中">
+          <span class="status-dot" id="status-dot" aria-hidden="true"></span>
+          <span id="status-text">服务运行中</span>
+        </span>
+        <button type="button" class="copy-chip" id="server-addr" title="复制兼容 OpenAI 的接口地址（自动带 /v1）" aria-label="复制兼容 OpenAI 的接口地址（自动带 /v1）">${window.location.origin}/v1</button>
       </div>
       <div class="topbar-center">
-        <input type="text" class="global-search" id="global-search" placeholder="搜索连接组或模型...">
+        <input type="text" class="global-search" id="global-search" placeholder="搜索连接组或模型..." aria-label="搜索连接组或模型">
       </div>
       <div class="topbar-right">
         <button class="btn-primary btn-sm" id="btn-new-group" title="新建连接组">+ 连接组</button>
-        <button class="btn-primary btn-sm" id="btn-new-aggregate" title="新建聚合模型">+ 聚合模型</button>
-        <button class="icon-btn" id="btn-export" title="导出连接组配置">💾</button>
-        <button class="icon-btn" id="btn-settings" title="设置">⚙</button>
-        <button class="icon-btn" id="btn-theme" title="切换主题">🌓</button>
+        <button class="btn-secondary btn-sm" id="btn-new-aggregate" title="新建聚合模型">+ 聚合模型</button>
+        <button class="utility-btn btn-sm" id="btn-export" title="导出连接组配置">导出</button>
+        <button class="utility-btn btn-sm" id="btn-settings" title="打开设置">设置</button>
+        <button class="utility-btn btn-sm" id="btn-theme" title="切换主题">主题</button>
       </div>
     `;
 
@@ -126,6 +129,12 @@ const App = {
     this.theme = theme || 'system';
     localStorage.setItem('lin-router-theme', this.theme);
     document.documentElement.setAttribute('data-theme', this.theme);
+    const themeLabel = { light: '浅色', dark: '深色', system: '跟随系统' }[this.theme] || '跟随系统';
+    const themeButton = document.getElementById('btn-theme');
+    if (themeButton) {
+      themeButton.title = `当前主题：${themeLabel}，点击切换`;
+      themeButton.setAttribute('aria-label', `当前主题：${themeLabel}，点击切换`);
+    }
     if (save) {
       API.saveSettings({ theme: this.theme }).catch(err => Toast.error('保存主题失败：' + err.message));
     }
@@ -143,12 +152,16 @@ const App = {
     const dot = document.getElementById('status-dot');
     if (!dot) return;
     const err = state?.log_write_error || '';
+    const statusText = document.getElementById('status-text');
+    const status = document.getElementById('service-status');
     if (err) {
       dot.className = 'status-dot error';
-      dot.title = err;
+      if (statusText) statusText.textContent = '服务异常';
+      if (status) status.title = err;
     } else {
       dot.className = 'status-dot';
-      dot.title = '运行中';
+      if (statusText) statusText.textContent = '服务运行中';
+      if (status) status.title = '本地代理服务运行中';
     }
   },
 
@@ -156,7 +169,7 @@ const App = {
     const container = document.getElementById('fab-container');
     if (!container) return;
     container.innerHTML = `
-      <button class="fab" id="fab-top" title="回到顶部">↑</button>
+      <button type="button" class="fab" id="fab-top" title="回到顶部" aria-label="回到顶部">↑</button>
     `;
     container.querySelector('#fab-top').addEventListener('click', () => {
       document.querySelector('.tab-panel.active')?.scrollTo({ top: 0, behavior: 'smooth' });
@@ -192,6 +205,9 @@ const App = {
       if (form) form.dispatchEvent(new Event('submit'));
     } else if (sel.type === 'model') {
       const form = document.getElementById('model-form');
+      if (form) form.dispatchEvent(new Event('submit'));
+    } else if (sel.type === 'aggregate') {
+      const form = document.getElementById('aggregate-form');
       if (form) form.dispatchEvent(new Event('submit'));
     }
   },

@@ -85,18 +85,20 @@ def test_connection_status_state_machine_contract():
     assert s2["code"] == "S2"
     assert s2["groups"][0]["code"] == "pending_verify"
 
-    success_log = {"status": "200", "event": "ok", "group_id": "g1", "selected_model": "m1"}
-    s3 = run_connection_status({"groups": [saved_group], "models": [pending_model], "aggregate_models": [], "logs": [success_log]})
+    pending_model["last_success_at"] = "2026-07-14 12:00:00"
+    # 日志窗口会滚动淘汰，连接组是否已验证只能依赖持久化成功证据。
+    s3 = run_connection_status({"groups": [saved_group], "models": [pending_model], "aggregate_models": [], "logs": []})
     assert s3["code"] == "S3"
     assert s3["groups"][0]["code"] == "ready"
 
     second_group = group("g2", "备用连接组")
     second_model = model("m2", "g2")
+    second_model["last_success_at"] = "2026-07-14 12:01:00"
     s4 = run_connection_status({
         "groups": [saved_group, second_group],
         "models": [pending_model, second_model],
         "aggregate_models": [],
-        "logs": [success_log, {"status": "200", "event": "ok", "group_id": "g2", "selected_model": "m2"}],
+        "logs": [],
     })
     assert s4["code"] == "S4"
 
@@ -182,8 +184,8 @@ def test_v055_frontend_onboarding_contracts():
     assert "startNewGroup()" in config_js
     assert "provider_type: 'relay'" in config_js
     assert "https://www.codeok.cc/v1" in config_js
-    assert "默认第三方地址，可修改" in config_js
-    assert "data-codeok-default" in config_js
+    assert "系统默认地址，可修改" in config_js
+    assert "data-system-default-provider" in config_js
     assert "refreshGroupWorkflowFromDraft" in config_js
     assert "validateGroupForm" in config_js
     assert "fetchModelsForGroup" in config_js
@@ -196,4 +198,4 @@ def test_v055_frontend_onboarding_contracts():
     assert "快速测试" in test_js
     assert "请回复：连接成功" in test_js
     assert "'/v1/chat/completions'" in test_js
-    assert "v0.6.0" in settings_js
+    assert "v0.6.2" in settings_js

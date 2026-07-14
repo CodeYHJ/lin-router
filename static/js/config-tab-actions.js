@@ -52,11 +52,9 @@ const ConfigTabActions = {
 
   async onGroupSubmit(controller, e) {
     e.preventDefault();
-    const explicitSubmit = Boolean(e.submitter);
-    const validation = controller.validateGroupForm({ focus: explicitSubmit });
+    const validation = controller.validateGroupForm({ focus: true });
     if (!validation.ok) {
-      if (explicitSubmit) Toast.warning(validation.message);
-      else controller.setSaveStatus('error', validation.message);
+      Toast.warning(validation.message);
       return;
     }
     const id = document.getElementById('group-id').value;
@@ -77,7 +75,6 @@ const ConfigTabActions = {
       auto_model_name: document.getElementById('group-auto-model-name').value.trim(),
       auto_model_cooldown_minutes: Number(document.getElementById('group-cooldown').value || 0),
       stream_idle_timeout: Math.max(0, Math.min(600, Number(document.getElementById('group-stream-timeout').value || 0))),
-      reasoning_support: document.getElementById('group-reasoning-support')?.value || 'unknown',
       waf_client_mode: mode === 'relay' && document.getElementById('group-waf').checked
         ? (document.getElementById('group-waf-client-mode')?.value || 'always')
         : 'always',
@@ -91,15 +88,17 @@ const ConfigTabActions = {
     try {
       controller.setSaveStatus('saving');
       const result = id ? await API.saveGroup(id, payload) : await API.createGroup(payload);
-      if (!id) controller._newGroupDraft = null;
+      const savedSelection = { type: 'group', id: id || null };
       await Store.load();
+      controller.clearDraft(savedSelection);
+      if (!id) controller._newGroupDraft = null;
       if (!id && result?.group?.id) Store.select('group', result.group.id);
       controller.setSaveStatus('saved');
       const savedGroupId = id || result?.group?.id;
       const stillViewingSavedGroup = Tabs.current === 'config'
         && Store.selected.type === 'group'
         && Store.selected.id === savedGroupId;
-      if (explicitSubmit && stillViewingSavedGroup) {
+      if (stillViewingSavedGroup) {
         controller.render();
         Toast.success('连接组已保存，请按状态提示完成下一步');
       }
@@ -169,11 +168,9 @@ const ConfigTabActions = {
 
   async onModelSubmit(controller, e) {
     e.preventDefault();
-    const explicitSubmit = Boolean(e.submitter);
-    const validation = controller.validateModelForm({ focus: explicitSubmit });
+    const validation = controller.validateModelForm({ focus: true });
     if (!validation.ok) {
-      if (explicitSubmit) Toast.warning(validation.message);
-      else controller.setSaveStatus('error', validation.message);
+      Toast.warning(validation.message);
       return;
     }
     const id = document.getElementById('model-id').value;
@@ -202,6 +199,7 @@ const ConfigTabActions = {
       if (id) await API.saveModel(id, payload);
       else await API.createModel(payload);
       await Store.load();
+      controller.clearDraft({ type: 'model', id: id || null });
       controller.setSaveStatus('saved');
     } catch (err) {
       controller.setSaveStatus('error', '保存失败：' + err.message);
@@ -262,7 +260,6 @@ const ConfigTabActions = {
     const payload = {
       name: document.getElementById('aggregate-name').value.trim(),
       display_name: document.getElementById('aggregate-display-name').value.trim(),
-      description: document.getElementById('aggregate-description').value.trim(),
       client_model_aliases: document.getElementById('aggregate-client-model-aliases').value.split(/[\n,]+/).map(value => value.trim()).filter(Boolean),
       enabled: document.getElementById('aggregate-enabled').checked,
       cooldown_minutes: Math.max(0, Number(document.getElementById('aggregate-cooldown').value || 0)),
@@ -273,6 +270,7 @@ const ConfigTabActions = {
       if (id) await API.saveAggregate(id, payload);
       else await API.createAggregate(payload);
       await Store.load();
+      controller.clearDraft({ type: 'aggregate', id: id || null });
       controller.setSaveStatus('saved');
     } catch (err) {
       controller.setSaveStatus('error', '保存失败：' + err.message);

@@ -474,6 +474,46 @@ class ConfigStore:
             self.models.append(model)
             self.save()
 
+    def invalidate_group_verification(self, group_id: str) -> bool:
+        """连接性配置变更后清除该组及聚合成员的历史成功证据。"""
+        with self._lock:
+            changed = False
+            for model in self.models:
+                if model.group_id != group_id:
+                    continue
+                if model.last_success_at or model.last_checked_at:
+                    model.last_success_at = ""
+                    model.last_checked_at = ""
+                    model.last_error = ""
+                    changed = True
+            for member in self.aggregate_members:
+                if member.group_id != group_id:
+                    continue
+                if member.last_success_at or member.last_checked_at:
+                    member.last_success_at = ""
+                    member.last_checked_at = ""
+                    member.last_error = ""
+                    changed = True
+            if changed:
+                self.save()
+            return changed
+
+    def invalidate_model_member_verification(self, model_id: str) -> bool:
+        """模型上游字段变更时清除引用它的聚合成员验证证据。"""
+        with self._lock:
+            changed = False
+            for member in self.aggregate_members:
+                if member.model_id != model_id:
+                    continue
+                if member.last_success_at or member.last_checked_at:
+                    member.last_success_at = ""
+                    member.last_checked_at = ""
+                    member.last_error = ""
+                    changed = True
+            if changed:
+                self.save()
+            return changed
+
     def remove_model(self, model_id: str) -> bool:
         with self._lock:
             before = len(self.models)

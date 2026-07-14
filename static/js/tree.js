@@ -19,6 +19,8 @@ const Tree = {
 
     // 树空白处右键：全局批量操作
     const treeRoot = document.getElementById('tree-root');
+    treeRoot?.setAttribute('role', 'tree');
+    treeRoot?.setAttribute('aria-label', '连接组和聚合模型');
     treeRoot?.addEventListener('contextmenu', e => {
       if (e.target.closest('[data-context]')) return;
       e.preventDefault();
@@ -45,8 +47,19 @@ const Tree = {
   render() {
     const root = document.getElementById('tree-root');
     if (!root) return;
+    // 运行态每秒会刷新树；重建 DOM 前保留键盘焦点和滚动位置，避免打断正在浏览的对象。
+    const focusedNode = document.activeElement?.closest?.('[data-tree-key]');
+    const shouldRestoreFocus = !!focusedNode && root.contains(focusedNode);
+    const focusKey = shouldRestoreFocus ? focusedNode.dataset.treeKey : '';
+    const scrollTop = root.scrollTop;
     root.innerHTML = this.buildTreeHtml();
     this.attachEvents(root);
+    root.scrollTop = scrollTop;
+    if (focusKey) {
+      [...root.querySelectorAll('[data-tree-key]')]
+        .find(node => node.dataset.treeKey === focusKey)
+        ?.focus({ preventScroll: true });
+    }
   },
 
   buildTreeHtml() {
@@ -91,12 +104,14 @@ const Tree = {
 
   buildAggregateHtml(a, members) {
     const status = this.aggregateStatus(a, members);
+    const statusText = status === 'ok' ? '' : this.aggregateStatusLabel(a, members, status);
     const active = Store.selected.type === 'aggregate' && Store.selected.id === a.id ? 'active' : '';
     const memberCount = members.filter(m => m.aggregate_id === a.id).length;
     return `
-      <div class="tree-aggregate ${active}" data-type="aggregate" data-id="${a.id}" data-context="aggregate" title="${Utils.escapeHtml(a.description || '')}">
+      <div class="tree-aggregate ${active}" data-type="aggregate" data-id="${a.id}" data-context="aggregate" data-tree-key="aggregate:${a.id}" role="treeitem" aria-level="1" aria-selected="${active ? 'true' : 'false'}" tabindex="0" aria-label="${Utils.escapeHtml(`${a.display_name || a.name}，${this.statusLabel(status)}，${memberCount} 个成员`)}">
         <span class="tree-status ${status}"></span>
         <span class="tree-label">${this.highlight(Utils.escapeHtml(a.display_name || a.name))}</span>
+        ${statusText ? `<span class="tree-status-label ${status}">${statusText}</span>` : ''}
         <span class="tree-meta">${memberCount}成员</span>
       </div>
     `;
@@ -117,24 +132,26 @@ const Tree = {
     const groupModels = models.filter(m => m.group_id === g.id);
     const expanded = this.expanded.has(g.id);
     const status = this.groupStatus(g, groupModels);
+    const statusText = this.groupStatusLabel(g, groupModels, status);
     const modeLabel = { ark: '方舟', relay: '中转', proxy: '代理' }[g.provider_type] || g.provider_type;
     const availableCount = groupModels.filter(model => model.usable !== false && !(model.cooldown_until && model.cooldown_until * 1000 > Date.now())).length;
     const summaryText = groupModels.length
       ? `模型 ${groupModels.length} · 可用 ${availableCount}`
       : '模型 0 · 无可用模型';
+    const summaryCompact = groupModels.length ? `可用 ${availableCount}/${groupModels.length}` : '无模型';
     const active = Store.selected.type === 'group' && Store.selected.id === g.id ? 'active' : '';
     const filtered = this.search && !this.matchesGroup(g, groupModels) ? 'hidden' : '';
 
     return `
       <div class="tree-node ${filtered}" data-type="group" data-id="${g.id}">
-        <div class="tree-group ${active}" data-type="group" data-id="${g.id}" data-context="group" title="${Utils.escapeHtml(summaryText)}">
-          <span class="tree-toggle" data-action="toggle">${expanded ? '▼' : '▶'}</span>
+        <div class="tree-group ${active}" data-type="group" data-id="${g.id}" data-context="group" data-tree-key="group:${g.id}" role="treeitem" aria-level="1" aria-selected="${active ? 'true' : 'false'}" aria-expanded="${expanded ? 'true' : 'false'}" tabindex="0" aria-label="${Utils.escapeHtml(`${g.name}，${modeLabel}，${statusText || '可用'}，${summaryText}`)}" title="${Utils.escapeHtml(`${modeLabel} · ${statusText || '可用'} · ${summaryText}`)}">
+          <button type="button" class="tree-toggle" data-action="toggle" aria-label="${expanded ? '折叠' : '展开'} ${Utils.escapeHtml(g.name)}" aria-expanded="${expanded ? 'true' : 'false'}">${expanded ? '▼' : '▶'}</button>
           <span class="tree-status ${status}"></span>
           <span class="tree-label">${this.highlight(Utils.escapeHtml(g.name))}</span>
-          <span class="tree-badge">${modeLabel}</span>
-          <span class="tree-meta">${Utils.escapeHtml(summaryText)}</span>
+          ${statusText ? `<span class="tree-status-label ${status}">${statusText}</span>` : ''}
+          <span class="tree-meta" title="${Utils.escapeHtml(summaryText)}">${Utils.escapeHtml(summaryCompact)}</span>
         </div>
-        <div class="tree-children ${expanded ? '' : 'hidden'}">
+        <div class="tree-children ${expanded ? '' : 'hidden'}" role="group">
           ${groupModels.map(m => this.buildModelHtml(m)).join('')}
         </div>
       </div>
@@ -144,12 +161,15 @@ const Tree = {
   buildModelHtml(m) {
     const status = this.modelStatus(m);
     const active = Store.selected.type === 'model' && Store.selected.id === m.id ? 'active' : '';
+    const group = Store.getGroup(m.group_id);
+    const statusText = this.modelStatusLabel(m, group, status);
     const meta = m.price_group ? `¥${m.price_group}` : (m.ep_id ? m.ep_id.slice(-6) : '');
     const coolingText = status === 'cooldown' ? this.cooldownText(m) : '';
     return `
-      <div class="tree-model ${active}" data-type="model" data-id="${m.id}" data-context="model" draggable="true" title="${Utils.escapeHtml(m.last_error || '')}">
+      <div class="tree-model ${active}" data-type="model" data-id="${m.id}" data-context="model" data-tree-key="model:${m.id}" role="treeitem" aria-level="2" aria-selected="${active ? 'true' : 'false'}" tabindex="0" draggable="true" aria-label="${Utils.escapeHtml(`${m.name}，${statusText || '可用'}${coolingText ? `，剩余 ${coolingText}` : ''}`)}" title="${Utils.escapeHtml(m.last_error || '')}">
         <span class="tree-status ${status}"></span>
         <span class="tree-label">${this.highlight(Utils.escapeHtml(m.name))}</span>
+        ${statusText ? `<span class="tree-status-label ${status}">${statusText}</span>` : ''}
         ${coolingText ? `<span class="tree-cooldown">${coolingText}</span>` : ''}
         <span class="tree-meta">${Utils.escapeHtml(meta)}</span>
       </div>
@@ -166,8 +186,19 @@ const Tree = {
   groupStatus(g, models) {
     const summary = ConnectionStatus.group(g);
     if (summary.code === 'ready') return 'ok';
+    if (summary.code === 'cooldown') return 'cooldown';
     if (['pending_verify', 'saved_no_model', 'cooldown'].includes(summary.code)) return 'warning';
     return 'error';
+  },
+
+  groupStatusLabel(g, models, status = this.groupStatus(g, models)) {
+    const summary = ConnectionStatus.group(g);
+    if (summary.code === 'ready') return '';
+    if (summary.code === 'cooldown' || status === 'cooldown') return '冷却';
+    if (summary.code === 'pending_verify') return '待验证';
+    if (summary.code === 'saved_no_model' || summary.code === 'needs_model_completion') return '待完善';
+    if (summary.code === 'needs_completion') return '待完善';
+    return this.statusLabel(status);
   },
 
   modelStatus(m) {
@@ -175,6 +206,27 @@ const Tree = {
     if (this.isCooling(m)) return 'cooldown';
     if (!m.usable) return 'error';
     return 'ok';
+  },
+
+  statusLabel(status) {
+    return { ok: '可用', warning: '注意', cooldown: '冷却', error: '异常' }[status] || '未知';
+  },
+
+  modelStatusLabel(model, group, status) {
+    if (status === 'ok') return '';
+    if (status === 'cooldown') return '冷却';
+    if (model.disabled_by_user) return '已停用';
+    if (ConnectionStatus.modelMissingFields(model, group).length) return '待完善';
+    return '异常';
+  },
+
+  aggregateStatusLabel(aggregate, members, status) {
+    if (status === 'ok') return '';
+    if (!aggregate.enabled) return '已停用';
+    const activeMembers = members.filter(member => member.aggregate_id === aggregate.id && member.enabled);
+    if (!activeMembers.length) return '异常';
+    if (activeMembers.every(member => member.cooldown_until && member.cooldown_until > Math.floor(Date.now() / 1000))) return '冷却';
+    return this.statusLabel(status);
   },
 
   isCooling(m) {
@@ -203,17 +255,14 @@ const Tree = {
       newAggregateBtn.addEventListener('click', () => App.createAggregate());
     }
 
-    root.querySelectorAll('[data-type]').forEach(node => {
+    root.querySelectorAll('[data-context]').forEach(node => {
       node.addEventListener('click', e => {
-        const action = e.target.dataset.action;
+        const action = e.target.closest('[data-action]')?.dataset.action;
         const type = node.dataset.type;
         const id = node.dataset.id;
         if (action === 'toggle') {
           e.stopPropagation();
-          if (this.expanded.has(id)) this.expanded.delete(id);
-          else this.expanded.add(id);
-          this.saveExpanded();
-          this.render();
+          this.toggleGroup(id);
           return;
         }
         // 模型节点嵌套在组节点内，阻止冒泡避免同时触发组节点点击
@@ -225,21 +274,19 @@ const Tree = {
         Tabs.switch('config');
       });
       node.addEventListener('dblclick', e => {
-        const action = e.target.dataset.action;
+        const action = e.target.closest('[data-action]')?.dataset.action;
         if (action === 'toggle') return;
         const type = node.dataset.type;
         const id = node.dataset.id;
         if (type === 'group') {
           // 双击组名展开/折叠
-          if (this.expanded.has(id)) this.expanded.delete(id);
-          else this.expanded.add(id);
-          this.saveExpanded();
-          this.render();
+          this.toggleGroup(id);
           return;
         }
         Store.select(type, id);
         Tabs.switch('test');
       });
+      node.addEventListener('keydown', e => this.onTreeKeydown(e, node, root));
     });
 
     root.querySelectorAll('[data-context]').forEach(node => {
@@ -268,6 +315,66 @@ const Tree = {
       node.addEventListener('dragleave', () => node.classList.remove('drag-over'));
       node.addEventListener('drop', e => this.onDrop(e, node));
     });
+  },
+
+  toggleGroup(id, expanded = null) {
+    const nextExpanded = expanded === null ? !this.expanded.has(id) : expanded;
+    if (nextExpanded) this.expanded.add(id);
+    else this.expanded.delete(id);
+    this.saveExpanded();
+    this.render();
+  },
+
+  visibleTreeItems(root) {
+    return [...root.querySelectorAll('[data-context]')].filter(item => !item.closest('.hidden'));
+  },
+
+  onTreeKeydown(event, node, root) {
+    // 展开按钮本身保留原生 Enter/Space 行为，避免事件冒泡后误选连接组。
+    if (event.target.closest('[data-action="toggle"]')) return;
+    const items = this.visibleTreeItems(root);
+    const currentIndex = items.indexOf(node);
+    if (currentIndex < 0) return;
+
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      node.click();
+      return;
+    }
+
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault();
+      const offset = event.key === 'ArrowDown' ? 1 : -1;
+      const nextIndex = Math.max(0, Math.min(items.length - 1, currentIndex + offset));
+      items[nextIndex]?.focus();
+      return;
+    }
+
+    if (event.key === 'Home' || event.key === 'End') {
+      event.preventDefault();
+      items[event.key === 'Home' ? 0 : items.length - 1]?.focus();
+      return;
+    }
+
+    if (event.key === 'ArrowRight' && node.dataset.type === 'group') {
+      event.preventDefault();
+      if (!this.expanded.has(node.dataset.id)) {
+        this.toggleGroup(node.dataset.id, true);
+      } else {
+        this.visibleTreeItems(root)[currentIndex + 1]?.focus();
+      }
+      return;
+    }
+
+    if (event.key === 'ArrowLeft') {
+      event.preventDefault();
+      if (node.dataset.type === 'group' && this.expanded.has(node.dataset.id)) {
+        this.toggleGroup(node.dataset.id, false);
+        return;
+      }
+      const parentGroup = node.closest('.tree-children')?.previousElementSibling;
+      parentGroup?.focus();
+    }
   },
 
   async onDrop(e, targetNode) {
@@ -319,6 +426,8 @@ const Tree = {
   showMenu(e, context, id) {
     const menu = document.getElementById('context-menu');
     menu.innerHTML = context === 'group' ? this.groupMenuHtml(id) : (context === 'aggregate' ? this.aggregateMenuHtml(id) : this.modelMenuHtml(id));
+    menu.setAttribute('role', 'menu');
+    menu.setAttribute('aria-label', '对象操作');
     menu.classList.remove('hidden');
     menu.style.left = `${Math.min(e.clientX, window.innerWidth - 180)}px`;
     menu.style.top = `${Math.min(e.clientY, window.innerHeight - 200)}px`;
@@ -336,6 +445,8 @@ const Tree = {
       <div class="context-separator"></div>
       <div class="context-item" data-action="enable-all">全部启用所有模型</div>
     `;
+    menu.setAttribute('role', 'menu');
+    menu.setAttribute('aria-label', '树操作');
     menu.classList.remove('hidden');
     menu.style.left = `${Math.min(e.clientX, window.innerWidth - 180)}px`;
     menu.style.top = `${Math.min(e.clientY, window.innerHeight - 200)}px`;
@@ -400,16 +511,26 @@ const Tree = {
 
   attachMenuEvents(menu) {
     menu.querySelectorAll('.context-item').forEach(item => {
+      const disabled = item.dataset.disabled === 'true';
+      item.setAttribute('role', 'menuitem');
+      item.tabIndex = disabled ? -1 : 0;
       item.addEventListener('click', e => {
         e.stopPropagation();
-        if (item.dataset.disabled === 'true') return;
+        if (disabled) return;
         const action = item.dataset.action;
+        if (!action) return;
         const id = item.dataset.id;
         const target = item.dataset.target;
         this.hideMenu();
         this.handleMenuAction(action, id, target);
       });
+      item.addEventListener('keydown', e => {
+        if (e.key !== 'Enter' && e.key !== ' ') return;
+        e.preventDefault();
+        item.click();
+      });
     });
+    menu.querySelector('.context-item:not(.disabled)')?.focus();
   },
 
   async handleMenuAction(action, id, target) {

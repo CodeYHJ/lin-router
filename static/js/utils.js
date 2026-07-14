@@ -109,13 +109,9 @@ const ConnectionStatus = {
 
   group(group, state = Store.state) {
     const models = (state.models || []).filter(model => model.group_id === group.id);
-    const logs = state.logs || [];
     const missingFields = this.groupMissingFields(group);
-    const successfulLogs = logs.filter(log => log.group_id === group.id && this.isSuccessfulLog(log));
-    const verifiedModels = models.filter(model => {
-      const selected = successfulLogs.some(log => [log.selected_model, log.model, log.resolved_as].includes(model.name));
-      return selected;
-    });
+    // 验证状态必须来自模型持久化成功证据，不能随当前日志窗口滚动而丢失。
+    const verifiedModels = models.filter(model => String(model.last_success_at || '').trim());
     const usableModels = models.filter(model => model.usable !== false && !this.isCooling(model));
     const coolingModels = models.filter(model => this.isCooling(model));
     const representative = verifiedModels.find(model => model.usable !== false && !this.isCooling(model))
@@ -153,7 +149,7 @@ const ConnectionStatus = {
     if (verifiedModels.some(model => model.usable !== false && !this.isCooling(model))) {
       return {
         code: 'ready', label: '可用',
-        reason: '存在真实成功的测试或请求记录。', impact: '可用于客户端接入。',
+        reason: '存在模型持久化的成功验证证据。', impact: '可用于客户端接入。',
         systemAction: '系统会按当前模型和路由 Key 处理请求。', action: '复制配置', modelCount: models.length,
         representative, missingFields: [], verifiedModel: representative,
       };

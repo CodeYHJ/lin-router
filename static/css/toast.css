@@ -1,40 +1,63 @@
 .toast-container {
   position: fixed;
-  top: 64px;
-  right: 16px;
-  z-index: 1000;
+  top: calc(var(--topbar-h) + var(--space-3));
+  right: var(--space-4);
+  z-index: var(--z-toast);
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--space-2);
+  pointer-events: none;
 }
 
 .toast {
+  min-width: 240px;
+  max-width: min(420px, calc(100vw - 32px));
   display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 10px 14px;
-  border-radius: var(--radius-md);
-  background: var(--bg-primary);
+  align-items: flex-start;
+  gap: var(--space-2);
+  padding: 10px 12px;
   color: var(--text-primary);
-  box-shadow: var(--shadow-lg);
+  background: var(--bg-primary);
   border: 1px solid var(--border);
-  animation: toast-in .2s ease;
-  min-width: 180px;
-  max-width: 360px;
+  border-left: 4px solid var(--info);
+  border-radius: var(--radius-container);
+  box-shadow: var(--shadow-lg);
+  pointer-events: auto;
+  animation: toast-in .18s ease-out;
 }
 
-.toast.success { border-left: 4px solid var(--success); }
-.toast.warning { border-left: 4px solid var(--warning); }
-.toast.error { border-left: 4px solid var(--danger); }
-.toast.info { border-left: 4px solid var(--info); }
+.toast.success { border-left-color: var(--success); }
+.toast.warning { border-left-color: var(--warning); }
+.toast.error { border-left-color: var(--danger); }
+.toast.info { border-left-color: var(--info); }
+
+.toast-type {
+  flex: 0 0 auto;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 20px;
+}
+
+.toast.success .toast-type { color: var(--success); }
+.toast.warning .toast-type { color: var(--warning); }
+.toast.error .toast-type { color: var(--danger); }
+.toast.info .toast-type { color: var(--info); }
+
+.toast-message {
+  min-width: 0;
+  font-size: 13px;
+  line-height: 20px;
+  overflow-wrap: anywhere;
+}
 
 @keyframes toast-in {
-  from { opacity: 0; transform: translateX(20px); }
+  from { opacity: 0; transform: translateX(12px); }
   to { opacity: 1; transform: translateX(0); }
 }
 
 .toast.fade-out {
   opacity: 0;
-  transform: translateX(20px);
-  transition: opacity .2s, transform .2s;
+  transform: translateX(12px);
+  transition: opacity .18s ease, transform .18s ease;
 }
