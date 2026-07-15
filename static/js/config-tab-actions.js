@@ -510,11 +510,33 @@ const ConfigTabActions = {
   },
 
   async onMoveAggregateMember(controller, memberId, direction) {
+    const aggregateId = document.getElementById('aggregate-id')?.value;
+    const members = aggregateId ? Store.getAggregateMembers(aggregateId) : [];
+    const index = members.findIndex(member => member.id === memberId);
+    if (!aggregateId || index < 0) {
+      Toast.error('当前成员列表已过期，已刷新最新顺序。');
+      await controller.reloadAfterAggregateMemberChange();
+      return;
+    }
+    const targetIndex = direction === 'up' ? index - 1
+      : direction === 'down' ? index + 1
+        : direction === 'top' ? 0
+          : direction === 'bottom' ? members.length - 1 : index;
+    if (targetIndex < 0 || targetIndex >= members.length || targetIndex === index) return;
+    const reordered = [...members];
+    const [member] = reordered.splice(index, 1);
+    reordered.splice(targetIndex, 0, member);
     try {
-      await API.saveAggregateMember(memberId, { direction });
+      await API.reorderAggregateMembers(
+        aggregateId,
+        reordered.map(member => member.id),
+        Store.getAggregateMemberRevision(aggregateId),
+      );
       await controller.reloadAfterAggregateMemberChange();
     } catch (err) {
-      Toast.error('排序失败：' + err.message);
+      const conflict = err.code === 'aggregate_member_revision_conflict';
+      Toast.error(conflict ? '排序冲突：成员顺序已被其他操作更新，已刷新最新顺序。' : '排序未保存，已刷新最新顺序：' + err.message);
+      await controller.reloadAfterAggregateMemberChange();
     }
   },
 

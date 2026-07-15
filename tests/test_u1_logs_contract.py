@@ -1,5 +1,6 @@
 """请求日志扫描与诊断的前端行为契约。"""
 
+import re
 import subprocess
 from pathlib import Path
 
@@ -40,8 +41,13 @@ const historicalAuth = {
 assert(logs.diagnosisFor(historicalAuth, logs.parseDetail(historicalAuth.detail)).title === '请求成功', '2xx final record must win over historical auth text');
 assert(logs.userFacingErrorReason(historicalAuth, logs.parseDetail(historicalAuth.detail)) === '请求成功', 'success preview must not repeat historical auth text');
 assert(logs.eventSummary(historicalAuth) === '首包完成\n流式完成', 'stream event summary must have separate phases');
-assert(logs.durationSummary(historicalAuth) === '首文本：0.50 秒\n后续：2.00 秒\n总：2.50 秒', 'stream timing summary must have separate lines');
-assert(logs.tokenSummary(historicalAuth) === '输入：100\n输出：20\n命中：50（命中率 50%）\n总计：120', 'token summary must have separate lines');
+assert(logs.durationSummary(historicalAuth) === '首包：0.50 秒\n后续：2.00 秒\n总：2.50 秒', 'stream timing summary must have separate lines');
+const completeFrameOnly = { ...historicalAuth, detail: 'first_complete_frame_ms=800' };
+assert(logs.durationSummary(completeFrameOnly) === '首包：0.80 秒\n后续：1.70 秒\n总：2.50 秒', 'complete SSE frame timing must use the unified first-packet label');
+assert(logs.tokenSummary(historicalAuth) === '输入：100\n输出：20\n命中：50（50%）\n总计：120', 'token summary must have separate lines');
+const tokenSummaryHtml = logs.tokenSummaryHtml(historicalAuth);
+assert(tokenSummaryHtml.includes('<span class="log-token-hit">命中：50<span class="log-token-hit-rate">（50%）</span></span>'), 'token hit rate must be kept on one line');
+assert(!tokenSummaryHtml.includes('命中率'), 'token hit summary must only keep the percentage in parentheses');
 
 const current401 = { status: '401', event: 'error', detail: 'failure_scope=candidate; request_level=true' };
 assert(logs.diagnosisFor(current401, logs.parseDetail(current401.detail)).title === '鉴权失败', 'current 401 must remain auth failure');
@@ -74,3 +80,10 @@ def test_log_tab_keeps_current_only_pagination_and_multiline_styles() -> None:
     assert "item.attempt || 0" in logs_js
     assert ".logs-table td.log-multiline" in logs_css
     assert "white-space: pre-line" in logs_css
+    status_column = re.search(r"\.logs-table th:nth-child\(4\)\s*\{([^}]*)\}", logs_css)
+    assert status_column and "width: 100px" in status_column.group(1)
+    multiline_summary = re.search(r"\.logs-table td\.log-multiline\s*\{([^}]*)\}", logs_css)
+    assert multiline_summary and "vertical-align: middle" in multiline_summary.group(1)
+    assert ".logs-table td:nth-child(4) .pill" in logs_css
+    assert ".log-token-hit" in logs_css
+    assert "white-space: nowrap" in logs_css

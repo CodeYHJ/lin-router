@@ -653,11 +653,18 @@ class ConfigStore:
                 return False, "成员排序无效，必须包含当前聚合模型的全部且不重复成员", "invalid_member_order", current_revision
             if set(member_ids) != set(expected_ids):
                 return False, "成员排序包含缺失或不属于当前聚合模型的成员", "invalid_member_order", current_revision
+            previous_priorities = {member.id: member.priority for member in siblings}
             by_id = {member.id: member for member in siblings}
             for priority, member_id in enumerate(member_ids, start=1):
                 by_id[member_id].priority = priority
             revision = self._touch_aggregate_member_revision(aggregate_id)
-            self.save()
+            try:
+                self.save()
+            except Exception:
+                for member in siblings:
+                    member.priority = previous_priorities[member.id]
+                self.aggregate_member_revisions[aggregate_id] = current_revision
+                return False, "保存成员排序失败，已回滚本次变更", "config_save_failed", current_revision
             return True, "", "", revision
 
     def clear_aggregate_member_cooldown(self, member_id: str, now_str: Optional[str] = None) -> bool:

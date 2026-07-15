@@ -51,7 +51,22 @@ class AllZeroResponseCompletedHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(
             b'event: response.completed\n'
-            b'data: {"response":{"status":"completed","usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0,"prompt_tokens_details":{"cached_tokens":0}}}}\n\n'
+            b'data: {"response":{"status":"completed","usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0,"input_tokens_details":{"cached_tokens":0}}}}\n\n'
+        )
+        self.wfile.flush()
+
+    def log_message(self, format, *args):
+        return
+
+
+class MissingUsageResponseCompletedHandler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(
+            b'event: response.completed\n'
+            b'data: {"response":{"status":"completed","id":"resp-no-usage"}}\n\n'
         )
         self.wfile.flush()
 
@@ -243,6 +258,45 @@ def test_response_completed_all_zero_usage_is_stream_final_not_missing():
             item = next(log for log in router.logs if log.request_id == request_id and log.event == "stream_ok")
             assert (item.prompt_tokens, item.completion_tokens, item.total_tokens, item.cached_tokens) == (0, 0, 0, 0)
             assert item.usage_source == "stream_final"
+            assert "completion_signal=response.completed" in item.detail
+    finally:
+        upstream.shutdown()
+        upstream.server_close()
+
+
+def test_response_completed_without_usage_is_marked_missing():
+    upstream = ThreadingHTTPServer(("127.0.0.1", get_free_port()), MissingUsageResponseCompletedHandler)
+    threading.Thread(target=upstream.serve_forever, daemon=True).start()
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            router, store = make_router(tmp)
+            group = store.find_group("g1")
+            model = store.find_model("m1")
+            assert group is not None and model is not None
+            group.base_url = f"http://127.0.0.1:{upstream.server_address[1]}/v1"
+            group.waf_compatible = False
+            store.save()
+            context = RouteContext(
+                client_key=group.route_key,
+                group=group,
+                group_id=group.id,
+                provider_type=group.provider_type,
+                base_url=group.base_url,
+                display_name=group.name,
+                passthrough=False,
+            )
+
+            status, _headers, iterator, request_id = router.stream(
+                "/v1/responses",
+                {"model": model.name, "input": "ping", "stream": True},
+                context,
+            )
+            assert status == 200
+            assert b'resp-no-usage' in b"".join(iterator)
+
+            item = next(log for log in router.logs if log.request_id == request_id and log.event == "stream_ok")
+            assert (item.prompt_tokens, item.completion_tokens, item.total_tokens, item.cached_tokens) == (0, 0, 0, 0)
+            assert item.usage_source == "missing"
             assert "completion_signal=response.completed" in item.detail
     finally:
         upstream.shutdown()

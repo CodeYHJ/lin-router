@@ -184,6 +184,20 @@ vm.runInNewContext(source, context);
     assert run_node(script) == "V063_SINGLE_MEMBER_NO_MANUAL_PRICE_OK"
 
 
+def test_member_sort_ui_uses_full_order_revision_contract_and_surfaces_conflicts():
+    api_js = (ROOT / "static/js/api.js").read_text(encoding="utf-8")
+    actions_js = (ROOT / "static/js/config-tab-actions.js").read_text(encoding="utf-8")
+
+    assert "getAggregateMembers(aggregateId)" in api_js
+    assert "encodeURIComponent(aggregateId)}/members/reorder" in api_js
+    assert "expected_revision: expectedRevision" in api_js
+    assert "API.reorderAggregateMembers(" in actions_js
+    assert "Store.getAggregateMemberRevision(aggregateId)" in actions_js
+    assert "aggregate_member_revision_conflict" in actions_js
+    assert "API.saveAggregateMember(memberId, { direction })" not in actions_js
+
+
+
 def test_member_table_renders_price_groups_without_editing_legacy_manual_price():
     script = r'''
 const fs = require('fs');

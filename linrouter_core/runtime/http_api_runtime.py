@@ -150,6 +150,23 @@ def handle_get(handler: Any) -> None:
         else:
             handler._send_json(payload)
         return
+    if parsed.path.startswith("/api/aggregates/") and parsed.path.endswith("/members"):
+        parts = parsed.path.split("/")
+        if len(parts) != 5:
+            handler._send_json({"error": {"message": "请求路径无效", "type": "invalid_request_error", "code": "invalid_path"}}, status=400)
+            return
+        aggregate_id = parts[3]
+        if not handler.store.find_aggregate(aggregate_id):
+            handler._send_json({"error": {"message": "聚合模型不存在", "type": "invalid_request_error", "code": "aggregate_not_found"}}, status=404)
+            return
+        members = sorted(handler.store.get_aggregate_members(aggregate_id), key=lambda member: member.priority)
+        handler._send_json({
+            "ok": True,
+            "aggregate_id": aggregate_id,
+            "revision": handler.store.aggregate_member_revision(aggregate_id),
+            "members": [asdict(member) for member in members],
+        })
+        return
     if parsed.path.startswith("/api/client-config/"):
         group_id = parsed.path.split("/", 3)[3]
         group = handler.store.find_group(group_id)
@@ -256,6 +273,7 @@ def handle_get(handler: Any) -> None:
             "ok": True,
             "aggregate_models": [asdict(m) for m in handler.store.aggregate_models],
             "aggregate_members": [asdict(m) for m in handler.store.aggregate_members],
+            "aggregate_member_revisions": dict(handler.store.aggregate_member_revisions),
         })
         return
     if parsed.path == "/api/logs/all":
@@ -899,7 +917,7 @@ def handle_post(handler: Any) -> None:
         aggregate_id = parts[3]
         ok, message, code, revision = handler.store.reorder_aggregate_members(aggregate_id, member_ids, expected_revision)
         if not ok:
-            status = 404 if code == "aggregate_not_found" else (409 if code == "aggregate_member_revision_conflict" else 400)
+            status = 404 if code == "aggregate_not_found" else (409 if code == "aggregate_member_revision_conflict" else (500 if code == "config_save_failed" else 400))
             error_type = "conflict_error" if status == 409 else "invalid_request_error"
             handler._send_json({"error": {"message": message, "type": error_type, "code": code, "revision": revision}}, status=status)
             return

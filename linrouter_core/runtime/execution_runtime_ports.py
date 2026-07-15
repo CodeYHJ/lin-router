@@ -84,8 +84,11 @@ class StreamLifecyclePort:
     def usage_from_stream_chunk_with_presence(self, chunk: bytes) -> Tuple[tuple[int, int, int, int, int], bool]:
         if self._chunk_usage_with_presence is not None:
             return self._chunk_usage_with_presence(chunk)
-        usage = self._chunk_usage(chunk)
-        return usage, any(usage)
+        # Numeric values alone cannot establish whether an SSE payload carried
+        # usage: an explicit all-zero usage is valid.  Legacy value-only
+        # callbacks therefore retain their parsed values but are conservatively
+        # treated as lacking an explicit presence signal.
+        return self._chunk_usage(chunk), False
     def completion_signal(self, chunk: bytes) -> str: return self._completion_signal(chunk)
     def mark_stream_timeout(self, candidate: Any, error: str) -> int: return self._mark_timeout(candidate, error)
 

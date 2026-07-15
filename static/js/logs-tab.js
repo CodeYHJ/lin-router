@@ -512,18 +512,40 @@ const LogsTab = {
   },
 
   tokenSummary(item) {
+    const metrics = this.tokenMetrics(item);
+    if (!metrics) return '-';
+    return [
+      `输入：${metrics.input}`,
+      `输出：${metrics.output}`,
+      `命中：${metrics.cached}（${metrics.hit}%）`,
+      `总计：${metrics.total}`,
+    ].join('\n');
+  },
+
+  tokenMetrics(item) {
     const input = Number(item.prompt_tokens || 0);
     const output = Number(item.completion_tokens || 0);
     const total = Number(item.total_tokens || 0);
     const cached = Number(item.cached_tokens || 0);
-    if (!total && !input && !output && !cached) return '-';
-    const hit = input ? Math.round((cached / input) * 100) : 0;
+    if (!total && !input && !output && !cached) return null;
+    return {
+      input,
+      output,
+      total,
+      cached,
+      hit: input ? Math.round((cached / input) * 100) : 0,
+    };
+  },
+
+  tokenSummaryHtml(item) {
+    const metrics = this.tokenMetrics(item);
+    if (!metrics) return '-';
     return [
-      `输入：${input}`,
-      `输出：${output}`,
-      `命中：${cached}（命中率 ${hit}%）`,
-      `总计：${total}`,
-    ].join('\n');
+      `输入：${Utils.escapeHtml(metrics.input)}`,
+      `输出：${Utils.escapeHtml(metrics.output)}`,
+      `<span class="log-token-hit">命中：${Utils.escapeHtml(metrics.cached)}<span class="log-token-hit-rate">（${Utils.escapeHtml(metrics.hit)}%）</span></span>`,
+      `总计：${Utils.escapeHtml(metrics.total)}`,
+    ].join('<br>');
   },
 
   parseDetail(detail) {
@@ -554,7 +576,7 @@ const LogsTab = {
     const firstContentDeltaMilliseconds = numericTiming('first_content_delta_ms');
     const firstCompleteFrameMilliseconds = numericTiming('first_complete_frame_ms') ?? numericTiming('first_byte_ms');
     const primaryMilliseconds = firstContentDeltaMilliseconds ?? firstCompleteFrameMilliseconds;
-    const primaryLabel = firstContentDeltaMilliseconds !== null ? '首文本' : (firstCompleteFrameMilliseconds !== null ? '首完整帧' : '');
+    const primaryLabel = primaryMilliseconds !== null ? '首包' : '';
     return {
       totalMilliseconds,
       firstContentDeltaMilliseconds,
@@ -572,7 +594,7 @@ const LogsTab = {
     if (!timing) return '-';
     const parsed = this.parseDetail(item?.detail);
     if (!this.isStreamRecord(item, parsed)) return `总：${this.formatDurationSeconds(timing.totalMilliseconds)}`;
-    const firstLabel = timing.primaryLabel || '首完整帧';
+    const firstLabel = timing.primaryLabel || '首包';
     const first = timing.primaryMilliseconds === null ? '-' : this.formatDurationSeconds(timing.primaryMilliseconds);
     const remaining = timing.streamMilliseconds === null ? '-' : this.formatDurationSeconds(timing.streamMilliseconds);
     return [
@@ -679,7 +701,7 @@ const LogsTab = {
         <td class="tiny log-multiline">${Utils.escapeHtml(this.eventSummary(item))}</td>
         <td class="tiny">${Number(item.attempt || 0) || 1}</td>
         <td class="tiny log-multiline">${Utils.escapeHtml(this.durationSummary(item))}</td>
-        <td class="tiny log-multiline">${Utils.escapeHtml(this.tokenSummary(item))}</td>
+        <td class="tiny log-multiline log-token-summary">${this.tokenSummaryHtml(item)}</td>
         <td class="tiny result-text log-detail-preview" title="${Utils.escapeHtml(this.formatDetailPreview(item))}" data-log-detail-preview-key="${Utils.escapeHtml(key)}">${Utils.escapeHtml(this.formatDetailPreview(item))}</td>
         <td><button type="button" data-log-detail-key="${Utils.escapeHtml(key)}">查看</button></td>
       </tr>
