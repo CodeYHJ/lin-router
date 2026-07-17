@@ -596,6 +596,302 @@ class ConfigStore:
                 members=members,
             )
 
+    def _validate_aggregate_member_batch_locked(
+        self,
+        aggregate_id: str,
+        member_ids: List[str],
+        expected_revision: int,
+    ) -> Tuple[Optional[AggregateModel], List[AggregateMember], str, str, int]:
+        """在锁内校验批量成员写入的聚合归属与乐观锁版本。
+
+        批量状态和删除不能相信前端缓存：必须先按当前 Store 重新确认所有 ID
+        都属于同一聚合模型，任一项无效就整单拒绝，避免部分成员被写入。
+        """
+        aggregate = self.find_aggregate(str(aggregate_id or "").strip())
+        if not aggregate:
+            return None, [], "aggregate_not_found", "聚合模型不存在", 0
+
+        current_revision = self.aggregate_member_revision(aggregate.id)
+        if (
+            not isinstance(expected_revision, int)
+            or isinstance(expected_revision, bool)
+            or expected_revision < 0
+        ):
+            return aggregate, [], "invalid_expected_revision", "成员列表版本无效", current_revision
+        if expected_revision != current_revision:
+            return (
+                aggregate,
+                [],
+                "aggregate_member_revision_conflict",
+                "成员列表已被其他操作更新，请刷新后重试",
+                current_revision,
+            )
+
+        if (
+            not isinstance(member_ids, list)
+            or not member_ids
+            or not all(isinstance(member_id, str) and member_id.strip() for member_id in member_ids)
+            or len(set(member_ids)) != len(member_ids)
+        ):
+            return aggregate, [], "invalid_member_ids", "成员列表参数无效", current_revision
+
+        all_members_by_id = {member.id: member for member in self.aggregate_members}
+        missing_ids = [member_id for member_id in member_ids if member_id not in all_members_by_id]
+        if missing_ids:
+            return aggregate, [], "invalid_member_ids", "成员不存在或成员列表已过期", current_revision
+
+        selected_members = [all_members_by_id[member_id] for member_id in member_ids]
+        if any(member.aggregate_id != aggregate.id for member in selected_members):
+            return (
+                aggregate,
+                [],
+                "member_not_in_aggregate",
+                "成员不属于当前聚合模型",
+                current_revision,
+            )
+        return aggregate, selected_members, "", "", current_revision
+
+    def _aggregate_member_candidate_payload_locked(self, member: AggregateMember) -> Dict[str, Any]:
+        """构造删除预览所需候选链项，不暴露任何上游密钥。"""
+        group = self.find_group(member.group_id)
+        model = self.find_model(member.model_id)
+        now = int(time.time())
+        derived_status = "healthy"
+        derived_reason = "可参与聚合调度"
+        routable = True
+
+        if member.enabled is False:
+            derived_status = "manual_disabled"
+            derived_reason = "该聚合成员已手动停用"
+            routable = False
+        elif member.cooldown_until and member.cooldown_until > now:
+            derived_status = "cooling"
+            derived_reason = member.cooldown_reason or "该聚合成员正在冷却"
+            routable = False
+        elif not model:
+            derived_status = "config_error"
+            derived_reason = "底层模型不存在"
+            routable = False
+        elif model.usable is False:
+            derived_status = "underlying_model_disabled"
+            derived_reason = "底层真实模型已停用"
+            routable = False
+        elif model.cooldown_until and model.cooldown_until > now:
+            derived_status = "underlying_model_cooling"
+            derived_reason = model.cooldown_reason or "底层真实模型正在冷却"
+            routable = False
+
+        return {
+            "member_id": member.id,
+            "group_id": member.group_id,
+            "group_name": group.name if group else "-",
+            "model_id": member.model_id,
+            "model_name": model.name if model else "-",
+            "upstream_model": (model.upstream_model or model.ep_id) if model else "-",
+            "priority": member.priority,
+            "enabled": member.enabled,
+            "derived_status": derived_status,
+            "derived_reason": derived_reason,
+            "routable": routable,
+        }
+
+    def _aggregate_member_batch_error(
+        self,
+        code: str,
+        message: str,
+        revision: int,
+    ) -> Dict[str, Any]:
+        return {
+            "ok": False,
+            "message": message,
+            "code": code,
+            "revision": revision,
+        }
+
+    def batch_update_aggregate_members(
+        self,
+        aggregate_id: str,
+        member_ids: List[str],
+        *,
+        enabled: bool,
+        expected_revision: int,
+    ) -> Dict[str, Any]:
+        """原子更新当前聚合成员的启停状态，并仅保存一次配置。
+
+        启用时只清理成员级冷却和最近错误，不会修改底层模型的可用状态或
+        冷却。任一成员归属、版本或保存失败时恢复本次变更，避免半完成写入。
+        """
+        with self._lock:
+            aggregate, selected_members, code, message, current_revision = self._validate_aggregate_member_batch_locked(
+                aggregate_id,
+                member_ids,
+                expected_revision,
+            )
+            if code:
+                return self._aggregate_member_batch_error(code, message, current_revision)
+            assert aggregate is not None
+
+            members_to_change: List[AggregateMember] = []
+            for member in selected_members:
+                needs_member_health_reset = enabled and bool(
+                    member.cooldown_until or member.cooldown_reason or member.last_error
+                )
+                if member.enabled is not enabled or needs_member_health_reset:
+                    members_to_change.append(member)
+
+            skipped_count = len(selected_members) - len(members_to_change)
+            if not members_to_change:
+                members = sorted(self.get_aggregate_members(aggregate.id), key=lambda member: member.priority)
+                return {
+                    "ok": True,
+                    "message": "所选成员已是目标状态，未修改配置",
+                    "changed_count": 0,
+                    "skipped_count": skipped_count,
+                    "members": [asdict(member) for member in members],
+                    "revision": current_revision,
+                }
+
+            previous_members = [AggregateMember.from_dict(asdict(member)) for member in self.aggregate_members]
+            previous_revision_present = aggregate.id in self.aggregate_member_revisions
+            now_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+            for member in members_to_change:
+                member.enabled = enabled
+                if enabled:
+                    # 与单成员“启用”语义一致：只重置成员自己的健康痕迹。
+                    member.cooldown_until = 0
+                    member.cooldown_reason = ""
+                    member.last_error = ""
+                    member.last_checked_at = now_str
+
+            revision = self._touch_aggregate_member_revision(aggregate.id)
+            try:
+                self.save()
+            except Exception:
+                self.aggregate_members = previous_members
+                if previous_revision_present:
+                    self.aggregate_member_revisions[aggregate.id] = current_revision
+                else:
+                    self.aggregate_member_revisions.pop(aggregate.id, None)
+                return self._aggregate_member_batch_error(
+                    "config_save_failed",
+                    "保存批量成员状态失败，已回滚本次变更",
+                    current_revision,
+                )
+
+            members = sorted(self.get_aggregate_members(aggregate.id), key=lambda member: member.priority)
+            action = "启用" if enabled else "停用"
+            return {
+                "ok": True,
+                "message": f"已{action} {len(members_to_change)} 个成员，跳过 {skipped_count} 个",
+                "changed_count": len(members_to_change),
+                "skipped_count": skipped_count,
+                "members": [asdict(member) for member in members],
+                "revision": revision,
+            }
+
+    def preview_batch_delete_aggregate_members(
+        self,
+        aggregate_id: str,
+        member_ids: List[str],
+        *,
+        expected_revision: int,
+    ) -> Dict[str, Any]:
+        """预览批量移除后的候选链；该方法只读取当前 Store，不写配置。"""
+        with self._lock:
+            aggregate, selected_members, code, message, current_revision = self._validate_aggregate_member_batch_locked(
+                aggregate_id,
+                member_ids,
+                expected_revision,
+            )
+            if code:
+                return self._aggregate_member_batch_error(code, message, current_revision)
+            assert aggregate is not None
+
+            selected_ids = {member.id for member in selected_members}
+            before_members = sorted(self.get_aggregate_members(aggregate.id), key=lambda member: member.priority)
+            after_members = [member for member in before_members if member.id not in selected_ids]
+            candidate_chain_before = [
+                self._aggregate_member_candidate_payload_locked(member)
+                for member in before_members
+            ]
+            candidate_chain_after = [
+                self._aggregate_member_candidate_payload_locked(member)
+                for member in after_members
+            ]
+            has_routable_candidate = any(item["routable"] for item in candidate_chain_after)
+            warnings = []
+            if not has_routable_candidate:
+                warnings.append("删除后将没有可参与调度的候选成员，请确认业务影响。")
+
+            return {
+                "ok": True,
+                "aggregate_id": aggregate.id,
+                "aggregate_name": aggregate.display_name or aggregate.name,
+                "members": [
+                    self._aggregate_member_candidate_payload_locked(member)
+                    for member in sorted(selected_members, key=lambda member: member.priority)
+                ],
+                "candidate_chain_before": candidate_chain_before,
+                "candidate_chain_after": candidate_chain_after,
+                "has_routable_candidate": has_routable_candidate,
+                "remaining_routable_count": sum(item["routable"] for item in candidate_chain_after),
+                "warnings": warnings,
+                "revision": current_revision,
+            }
+
+    def batch_delete_aggregate_members(
+        self,
+        aggregate_id: str,
+        member_ids: List[str],
+        *,
+        expected_revision: int,
+    ) -> Dict[str, Any]:
+        """原子移除当前聚合的多个成员，不重排未选成员的 priority。"""
+        with self._lock:
+            aggregate, selected_members, code, message, current_revision = self._validate_aggregate_member_batch_locked(
+                aggregate_id,
+                member_ids,
+                expected_revision,
+            )
+            if code:
+                return self._aggregate_member_batch_error(code, message, current_revision)
+            assert aggregate is not None
+
+            deleted_items = [
+                self._aggregate_member_candidate_payload_locked(member)
+                for member in sorted(selected_members, key=lambda member: member.priority)
+            ]
+            selected_ids = {member.id for member in selected_members}
+            previous_members = [AggregateMember.from_dict(asdict(member)) for member in self.aggregate_members]
+            previous_revision_present = aggregate.id in self.aggregate_member_revisions
+            self.aggregate_members = [
+                member for member in self.aggregate_members if member.id not in selected_ids
+            ]
+            revision = self._touch_aggregate_member_revision(aggregate.id)
+            try:
+                self.save()
+            except Exception:
+                self.aggregate_members = previous_members
+                if previous_revision_present:
+                    self.aggregate_member_revisions[aggregate.id] = current_revision
+                else:
+                    self.aggregate_member_revisions.pop(aggregate.id, None)
+                return self._aggregate_member_batch_error(
+                    "config_save_failed",
+                    "保存批量删除失败，已回滚本次变更",
+                    current_revision,
+                )
+
+            remaining_members = sorted(self.get_aggregate_members(aggregate.id), key=lambda member: member.priority)
+            return {
+                "ok": True,
+                "message": f"已从当前聚合移除 {len(deleted_items)} 个成员",
+                "deleted_count": len(deleted_items),
+                "members": deleted_items,
+                "remaining_members": [asdict(member) for member in remaining_members],
+                "revision": revision,
+            }
+
     def remove_aggregate_member(self, member_id: str) -> bool:
         with self._lock:
             member = self.find_aggregate_member(member_id)

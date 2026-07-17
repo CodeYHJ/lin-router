@@ -26,6 +26,14 @@ const ConfigTabRuntimeView = {
   },
 
   async refreshRuntimeNow(controller) {
+    if (
+      Store.selected?.type === 'aggregate'
+      && Store.selected.id
+      && typeof controller.clearAggregateMemberSelection === 'function'
+    ) {
+      // 手动刷新后丢弃旧勾选，避免基于过期成员状态继续批量操作。
+      controller.clearAggregateMemberSelection(Store.selected.id);
+    }
     try {
       if (typeof App !== 'undefined' && typeof App.refreshRuntimeState === 'function') {
         // 与后台轮询共用 config scope 的单飞与 revision，手动刷新只提升反馈，不改数据范围。

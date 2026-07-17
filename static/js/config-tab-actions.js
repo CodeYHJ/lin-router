@@ -297,7 +297,7 @@ const ConfigTabActions = {
     }
   },
 
-  async onAddAggregateMember(controller) {
+  async onAddAggregateMembers(controller) {
     const aggregateId = document.getElementById('aggregate-id')?.value;
     if (!aggregateId) {
       Toast.warning('请先保存聚合模型');
@@ -308,142 +308,189 @@ const ConfigTabActions = {
       Toast.warning('请先创建 relay 中转站连接组');
       return;
     }
-    const groupOptions = groups.map(g => `<option value="${g.id}">${Utils.escapeHtml(g.name)}</option>`).join('');
+    const groupOptions = groups.map(group => `
+      <option value="${Utils.escapeHtml(group.id)}">${Utils.escapeHtml(group.name)}</option>
+    `).join('');
     const html = `
+      <div class="form-hint aggregate-batch-intro">只会添加所选 relay 连接组中当前可用且尚未存在的模型；已存在与不可用模型保留展示，但不能勾选。</div>
       <div class="form-row">
         <label>连接组</label>
-        <select id="member-group">${groupOptions}</select>
+        <select id="member-add-group">${groupOptions}</select>
       </div>
       <div class="form-row">
-        <label>模型</label>
-        <select id="member-model"><option value="">请选择模型</option></select>
+        <label>关键词</label>
+        <input id="member-add-query" placeholder="模型名或上游模型">
       </div>
       <div class="form-row">
-        <label>预览</label>
-        <div id="member-preview" class="form-hint">-</div>
+        <label>选择</label>
+        <div>
+          <label class="checkbox"><input id="member-add-select-all" type="checkbox"><span>全选当前可添加结果</span></label>
+          <div id="member-add-summary" class="aggregate-batch-summary" aria-live="polite"></div>
+        </div>
+      </div>
+      <div class="form-row">
+        <label>模型列表</label>
+        <div id="member-add-model-list" class="aggregate-member-add-list" aria-live="polite"></div>
       </div>
     `;
-    const updateModelOptions = (overlay) => {
-      const groupSelect = overlay.querySelector('#member-group');
-      const modelSelect = overlay.querySelector('#member-model');
-      const preview = overlay.querySelector('#member-preview');
-      if (!groupSelect || !modelSelect) return;
-      const refresh = () => {
-        const groupId = groupSelect.value;
-        const group = Store.getGroup(groupId);
-        if (!group || group.provider_type !== 'relay') {
-          modelSelect.innerHTML = '<option value="">请选择 relay 连接组</option>';
-          controller._updateMemberPreview('', '', preview);
-          return;
-        }
-        const models = Store.getModelsByGroup(groupId).filter(m => m.usable !== false);
-        const existing = new Set(Store.getAggregateMembers(aggregateId)
-          .filter(member => member.group_id === groupId)
-          .map(member => member.model_id));
-        modelSelect.innerHTML = '<option value="">请选择模型</option>' + models.map(m =>
-          `<option value="${Utils.escapeHtml(m.id)}" ${existing.has(m.id) ? 'disabled' : ''}>${Utils.escapeHtml(m.name)}${m.upstream_model && m.upstream_model !== m.name ? ` (${Utils.escapeHtml(m.upstream_model)})` : ''}${existing.has(m.id) ? '（已存在）' : ''}</option>`
-        ).join('');
-        controller._updateMemberPreview(groupSelect.value, modelSelect.value, preview);
-      };
-      groupSelect.addEventListener('change', refresh);
-      modelSelect.addEventListener('change', () => {
-        controller._updateMemberPreview(groupSelect.value, modelSelect.value, preview);
-      });
-      refresh();
-    };
+    const selectedModelIds = new Set();
     const values = await Modal.form({
-      title: '添加聚合成员',
+      title: '添加成员',
       html,
-      onRender: updateModelOptions,
-      validate: (vals) => {
-        if (!vals['member-group']) return '请选择连接组';
-        if (!vals['member-model']) return '请选择模型';
-        return null;
-      }
-    });
-    if (!values) return;
-    try {
-      await API.createAggregateMember(aggregateId, { group_id: values['member-group'], model_id: values['member-model'] });
-      await controller.reloadAfterAggregateMemberChange();
-      Toast.success('成员已添加');
-    } catch (err) {
-      Toast.error('添加失败：' + err.message);
-    }
-  },
-
-  async onAddAggregateMembersByGroup(controller) {
-    const aggregateId = document.getElementById('aggregate-id')?.value;
-    if (!aggregateId) {
-      Toast.warning('请先保存聚合模型');
-      return;
-    }
-    const groups = (Store.state.groups || []).filter(group => group.provider_type === 'relay');
-    if (!groups.length) {
-      Toast.warning('请先创建 relay 中转站连接组');
-      return;
-    }
-    const groupOptions = groups.map(group => {
-      const summary = Store.getAggregateBatchGroupSummary(aggregateId, group.id);
-      return `<option value="${Utils.escapeHtml(group.id)}">${Utils.escapeHtml(group.name)}（可添加 ${summary.addableCount} / 已存在 ${summary.existingCount}）</option>`;
-    }).join('');
-    const html = `
-      <div class="form-hint aggregate-batch-intro">只添加所选 relay 连接组中当前可用的模型；已存在成员会自动跳过，并追加到现有优先级末尾。</div>
-      <div class="form-row">
-        <label>连接组</label>
-        <select id="member-batch-group">${groupOptions}</select>
-      </div>
-      <div class="form-row">
-        <label>添加范围</label>
-        <div id="member-batch-summary" class="aggregate-batch-summary" aria-live="polite"></div>
-      </div>
-    `;
-    const values = await Modal.form({
-      title: '按连接组批量添加模型',
-      html,
-      confirmText: '批量添加',
+      confirmText: '添加所选 0 个',
+      wide: true,
       onRender: overlay => {
-        const select = overlay.querySelector('#member-batch-group');
-        const summaryElement = overlay.querySelector('#member-batch-summary');
-        const refreshSummary = () => {
-          const summary = Store.getAggregateBatchGroupSummary(aggregateId, select?.value || '');
-          if (summaryElement) {
-            summaryElement.textContent = `可添加 ${summary.addableCount} 个，已存在 ${summary.existingCount} 个，不可添加 ${summary.unavailableCount} 个。`;
+        const groupSelect = overlay.querySelector('#member-add-group');
+        const queryInput = overlay.querySelector('#member-add-query');
+        const selectAll = overlay.querySelector('#member-add-select-all');
+        const list = overlay.querySelector('#member-add-model-list');
+        const summary = overlay.querySelector('#member-add-summary');
+        const confirmButton = overlay.querySelector('[data-action="confirm"]');
+        let visibleAddableModelIds = [];
+
+        const selectedGroupModels = () => {
+          const groupId = groupSelect?.value || '';
+          const existingModelIds = new Set(Store.getAggregateMembers(aggregateId)
+            .filter(member => member.group_id === groupId)
+            .map(member => member.model_id));
+          return Store.getModelsByGroup(groupId).map(model => ({
+            model,
+            existing: existingModelIds.has(model.id),
+            available: model.usable !== false,
+          }));
+        };
+        const syncVisibleSelections = () => {
+          list?.querySelectorAll('input[data-member-add-model-id]').forEach(input => {
+            const modelId = input.dataset.memberAddModelId;
+            if (!modelId || input.disabled) return;
+            if (input.checked) selectedModelIds.add(modelId);
+            else selectedModelIds.delete(modelId);
+          });
+        };
+        const updateSelectionSummary = () => {
+          const selectedCount = selectedModelIds.size;
+          if (summary) {
+            const entries = selectedGroupModels();
+            const addableCount = entries.filter(item => item.available && !item.existing).length;
+            const existingCount = entries.filter(item => item.existing).length;
+            const unavailableCount = entries.filter(item => !item.available).length;
+            summary.textContent = `可添加 ${addableCount} 个，已存在 ${existingCount} 个，不可用 ${unavailableCount} 个；已选 ${selectedCount} 个。`;
+          }
+          if (confirmButton) {
+            confirmButton.textContent = `添加所选 ${selectedCount} 个`;
+            confirmButton.disabled = selectedCount === 0;
+          }
+          if (selectAll) {
+            const visibleSelectedCount = visibleAddableModelIds.filter(modelId => selectedModelIds.has(modelId)).length;
+            selectAll.checked = visibleAddableModelIds.length > 0 && visibleSelectedCount === visibleAddableModelIds.length;
+            selectAll.indeterminate = visibleSelectedCount > 0 && visibleSelectedCount < visibleAddableModelIds.length;
+            selectAll.disabled = visibleAddableModelIds.length === 0;
           }
         };
-        select?.addEventListener('change', refreshSummary);
-        refreshSummary();
+        const renderModels = () => {
+          const query = String(queryInput?.value || '').trim().toLowerCase();
+          const entries = selectedGroupModels();
+          const addableIds = new Set(entries
+            .filter(item => item.available && !item.existing)
+            .map(item => item.model.id));
+          selectedModelIds.forEach(modelId => {
+            if (!addableIds.has(modelId)) selectedModelIds.delete(modelId);
+          });
+          const visibleEntries = entries.filter(({ model }) => {
+            if (!query) return true;
+            return [model.name, model.upstream_model, model.ep_id]
+              .filter(Boolean)
+              .join(' ')
+              .toLowerCase()
+              .includes(query);
+          });
+          visibleAddableModelIds = visibleEntries
+            .filter(item => item.available && !item.existing)
+            .map(item => item.model.id);
+          if (list) {
+            list.innerHTML = visibleEntries.length ? visibleEntries.map(({ model, existing, available }, index) => {
+              const disabled = existing || !available;
+              const reason = existing ? '已存在' : (!available ? '底层不可用' : '可添加');
+              const inputId = `member-add-model-${index}`;
+              const upstream = model.upstream_model || model.ep_id || '-';
+              return `
+                <label class="aggregate-member-add-option ${disabled ? 'is-disabled' : ''}">
+                  <input id="${inputId}" type="checkbox" data-member-add-model-id="${Utils.escapeHtml(model.id)}" ${disabled ? 'disabled' : ''} ${selectedModelIds.has(model.id) ? 'checked' : ''}>
+                  <span class="aggregate-member-add-name">${Utils.escapeHtml(model.name)}</span>
+                  <span class="aggregate-member-add-upstream">${Utils.escapeHtml(upstream)}</span>
+                  <small>${reason}</small>
+                </label>
+              `;
+            }).join('') : '<div class="form-hint">没有匹配的模型。</div>';
+          }
+          updateSelectionSummary();
+        };
+
+        groupSelect?.addEventListener('change', () => {
+          selectedModelIds.clear();
+          renderModels();
+        });
+        queryInput?.addEventListener('input', () => {
+          syncVisibleSelections();
+          renderModels();
+        });
+        selectAll?.addEventListener('change', () => {
+          visibleAddableModelIds.forEach(modelId => {
+            if (selectAll.checked) selectedModelIds.add(modelId);
+            else selectedModelIds.delete(modelId);
+          });
+          renderModels();
+        });
+        list?.addEventListener('change', () => {
+          syncVisibleSelections();
+          updateSelectionSummary();
+        });
+        renderModels();
       },
-      validate: formValues => formValues['member-batch-group'] ? null : '请选择连接组',
+      validate: vals => {
+        if (!vals['member-add-group']) return '请选择连接组';
+        if (!selectedModelIds.size) return '请至少选择一个可添加模型';
+        return null;
+      },
     });
     if (!values) return;
+    const groupId = values['member-add-group'];
+    const existingModelIds = new Set(Store.getAggregateMembers(aggregateId)
+      .filter(member => member.group_id === groupId)
+      .map(member => member.model_id));
+    const modelIds = [...selectedModelIds].filter(modelId => {
+      const model = Store.getModel(modelId);
+      return model?.group_id === groupId && model.usable !== false && !existingModelIds.has(modelId);
+    });
+    if (!modelIds.length) {
+      Toast.warning('当前没有可添加的已选模型，请刷新后重新选择');
+      return;
+    }
     try {
       const result = await API.createAggregateMembersBatch(aggregateId, {
-        group_id: values['member-batch-group'],
+        group_id: groupId,
+        model_ids: modelIds,
       });
       await controller.reloadAfterAggregateMemberChange();
       const added = Number(result?.added_count ?? result?.counts?.added ?? (Array.isArray(result?.added) ? result.added.length : 0));
       const skipped = Number(result?.skipped_count ?? result?.counts?.skipped ?? (Array.isArray(result?.skipped) ? result.skipped.length : 0));
       const failed = Number(result?.failed_count ?? result?.counts?.failed ?? (Array.isArray(result?.failed) ? result.failed.length : 0));
       const summary = `新增 ${added} 个，跳过 ${skipped} 个，失败 ${failed} 个`;
-      const message = result?.message ? `${result.message}（${summary}）` : `批量添加完成：${summary}`;
+      const message = result?.message ? `${result.message}（${summary}）` : `添加完成：${summary}`;
       if (failed > 0 || added === 0) Toast.warning(message);
       else Toast.success(message);
     } catch (err) {
-      Toast.error('批量添加失败：' + err.message);
+      Toast.error('添加成员失败：' + err.message);
     }
   },
 
-  _updateMemberPreview(controller, groupId, modelId, previewEl) {
-    if (!previewEl) return;
-    const group = Store.getGroup(groupId);
-    const model = Store.getModel(modelId);
-    if (!group || !model) {
-      previewEl.textContent = '-';
-      return;
-    }
-    const upstream = model.upstream_model || model.ep_id || model.name;
-    const priceGroup = String(model.price_group || '').trim() || '未设置';
-    previewEl.innerHTML = Utils.escapeHtml(`${group.name} / ${model.name} → ${upstream} / 价格组 ${priceGroup}`);
+  // 兼容旧的内部调用名；页面只保留“添加成员”一个入口。
+  onAddAggregateMember(controller) {
+    return this.onAddAggregateMembers(controller);
+  },
+
+  onAddAggregateMembersByGroup(controller) {
+    return this.onAddAggregateMembers(controller);
   },
 
   onAggregateMemberAction(controller, action, memberId) {
@@ -452,6 +499,141 @@ const ConfigTabActions = {
     if (action === 'enable') return controller.onToggleAggregateMember(memberId, true);
     if (action === 'disable') return controller.onToggleAggregateMember(memberId, false);
     if (['up', 'down', 'top', 'bottom'].includes(action)) return controller.onMoveAggregateMember(memberId, action);
+  },
+
+  onAggregateMemberBulkAction(controller, action) {
+    const aggregateId = document.getElementById('aggregate-id')?.value;
+    if (!aggregateId) return;
+    if (action === 'clear') {
+      controller.clearAggregateMemberSelection(aggregateId);
+      return;
+    }
+    if (action === 'enable') return controller.onBatchUpdateAggregateMembers(true);
+    if (action === 'disable') return controller.onBatchUpdateAggregateMembers(false);
+    if (action === 'delete') return controller.onBatchDeleteAggregateMembers();
+  },
+
+  selectedAggregateMembers(controller) {
+    const aggregateId = document.getElementById('aggregate-id')?.value;
+    if (!aggregateId) return { aggregateId: '', memberIds: [], members: [] };
+    const memberIds = controller.getSelectedAggregateMemberIds(aggregateId);
+    const membersById = new Map(Store.getAggregateMembers(aggregateId).map(member => [member.id, member]));
+    return {
+      aggregateId,
+      memberIds,
+      members: memberIds.map(memberId => membersById.get(memberId)).filter(Boolean),
+    };
+  },
+
+  async onBatchUpdateAggregateMembers(controller, enabled) {
+    const { aggregateId, memberIds, members } = this.selectedAggregateMembers(controller);
+    if (!aggregateId || !memberIds.length) {
+      Toast.warning('请先选择要操作的聚合成员');
+      return;
+    }
+    const targetText = enabled ? '启用' : '停用';
+    const alreadyTargetCount = members.filter(member => (
+      enabled ? member.enabled !== false : member.enabled === false
+    )).length;
+    const changedCount = members.filter(member => {
+      const alreadyTarget = enabled ? member.enabled !== false : member.enabled === false;
+      const needsMemberHealthReset = enabled && Boolean(
+        member.cooldown_until || member.cooldown_reason || member.last_error
+      );
+      return !alreadyTarget || needsMemberHealthReset;
+    }).length;
+    const ok = await Modal.confirm({
+      title: `批量${targetText}成员`,
+      message: `已选 ${members.length} 个成员，其中已是目标状态 ${alreadyTargetCount} 个，预计变更 ${changedCount} 个。${enabled ? '启用会清理成员级冷却与最近错误，不修改底层模型状态。' : '停用只影响当前聚合成员，不改变优先级或底层模型状态。'}`,
+      confirmText: `确认${targetText}`,
+    });
+    if (!ok) return;
+
+    controller.setAggregateMemberBulkBusy(aggregateId, true);
+    try {
+      const result = await API.batchUpdateAggregateMembers(
+        aggregateId,
+        memberIds,
+        enabled,
+        Store.getAggregateMemberRevision(aggregateId),
+      );
+      await controller.reloadAfterAggregateMemberChange();
+      Toast.success(result.message || `已${targetText} ${result.changed_count || 0} 个成员`);
+    } catch (err) {
+      await this.handleAggregateMemberBatchError(controller, `批量${targetText}`, err);
+    } finally {
+      controller.setAggregateMemberBulkBusy(aggregateId, false);
+    }
+  },
+
+  async onBatchDeleteAggregateMembers(controller) {
+    const { aggregateId, memberIds } = this.selectedAggregateMembers(controller);
+    if (!aggregateId || !memberIds.length) {
+      Toast.warning('请先选择要删除的聚合成员');
+      return;
+    }
+
+    controller.setAggregateMemberBulkBusy(aggregateId, true);
+    try {
+      const preview = await API.batchDeleteAggregateMembersPreview(
+        aggregateId,
+        memberIds,
+        Store.getAggregateMemberRevision(aggregateId),
+      );
+      const confirmed = await controller.confirmBatchDeleteAggregateMembers(preview);
+      if (!confirmed) return;
+      const result = await API.batchDeleteAggregateMembers(
+        aggregateId,
+        memberIds,
+        Number(preview.revision),
+      );
+      await controller.reloadAfterAggregateMemberChange();
+      Toast.success(result.message || `已删除 ${result.deleted_count || 0} 个成员`);
+    } catch (err) {
+      await this.handleAggregateMemberBatchError(controller, '批量删除', err);
+    } finally {
+      controller.setAggregateMemberBulkBusy(aggregateId, false);
+    }
+  },
+
+  async handleAggregateMemberBatchError(controller, actionText, err) {
+    if (err.code === 'aggregate_member_revision_conflict') {
+      await controller.reloadAfterAggregateMemberChange();
+      Toast.error('成员列表已被其他操作更新，请重新选择后再试');
+      return;
+    }
+    Toast.error(`${actionText}失败：${err.message}`);
+  },
+
+  async confirmBatchDeleteAggregateMembers(controller, preview) {
+    if (!preview?.ok) return false;
+    const deletedRows = (preview.members || []).map(item => `
+      <li>${Utils.escapeHtml(item.group_name || '-')} / ${Utils.escapeHtml(item.model_name || '-')}（优先级 ${Utils.escapeHtml(item.priority)}）</li>
+    `).join('');
+    const before = Utils.escapeHtml(controller.aggregateChainSummary(preview.candidate_chain_before || []));
+    const after = Utils.escapeHtml(controller.aggregateChainSummary(preview.candidate_chain_after || []));
+    const warnings = (preview.warnings || []).map(warning => (
+      `<p class="danger-text">${Utils.escapeHtml(warning)}</p>`
+    )).join('');
+    return Modal.confirm({
+      title: '批量删除成员影响预览',
+      message: `
+        <p>只会从当前聚合模型「${Utils.escapeHtml(preview.aggregate_name || preview.aggregate_id || '-')}」移除成员，不会删除连接组或底层真实模型。</p>
+        <p><strong>将移除 ${preview.members?.length || 0} 个成员：</strong></p>
+        <ul class="aggregate-delete-preview-list">${deletedRows || '<li>-</li>'}</ul>
+        <div class="preview-grid">
+          <div><strong>删除前候选链</strong><pre>${before || '-'}</pre></div>
+          <div><strong>删除后候选链</strong><pre>${after || '-'}</pre></div>
+        </div>
+        ${preview.has_routable_candidate ? '' : '<p class="danger-text"><strong>危险：删除后将没有可调度候选。</strong></p>'}
+        ${warnings}
+      `,
+      confirmText: '确认删除',
+      confirmClass: 'btn-danger',
+      cancelText: '取消',
+      allowHtml: true,
+      wide: true,
+    });
   },
 
   aggregateChainSummary(controller, chain) {
@@ -484,6 +666,8 @@ const ConfigTabActions = {
   },
 
   async reloadAfterAggregateMemberChange(controller) {
+    const aggregateId = document.getElementById('aggregate-id')?.value;
+    if (aggregateId) controller.clearAggregateMemberSelection(aggregateId);
     await Store.load();
     if (Tabs.current === 'config' && Store.selected.type === 'aggregate') {
       controller.render();
@@ -545,21 +729,31 @@ const ConfigTabActions = {
     if (!body) return;
     let draggedRow = null;
     body.querySelectorAll('tr[data-member-id]').forEach(row => {
-      row.addEventListener('dragstart', event => {
-        draggedRow = row;
-        row.classList.add('aggregate-member-dragging');
-        event.dataTransfer.effectAllowed = 'move';
-        event.dataTransfer.setData('text/plain', row.dataset.memberId || '');
-      });
-      row.addEventListener('dragend', () => {
+      const handle = row.querySelector('.aggregate-drag-handle');
+      const clearDragState = () => {
         draggedRow = null;
         body.querySelectorAll('.aggregate-member-drop-target').forEach(item => item.classList.remove('aggregate-member-drop-target'));
         row.classList.remove('aggregate-member-dragging');
+      };
+      row.addEventListener('dragstart', event => {
+        // 行本身不可拖动；即使浏览器因文本选择派发 dragstart，也不能进入排序流程。
+        if (!event.target.closest('.aggregate-drag-handle')) event.preventDefault();
       });
+      if (handle) {
+        handle.addEventListener('dragstart', event => {
+          draggedRow = row;
+          row.classList.add('aggregate-member-dragging');
+          if (event.dataTransfer) {
+            event.dataTransfer.effectAllowed = 'move';
+            event.dataTransfer.setData('text/plain', row.dataset.memberId || '');
+          }
+        });
+        handle.addEventListener('dragend', clearDragState);
+      }
       row.addEventListener('dragover', event => {
         if (!draggedRow || draggedRow === row) return;
         event.preventDefault();
-        event.dataTransfer.dropEffect = 'move';
+        if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
         body.querySelectorAll('.aggregate-member-drop-target').forEach(item => item.classList.remove('aggregate-member-drop-target'));
         row.classList.add('aggregate-member-drop-target');
       });

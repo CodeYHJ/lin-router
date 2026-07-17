@@ -127,6 +127,34 @@ const API = {
   deleteAggregate(id) { return this.req(`/api/aggregates/${id}`, { method: 'DELETE' }); },
   createAggregateMember(aggregateId, data) { return this.req(`/api/aggregates/${aggregateId}/members`, { method: 'POST', body: JSON.stringify(data) }); },
   createAggregateMembersBatch(aggregateId, data) { return this.req(`/api/aggregates/${encodeURIComponent(aggregateId)}/members/batch`, { method: 'POST', body: JSON.stringify(data) }); },
+  batchUpdateAggregateMembers(aggregateId, memberIds, enabled, expectedRevision) {
+    return this.req(`/api/aggregates/${encodeURIComponent(aggregateId)}/members/batch-update`, {
+      method: 'POST',
+      body: JSON.stringify({
+        member_ids: memberIds,
+        enabled,
+        expected_revision: expectedRevision,
+      }),
+    });
+  },
+  batchDeleteAggregateMembersPreview(aggregateId, memberIds, expectedRevision) {
+    return this.req(`/api/aggregates/${encodeURIComponent(aggregateId)}/members/batch-delete-preview`, {
+      method: 'POST',
+      body: JSON.stringify({
+        member_ids: memberIds,
+        expected_revision: expectedRevision,
+      }),
+    });
+  },
+  batchDeleteAggregateMembers(aggregateId, memberIds, expectedRevision) {
+    return this.req(`/api/aggregates/${encodeURIComponent(aggregateId)}/members/batch-delete`, {
+      method: 'POST',
+      body: JSON.stringify({
+        member_ids: memberIds,
+        expected_revision: expectedRevision,
+      }),
+    });
+  },
   reorderAggregateMembers(aggregateId, memberIds, expectedRevision) { return this.req(`/api/aggregates/${encodeURIComponent(aggregateId)}/members/reorder`, { method: 'POST', body: JSON.stringify({ member_ids: memberIds, expected_revision: expectedRevision }) }); },
   saveAggregateMember(id, data) { return this.req(`/api/aggregate-members/${id}`, { method: 'PUT', body: JSON.stringify(data) }); },
   clearAggregateMemberCooldown(id) { return this.req(`/api/aggregate-members/${id}/clear-cooldown`, { method: 'POST' }); },

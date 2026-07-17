@@ -208,7 +208,7 @@ const ConfigTabForm = {
     if (!form) return;
     form.querySelectorAll('input, select, textarea').forEach(el => {
       // 失焦/变更只保存进程内草稿，正式保存统一由显式 submit 触发。
-      if (el.id === 'aggregate-stats-limit') return;
+      if (el.id === 'aggregate-stats-limit' || el.dataset.transientControl === 'true') return;
       ['input', 'change', 'blur'].forEach(event => {
         el.addEventListener(event, () => this.captureDraft(controller, form));
       });
@@ -223,6 +223,7 @@ const ConfigTabForm = {
         if (el.name && el.checked) values[`__radio:${el.name}`] = el.value;
         return;
       }
+      if (el.dataset.transientControl === 'true') return;
       if (!el.id) return;
       if (el.type === 'checkbox') values[el.id] = el.checked;
       else values[el.id] = el.value;

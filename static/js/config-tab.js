@@ -9,6 +9,7 @@ const ConfigTab = {
   _drafts: new Map(),
   _draftDirty: new Set(),
   _draftBaselines: new Map(),
+  _aggregateMemberUi: null,
 
   onShow() {
     const panel = document.getElementById('panel-config');
@@ -571,28 +572,212 @@ const ConfigTab = {
     `).join('') + risk;
   },
 
+  /**
+   * 保存当前聚合成员表的瞬态筛选与选择状态；切换聚合时不能复用旧成员 ID。
+   */
+  getAggregateMemberUiState(aggregateId) {
+    if (!this._aggregateMemberUi || this._aggregateMemberUi.aggregateId !== aggregateId) {
+      this._aggregateMemberUi = {
+        aggregateId,
+        selectedIds: new Set(),
+        filters: {
+          groupId: '',
+          status: 'all',
+          query: '',
+        },
+        busy: false,
+      };
+    }
+    return this._aggregateMemberUi;
+  },
+
+  aggregateMemberFilterStatus(member, model) {
+    if (member.enabled === false) return 'manual_disabled';
+    const now = Date.now();
+    if (
+      !model
+      || model.usable === false
+      || Boolean(member.last_error)
+      || (member.cooldown_until && member.cooldown_until * 1000 > now)
+      || (model.cooldown_until && model.cooldown_until * 1000 > now)
+    ) {
+      return 'unavailable';
+    }
+    return 'normal';
+  },
+
+  getFilteredAggregateMembers(aggregateId) {
+    const state = this.getAggregateMemberUiState(aggregateId);
+    const query = String(state.filters.query || '').trim().toLowerCase();
+    return Store.getAggregateMembers(aggregateId).filter(member => {
+      const model = Store.getModel(member.model_id);
+      if (state.filters.groupId && member.group_id !== state.filters.groupId) return false;
+      if (
+        state.filters.status !== 'all'
+        && this.aggregateMemberFilterStatus(member, model) !== state.filters.status
+      ) {
+        return false;
+      }
+      if (!query) return true;
+      const searchText = [model?.name, model?.upstream_model, model?.ep_id]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase();
+      return searchText.includes(query);
+    });
+  },
+
+  getSelectedAggregateMemberIds(aggregateId) {
+    const state = this.getAggregateMemberUiState(aggregateId);
+    const currentIds = new Set(Store.getAggregateMembers(aggregateId).map(member => member.id));
+    state.selectedIds.forEach(memberId => {
+      if (!currentIds.has(memberId)) state.selectedIds.delete(memberId);
+    });
+    return [...state.selectedIds];
+  },
+
+  clearAggregateMemberSelection(aggregateId) {
+    this.getAggregateMemberUiState(aggregateId).selectedIds.clear();
+    this.updateAggregateMemberSelectionControls();
+  },
+
+  setAggregateMemberBulkBusy(aggregateId, busy) {
+    this.getAggregateMemberUiState(aggregateId).busy = busy;
+    this.updateAggregateMemberSelectionControls();
+  },
+
+  onAggregateMemberFiltersChanged(panel) {
+    const aggregateId = document.getElementById('aggregate-id')?.value;
+    if (!aggregateId) return;
+    const state = this.getAggregateMemberUiState(aggregateId);
+    state.filters = {
+      groupId: panel.querySelector('#aggregate-member-filter-group')?.value || '',
+      status: panel.querySelector('#aggregate-member-filter-status')?.value || 'all',
+      query: panel.querySelector('#aggregate-member-filter-query')?.value || '',
+    };
+    // 筛选范围变化后不能保留隐藏成员，避免用户误以为操作只作用于当前可见项。
+    state.selectedIds.clear();
+    this.applyAggregateMemberFilters(panel);
+  },
+
+  applyAggregateMemberFilters(panel) {
+    const aggregateId = document.getElementById('aggregate-id')?.value;
+    if (!aggregateId) return;
+    const visibleIds = new Set(this.getFilteredAggregateMembers(aggregateId).map(member => member.id));
+    panel.querySelectorAll('tr[data-member-id]').forEach(row => {
+      row.hidden = !visibleIds.has(row.dataset.memberId);
+    });
+    this.updateAggregateMemberSelectionControls(panel);
+  },
+
+  onAggregateMemberSelectionChanged(memberId, checked) {
+    const aggregateId = document.getElementById('aggregate-id')?.value;
+    if (!aggregateId || !memberId) return;
+    const state = this.getAggregateMemberUiState(aggregateId);
+    if (checked) state.selectedIds.add(memberId);
+    else state.selectedIds.delete(memberId);
+    this.updateAggregateMemberSelectionControls();
+  },
+
+  onAggregateMemberSelectAllChanged(checked) {
+    const aggregateId = document.getElementById('aggregate-id')?.value;
+    if (!aggregateId) return;
+    const state = this.getAggregateMemberUiState(aggregateId);
+    this.getFilteredAggregateMembers(aggregateId).forEach(member => {
+      if (checked) state.selectedIds.add(member.id);
+      else state.selectedIds.delete(member.id);
+    });
+    this.updateAggregateMemberSelectionControls();
+  },
+
+  updateAggregateMemberSelectionControls(panel = null) {
+    const root = panel || (typeof document === 'undefined' ? null : document.getElementById('panel-config'));
+    const aggregateId = typeof document === 'undefined' ? '' : document.getElementById('aggregate-id')?.value;
+    if (!root || !aggregateId) return;
+    const state = this.getAggregateMemberUiState(aggregateId);
+    const selectedIds = this.getSelectedAggregateMemberIds(aggregateId);
+    const visibleMembers = this.getFilteredAggregateMembers(aggregateId);
+    const visibleIds = new Set(visibleMembers.map(member => member.id));
+    const visibleSelectedCount = selectedIds.filter(memberId => visibleIds.has(memberId)).length;
+    const selectAll = root.querySelector('#aggregate-member-select-all');
+    if (selectAll) {
+      selectAll.checked = visibleMembers.length > 0 && visibleSelectedCount === visibleMembers.length;
+      selectAll.indeterminate = visibleSelectedCount > 0 && visibleSelectedCount < visibleMembers.length;
+      selectAll.disabled = state.busy || visibleMembers.length === 0;
+    }
+    root.querySelectorAll('.aggregate-member-select').forEach(input => {
+      input.checked = state.selectedIds.has(input.dataset.memberId);
+      input.disabled = state.busy;
+    });
+    const toolbar = root.querySelector('#aggregate-member-bulk-toolbar');
+    if (toolbar) {
+      toolbar.classList.toggle('hidden', selectedIds.length === 0);
+      toolbar.classList.toggle('is-busy', state.busy);
+      const count = toolbar.querySelector('[data-aggregate-selected-count]');
+      if (count) count.textContent = `已选 ${selectedIds.length} 个`;
+      toolbar.querySelectorAll('button[data-aggregate-bulk-action]').forEach(button => {
+        button.disabled = state.busy || selectedIds.length === 0;
+      });
+    }
+  },
+
   renderAggregateMembers(a) {
     const members = Store.getAggregateMembers(a.id);
+    const state = this.getAggregateMemberUiState(a.id);
+    const selectedIds = new Set(this.getSelectedAggregateMemberIds(a.id));
+    const memberGroups = [...new Set(members.map(member => member.group_id))]
+      .map(groupId => Store.getGroup(groupId))
+      .filter(Boolean);
+    const groupOptions = memberGroups.map(group => `
+      <option value="${Utils.escapeHtml(group.id)}" ${state.filters.groupId === group.id ? 'selected' : ''}>${Utils.escapeHtml(group.name)}</option>
+    `).join('');
     return `
       <section class="form-card aggregate-members-card">
         <div class="aggregate-members-header">
           <h3>聚合成员</h3>
           <div class="aggregate-members-header-actions">
-            <button type="button" id="aggregate-add-member" class="btn-secondary btn-sm">单个添加</button>
-            <button type="button" id="aggregate-add-group-models" class="btn-secondary btn-sm">按连接组批量添加</button>
+            <button type="button" id="aggregate-add-members" class="btn-secondary btn-sm">添加成员</button>
           </div>
         </div>
         <div class="aggregate-status-note">成员状态不等于底层真实模型状态：手动停用只影响聚合成员；自动冷却表示上游健康失败；底层停用需要到真实模型配置中恢复。价格组仅展示模型配置，不参与调度排序。</div>
         ${members.length ? `
+        <div class="aggregate-member-filters" aria-label="聚合成员筛选">
+          <label>连接组
+            <select id="aggregate-member-filter-group" data-transient-control="true">
+              <option value="">全部连接组</option>
+              ${groupOptions}
+            </select>
+          </label>
+          <label>状态
+            <select id="aggregate-member-filter-status" data-transient-control="true">
+              <option value="all" ${state.filters.status === 'all' ? 'selected' : ''}>全部状态</option>
+              <option value="normal" ${state.filters.status === 'normal' ? 'selected' : ''}>正常</option>
+              <option value="manual_disabled" ${state.filters.status === 'manual_disabled' ? 'selected' : ''}>手动停用</option>
+              <option value="unavailable" ${state.filters.status === 'unavailable' ? 'selected' : ''}>冷却或底层不可用</option>
+            </select>
+          </label>
+          <label class="aggregate-member-filter-query">模型 / 上游模型
+            <input id="aggregate-member-filter-query" data-transient-control="true" value="${Utils.escapeHtml(state.filters.query)}" placeholder="输入关键词筛选">
+          </label>
+        </div>
+        <div id="aggregate-member-bulk-toolbar" class="aggregate-member-bulk-toolbar ${selectedIds.size ? '' : 'hidden'}" aria-live="polite">
+          <strong data-aggregate-selected-count>已选 ${selectedIds.size} 个</strong>
+          <button type="button" class="btn-secondary btn-sm" data-aggregate-bulk-action="enable">启用</button>
+          <button type="button" class="btn-secondary btn-sm" data-aggregate-bulk-action="disable">停用</button>
+          <button type="button" class="btn-danger btn-sm" data-aggregate-bulk-action="delete">删除</button>
+          <button type="button" class="btn-secondary btn-sm" data-aggregate-bulk-action="clear">取消选择</button>
+        </div>
         <div class="aggregate-members-table-wrap">
           <table class="aggregate-members-table">
             <thead>
               <tr>
-                <th>顺序</th>
+                <th class="aggregate-member-selection-column">
+                  <input id="aggregate-member-select-all" data-transient-control="true" type="checkbox" aria-label="全选当前筛选结果" title="全选当前筛选结果">
+                  <span>顺序</span>
+                </th>
                 <th>连接组</th>
                 <th>模型</th>
                 <th>上游模型</th>
-                <th>优先级</th>
                 <th class="price-group-col">价格组</th>
                 <th>状态</th>
                 <th>操作</th>
@@ -623,21 +808,28 @@ const ConfigTab = {
     const toggleBtn = member.enabled === false
       ? `<button type="button" class="btn-secondary btn-sm" data-action="enable" data-member-id="${member.id}">启用</button>`
       : `<button type="button" class="btn-secondary btn-sm" data-action="disable" data-member-id="${member.id}">停用</button>`;
+    const selected = this.getAggregateMemberUiState(member.aggregate_id).selectedIds.has(member.id);
+    const memberLabel = Utils.escapeHtml(model?.name || member.id);
     return `
-      <tr data-member-id="${member.id}" draggable="true">
-        <td class="tiny"><span class="aggregate-drag-handle" title="拖拽调整顺序" aria-label="拖拽调整顺序">⠿</span>${idx + 1}</td>
+      <tr data-member-id="${member.id}">
+        <td class="tiny aggregate-member-selection-cell">
+          <input type="checkbox" class="aggregate-member-select" data-transient-control="true" data-member-id="${member.id}" aria-label="选择成员 ${memberLabel}" ${selected ? 'checked' : ''}>
+          <span class="aggregate-drag-handle" draggable="true" title="拖拽调整顺序" aria-label="拖拽调整顺序">⠿</span>
+          <span>${idx + 1}</span>
+        </td>
         <td class="truncate-cell" title="${Utils.escapeHtml(group?.name || '-')}">${Utils.escapeHtml(group?.name || '-')}${warningBadge}</td>
         <td class="truncate-cell" title="${Utils.escapeHtml(model?.name || '-')}">${Utils.escapeHtml(model?.name || '-')}</td>
         <td class="truncate-cell" title="${Utils.escapeHtml(model?.upstream_model || model?.ep_id || '-')}">${Utils.escapeHtml(model?.upstream_model || model?.ep_id || '-')}</td>
-        <td class="tiny">${idx + 1}</td>
         <td class="price-group-col">${this.renderAggregatePriceGroup(model)}</td>
         <td class="tiny" data-member-status-cell="${member.id}"><span data-aggregate-member-status="${member.id}" class="pill ${status.class}" title="${Utils.escapeHtml(status.title)}">${status.text}</span></td>
         <td class="aggregate-member-actions">
-          ${toggleBtn}
-          ${recoverBtn}
-          <button type="button" class="btn-icon" data-action="up" data-member-id="${member.id}" ${idx === 0 ? 'disabled' : ''} title="上移">↑</button>
-          <button type="button" class="btn-icon" data-action="down" data-member-id="${member.id}" ${idx === total - 1 ? 'disabled' : ''} title="下移">↓</button>
-          <button type="button" class="btn-icon btn-danger" data-action="delete" data-member-id="${member.id}" title="删除">×</button>
+          <div class="aggregate-member-action-buttons">
+            ${toggleBtn}
+            ${recoverBtn}
+            <button type="button" class="btn-icon" data-action="up" data-member-id="${member.id}" ${idx === 0 ? 'disabled' : ''} title="上移">↑</button>
+            <button type="button" class="btn-icon" data-action="down" data-member-id="${member.id}" ${idx === total - 1 ? 'disabled' : ''} title="下移">↓</button>
+            <button type="button" class="btn-icon btn-danger" data-action="delete" data-member-id="${member.id}" title="删除">×</button>
+          </div>
         </td>
       </tr>
     `;
@@ -990,14 +1182,29 @@ const ConfigTab = {
       panel.querySelector('#speed-test-aggregate-button')?.addEventListener('click', e => this.runSpeedTest(e.currentTarget.dataset.speedTestType, e.currentTarget.dataset.speedTestId));
       panel.querySelector('#aggregate-delete')?.addEventListener('click', () => this.onAggregateDelete());
       panel.querySelector('#aggregate-copy-route-key')?.addEventListener('click', () => this.onCopyAggregateRouteKey());
-      panel.querySelector('#aggregate-add-member')?.addEventListener('click', () => this.onAddAggregateMember());
-      panel.querySelector('#aggregate-add-group-models')?.addEventListener('click', () => this.onAddAggregateMembersByGroup());
+      panel.querySelector('#aggregate-add-members')?.addEventListener('click', () => this.onAddAggregateMembers());
       panel.querySelector('#aggregate-stats-limit')?.addEventListener('change', () => this.refreshAggregateStats());
       this.refreshAggregateStats();
+      ['#aggregate-member-filter-group', '#aggregate-member-filter-status'].forEach(selector => {
+        panel.querySelector(selector)?.addEventListener('change', () => this.onAggregateMemberFiltersChanged(panel));
+      });
+      panel.querySelector('#aggregate-member-filter-query')?.addEventListener('input', () => this.onAggregateMemberFiltersChanged(panel));
+      panel.querySelector('#aggregate-member-select-all')?.addEventListener('change', event => {
+        this.onAggregateMemberSelectAllChanged(event.currentTarget.checked);
+      });
+      panel.querySelectorAll('.aggregate-member-select').forEach(input => {
+        input.addEventListener('change', event => {
+          this.onAggregateMemberSelectionChanged(event.currentTarget.dataset.memberId, event.currentTarget.checked);
+        });
+      });
+      panel.querySelectorAll('button[data-aggregate-bulk-action]').forEach(button => {
+        button.addEventListener('click', () => this.onAggregateMemberBulkAction(button.dataset.aggregateBulkAction));
+      });
       panel.querySelectorAll('.aggregate-member-actions button[data-action]').forEach(el => {
         el.addEventListener('click', () => this.onAggregateMemberAction(el.dataset.action, el.dataset.memberId));
       });
       this.bindAggregateMemberDragAndDrop(panel);
+      this.applyAggregateMemberFilters(panel);
       this.bindAutoSave(aggregateForm);
     }
 
@@ -1158,10 +1365,14 @@ const ConfigTab = {
   onModelClone(...args) { return ConfigTabActions.onModelClone(this, ...args); },
   onAggregateSubmit(...args) { return ConfigTabActions.onAggregateSubmit(this, ...args); },
   onAggregateDelete(...args) { return ConfigTabActions.onAggregateDelete(this, ...args); },
+  onAddAggregateMembers(...args) { return ConfigTabActions.onAddAggregateMembers(this, ...args); },
   onAddAggregateMember(...args) { return ConfigTabActions.onAddAggregateMember(this, ...args); },
   onAddAggregateMembersByGroup(...args) { return ConfigTabActions.onAddAggregateMembersByGroup(this, ...args); },
-  _updateMemberPreview(...args) { return ConfigTabActions._updateMemberPreview(this, ...args); },
   onAggregateMemberAction(...args) { return ConfigTabActions.onAggregateMemberAction(this, ...args); },
+  onAggregateMemberBulkAction(...args) { return ConfigTabActions.onAggregateMemberBulkAction(this, ...args); },
+  onBatchUpdateAggregateMembers(...args) { return ConfigTabActions.onBatchUpdateAggregateMembers(this, ...args); },
+  onBatchDeleteAggregateMembers(...args) { return ConfigTabActions.onBatchDeleteAggregateMembers(this, ...args); },
+  confirmBatchDeleteAggregateMembers(...args) { return ConfigTabActions.confirmBatchDeleteAggregateMembers(this, ...args); },
   bindAggregateMemberDragAndDrop(...args) { return ConfigTabActions.bindAggregateMemberDragAndDrop(this, ...args); },
   onReorderAggregateMembers(...args) { return ConfigTabActions.onReorderAggregateMembers(this, ...args); },
   aggregateChainSummary(...args) { return ConfigTabActions.aggregateChainSummary(this, ...args); },

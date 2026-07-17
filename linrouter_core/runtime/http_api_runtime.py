@@ -917,6 +917,113 @@ def handle_post(handler: Any) -> None:
             status = 200
         handler._send_json(batch_result, status=status)
         return
+    if parsed.path.startswith("/api/aggregates/") and parsed.path.endswith("/members/batch-update"):
+        parts = parsed.path.split("/")
+        if len(parts) != 6:
+            handler._send_json({"error": {"message": "请求路径无效", "type": "invalid_request_error", "code": "invalid_path"}}, status=400)
+            return
+        payload = handler._read_json()
+        member_ids = payload.get("member_ids") if isinstance(payload, dict) else None
+        expected_revision = payload.get("expected_revision") if isinstance(payload, dict) else None
+        enabled = payload.get("enabled") if isinstance(payload, dict) else None
+        if not isinstance(member_ids, list) or not all(isinstance(member_id, str) and member_id.strip() for member_id in member_ids):
+            handler._send_json({"error": {"message": "成员列表参数无效", "type": "invalid_request_error", "code": "invalid_member_ids"}}, status=400)
+            return
+        if not isinstance(enabled, bool):
+            handler._send_json({"error": {"message": "成员启停状态无效", "type": "invalid_request_error", "code": "invalid_enabled"}}, status=400)
+            return
+        if not isinstance(expected_revision, int) or isinstance(expected_revision, bool) or expected_revision < 0:
+            handler._send_json({"error": {"message": "成员列表版本无效", "type": "invalid_request_error", "code": "invalid_expected_revision"}}, status=400)
+            return
+        batch_result = handler.store.batch_update_aggregate_members(
+            parts[3],
+            member_ids,
+            enabled=enabled,
+            expected_revision=expected_revision,
+        )
+        if batch_result.get("ok"):
+            handler._send_json(batch_result)
+            return
+        code = str(batch_result.get("code") or "")
+        status = 404 if code == "aggregate_not_found" else (409 if code == "aggregate_member_revision_conflict" else (500 if code == "config_save_failed" else 400))
+        error_type = "conflict_error" if status == 409 else ("api_error" if status == 500 else "invalid_request_error")
+        handler._send_json({
+            "error": {
+                "message": batch_result.get("message") or "批量更新成员状态失败",
+                "type": error_type,
+                "code": code,
+                "revision": batch_result.get("revision"),
+            }
+        }, status=status)
+        return
+    if parsed.path.startswith("/api/aggregates/") and parsed.path.endswith("/members/batch-delete-preview"):
+        parts = parsed.path.split("/")
+        if len(parts) != 6:
+            handler._send_json({"error": {"message": "请求路径无效", "type": "invalid_request_error", "code": "invalid_path"}}, status=400)
+            return
+        payload = handler._read_json()
+        member_ids = payload.get("member_ids") if isinstance(payload, dict) else None
+        expected_revision = payload.get("expected_revision") if isinstance(payload, dict) else None
+        if not isinstance(member_ids, list) or not all(isinstance(member_id, str) and member_id.strip() for member_id in member_ids):
+            handler._send_json({"error": {"message": "成员列表参数无效", "type": "invalid_request_error", "code": "invalid_member_ids"}}, status=400)
+            return
+        if not isinstance(expected_revision, int) or isinstance(expected_revision, bool) or expected_revision < 0:
+            handler._send_json({"error": {"message": "成员列表版本无效", "type": "invalid_request_error", "code": "invalid_expected_revision"}}, status=400)
+            return
+        preview = handler.store.preview_batch_delete_aggregate_members(
+            parts[3],
+            member_ids,
+            expected_revision=expected_revision,
+        )
+        if preview.get("ok"):
+            handler._send_json(preview)
+            return
+        code = str(preview.get("code") or "")
+        status = 404 if code == "aggregate_not_found" else (409 if code == "aggregate_member_revision_conflict" else 400)
+        error_type = "conflict_error" if status == 409 else "invalid_request_error"
+        handler._send_json({
+            "error": {
+                "message": preview.get("message") or "批量删除预览失败",
+                "type": error_type,
+                "code": code,
+                "revision": preview.get("revision"),
+            }
+        }, status=status)
+        return
+    if parsed.path.startswith("/api/aggregates/") and parsed.path.endswith("/members/batch-delete"):
+        parts = parsed.path.split("/")
+        if len(parts) != 6:
+            handler._send_json({"error": {"message": "请求路径无效", "type": "invalid_request_error", "code": "invalid_path"}}, status=400)
+            return
+        payload = handler._read_json()
+        member_ids = payload.get("member_ids") if isinstance(payload, dict) else None
+        expected_revision = payload.get("expected_revision") if isinstance(payload, dict) else None
+        if not isinstance(member_ids, list) or not all(isinstance(member_id, str) and member_id.strip() for member_id in member_ids):
+            handler._send_json({"error": {"message": "成员列表参数无效", "type": "invalid_request_error", "code": "invalid_member_ids"}}, status=400)
+            return
+        if not isinstance(expected_revision, int) or isinstance(expected_revision, bool) or expected_revision < 0:
+            handler._send_json({"error": {"message": "成员列表版本无效", "type": "invalid_request_error", "code": "invalid_expected_revision"}}, status=400)
+            return
+        batch_result = handler.store.batch_delete_aggregate_members(
+            parts[3],
+            member_ids,
+            expected_revision=expected_revision,
+        )
+        if batch_result.get("ok"):
+            handler._send_json(batch_result)
+            return
+        code = str(batch_result.get("code") or "")
+        status = 404 if code == "aggregate_not_found" else (409 if code == "aggregate_member_revision_conflict" else (500 if code == "config_save_failed" else 400))
+        error_type = "conflict_error" if status == 409 else ("api_error" if status == 500 else "invalid_request_error")
+        handler._send_json({
+            "error": {
+                "message": batch_result.get("message") or "批量删除成员失败",
+                "type": error_type,
+                "code": code,
+                "revision": batch_result.get("revision"),
+            }
+        }, status=status)
+        return
     if parsed.path.startswith("/api/aggregates/") and parsed.path.endswith("/members/reorder"):
         parts = parsed.path.split("/")
         if len(parts) != 6:
