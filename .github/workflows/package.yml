@@ -85,6 +85,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt pyinstaller
 
+      - name: Force self-installer on Windows
+        if: matrix.target == 'win32'
+        shell: bash
+        run: echo "LINROUTER_FORCE_SELF_INSTALLER=1" >> "$GITHUB_ENV"
+
       - name: Resolve version
         run: echo "Using version ${{ needs.resolve.outputs.version }}"
 
