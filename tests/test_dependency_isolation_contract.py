@@ -68,8 +68,17 @@ def test_github_workflows_use_role_requirements_without_uv() -> None:
         assert "uv sync" not in lowered
         assert "uv run" not in lowered
         assert "cache: pip" in workflow
-        assert "python -m pip install -r requirements/test.txt" in workflow
         assert "python -m pip install -r requirements/package.txt" in workflow
+    assert "python -m pip install -r requirements/test.txt" in ci
+
+
+def test_release_tagged_source_verification_is_commented_out() -> None:
+    package = (ROOT / ".github" / "workflows" / "package.yml").read_text(encoding="utf-8")
+    assert "\n  verify:\n" not in package
+    assert "\n  # verify:\n" in package
+    assert "#   name: Verify tagged source" in package
+    assert "github.event.repository.default_branch" not in package
+    assert "needs: resolve" in package
 
 
 def test_docker_smoke_python_block_stays_inside_the_yaml_run_block() -> None:

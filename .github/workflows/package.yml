@@ -56,72 +56,74 @@ jobs:
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "value=${tag#v}" >> "$GITHUB_OUTPUT"
 
-  verify:
-    name: Verify tagged source
-    needs: resolve
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout tagged source
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.resolve.outputs.tag }}
-          fetch-depth: 0
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-          cache: pip
-          cache-dependency-path: |
-            requirements/server.txt
-            requirements/test.txt
-
-      - name: Install test dependencies
-        shell: bash
-        run: |
-          set -euo pipefail
-          python -m pip install --upgrade pip
-          python -m pip install -r requirements/test.txt
-
-      - name: Verify declared release version
-        shell: bash
-        env:
-          RELEASE_VERSION: ${{ needs.resolve.outputs.version }}
-        run: |
-          set -euo pipefail
-          python - <<'PY'
-          import os
-          import re
-          from pathlib import Path
-
-          version = os.environ["RELEASE_VERSION"]
-          checks = {
-              "packaging/desktop/build.sh": r'^APP_VERSION="' + re.escape(version) + r'"$',
-              "web/shared/js/settings-panel.js": r'<span>v' + re.escape(version) + r'</span>',
-              "README.md": r'LinRouter-v' + re.escape(version) + r'-win-x64\.zip',
-          }
-          for filename, pattern in checks.items():
-              text = Path(filename).read_text(encoding="utf-8")
-              if not re.search(pattern, text, re.MULTILINE):
-                  raise SystemExit(f"发布 tag v{version} 与 {filename} 的版本声明不一致")
-          PY
-
-      - name: Check Python, JavaScript and build script syntax
-        shell: bash
-        run: |
-          set -euo pipefail
-          python -m compileall -q linrouter_server linrouter_core linrouter_desktop
-          find web/shared web/desktop -type f -name '*.js' -print0 | xargs -0 -n1 node --check
-          bash -n packaging/desktop/build.sh packaging/docker/entrypoint.sh
-
-      - name: Run test suite
-        shell: bash
-        run: python -m pytest -q -p no:cacheprovider
+  # 暂停重复验证 tagged source；普通 CI 负责源码与测试验证。
+  # 如需恢复，取消本 job 注释，并将 build.needs 改回 [resolve, verify]。
+  # verify:
+  #   name: Verify tagged source
+  #   needs: resolve
+  #   runs-on: ubuntu-latest
+  #
+  #   steps:
+  #     - name: Checkout tagged source
+  #       uses: actions/checkout@v4
+  #       with:
+  #         ref: ${{ needs.resolve.outputs.tag }}
+  #         fetch-depth: 0
+  #
+  #     - name: Setup Python
+  #       uses: actions/setup-python@v5
+  #       with:
+  #         python-version: "3.12"
+  #         cache: pip
+  #         cache-dependency-path: |
+  #           requirements/server.txt
+  #           requirements/test.txt
+  #
+  #     - name: Install test dependencies
+  #       shell: bash
+  #       run: |
+  #         set -euo pipefail
+  #         python -m pip install --upgrade pip
+  #         python -m pip install -r requirements/test.txt
+  #
+  #     - name: Verify declared release version
+  #       shell: bash
+  #       env:
+  #         RELEASE_VERSION: ${{ needs.resolve.outputs.version }}
+  #       run: |
+  #         set -euo pipefail
+  #         python - <<'PY'
+  #         import os
+  #         import re
+  #         from pathlib import Path
+  #
+  #         version = os.environ["RELEASE_VERSION"]
+  #         checks = {
+  #             "packaging/desktop/build.sh": r'^APP_VERSION="' + re.escape(version) + r'"$',
+  #             "web/shared/js/settings-panel.js": r'<span>v' + re.escape(version) + r'</span>',
+  #             "README.md": r'LinRouter-v' + re.escape(version) + r'-win-x64\.zip',
+  #         }
+  #         for filename, pattern in checks.items():
+  #             text = Path(filename).read_text(encoding="utf-8")
+  #             if not re.search(pattern, text, re.MULTILINE):
+  #                 raise SystemExit(f"发布 tag v{version} 与 {filename} 的版本声明不一致")
+  #         PY
+  #
+  #     - name: Check Python, JavaScript and build script syntax
+  #       shell: bash
+  #       run: |
+  #         set -euo pipefail
+  #         python -m compileall -q linrouter_server linrouter_core linrouter_desktop
+  #         find web/shared web/desktop -type f -name '*.js' -print0 | xargs -0 -n1 node --check
+  #         bash -n packaging/desktop/build.sh packaging/docker/entrypoint.sh
+  #
+  #     - name: Run test suite
+  #       shell: bash
+  #       run: python -m pytest -q -p no:cacheprovider
 
   build:
     name: Build package (${{ matrix.os }})
-    needs: [resolve, verify]
+    needs: resolve
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
