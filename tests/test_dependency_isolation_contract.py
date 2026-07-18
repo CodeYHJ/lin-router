@@ -75,7 +75,8 @@ def test_github_workflows_use_role_requirements_without_uv() -> None:
 def test_github_workflows_use_node24_action_versions() -> None:
     ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     package = (ROOT / ".github" / "workflows" / "package.yml").read_text(encoding="utf-8")
-    combined = f"{ci}\n{package}"
+    docker = (ROOT / ".github" / "workflows" / "docker-build.yml").read_text(encoding="utf-8")
+    combined = f"{ci}\n{package}\n{docker}"
     for deprecated in (
         "actions/checkout@v4",
         "actions/setup-python@v5",
@@ -89,6 +90,18 @@ def test_github_workflows_use_node24_action_versions() -> None:
     assert "actions/upload-artifact@v7" in combined
     assert "actions/download-artifact@v8" in package
     assert "softprops/action-gh-release@v3" in package
+
+
+def test_docker_build_workflow_only_builds_the_server_image() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "docker-build.yml").read_text(encoding="utf-8")
+    assert "workflow_dispatch:" in workflow
+    assert "packaging/docker/**" in workflow
+    assert "requirements/server.txt" in workflow
+    assert "docker build" in workflow
+    assert "--file packaging/docker/Dockerfile" in workflow
+    assert "docker image inspect" in workflow
+    assert "docker run" not in workflow
+    assert "packaging/desktop" not in workflow
 
 
 def test_release_tagged_source_verification_is_commented_out() -> None:

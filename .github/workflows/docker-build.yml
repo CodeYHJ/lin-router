@@ -1,0 +1,43 @@
+name: Dockerfile build
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/docker-build.yml"
+      - "packaging/docker/**"
+      - "requirements/server.txt"
+      - "linrouter_core/**"
+      - "linrouter_server/**"
+      - "web/shared/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docker-build-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build Docker image
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Show Docker version
+        run: docker version
+
+      - name: Build isolated Server image
+        run: |
+          set -euo pipefail
+          docker build \
+            --file packaging/docker/Dockerfile \
+            --tag lin-router:docker-build-test \
+            --progress plain \
+            .
+
+      - name: Inspect built image
+        run: docker image inspect lin-router:docker-build-test >/dev/null

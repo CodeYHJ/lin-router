@@ -1117,8 +1117,8 @@ assert "start_minimized" not in data["settings"]
 
 #### 本地验证结果
 
-- Server 环境全量测试：`264 passed`。
-- 隔离/备份/Desktop composition/依赖、workflow 及入口隔离专项测试：`23 passed`。
+- Server 环境全量测试：`265 passed`。
+- 隔离/备份/Desktop composition/依赖、workflow 及入口隔离专项测试：`24 passed`。
 - requirements 依赖边界检查、compileall、JavaScript `node --check`、Shell `bash -n`、`git diff --check` 通过。
 - `linrouter_server`、`linrouter_core` 源码未发现 Desktop、Desktop 设置、旧平台 package 或 pystray 标识。
 - Docker context ignore 排除 Desktop package、Desktop Web、Desktop packaging、平台资源和本地虚拟环境；Desktop spec 不收集 Docker 文件。
@@ -1221,7 +1221,7 @@ U1–U9 的本地实现和静态验证均已完成；其中 U5 仅缺 GitHub run
   - 恢复 `actions/setup-python` 的 pip cache 和 `python -m pip`。
   - verify job 安装 `requirements/test.txt`；Windows/macOS build 安装 `requirements/package.txt`。
   - 保留当前新目录、Desktop 目标矩阵、Docker job 和产物路径。
-- 本轮结果：`ci.yml`、`package.yml` 已删除 `setup-uv`、`UV_PROJECT_ENVIRONMENT`、`uv sync`、`uv run`，改用 `actions/setup-python` 的 pip cache、`python -m pip`、`requirements/test.txt` 和 `requirements/package.txt`；Docker smoke 多行 Python 改为 YAML block 内的 heredoc。Node 20 action 已升级为 Node 24 对应版本：`checkout@v6`、`setup-python@v6`、`upload-artifact@v7`、`download-artifact@v8`、`action-gh-release@v3`。Release workflow 的 `Verify tagged source` job 按当前要求保留完整注释，`build` 暂时只依赖 `resolve`；`resolve` 会先检查 tag 是否包含当前 requirements、packaging 和 package 布局，避免 Windows/macOS 在缓存阶段分别失败。两份 workflow 已通过本地 YAML 解析和契约测试，但尚未在 GitHub runner 执行。
+- 本轮结果：`ci.yml`、`package.yml` 已删除 `setup-uv`、`UV_PROJECT_ENVIRONMENT`、`uv sync`、`uv run`，改用 `actions/setup-python` 的 pip cache、`python -m pip`、`requirements/test.txt` 和 `requirements/package.txt`；Docker smoke 多行 Python 改为 YAML block 内的 heredoc。Node 20 action 已升级为 Node 24 对应版本：`checkout@v6`、`setup-python@v6`、`upload-artifact@v7`、`download-artifact@v8`、`action-gh-release@v3`。Release workflow 的 `Verify tagged source` job 按当前要求保留完整注释，`build` 暂时只依赖 `resolve`；`resolve` 会先检查 tag 是否包含当前 requirements、packaging 和 package 布局，避免 Windows/macOS 在缓存阶段分别失败。新增独立 `docker-build.yml`，仅执行 Dockerfile 真实 build 和镜像 inspect，不运行容器或 Desktop build；该 workflow 尚待 GitHub runner 执行。三份 workflow 已通过本地 YAML 解析和契约测试。
 
 #### U6：重写依赖和构建隔离契约测试（本轮完成）
 
@@ -1263,7 +1263,7 @@ U1–U9 的本地实现和静态验证均已完成；其中 U5 仅缺 GitHub run
   - JavaScript `node --check`、Shell `bash -n`、Server/Core AST/标识扫描、Docker/Desktop manifest 扫描。
   - 确认根级 `.venv`、`static`、`build/`、`dist/` 无非预期输出。
   - `git diff --check` 和除明确暂缓的 GitHub Actions 定义外，项目入口、Docker、Desktop、README、requirements 与本文档的 uv 强制引用扫描。
-- 本轮结果：全量测试 `264 passed`；隔离、依赖、workflow 与入口契约专项测试 `23 passed`；两份 workflow YAML 解析、compileall、JavaScript `node --check`、Shell `bash -n`、Server/Core 依赖和标识扫描、Docker/Desktop manifest 扫描、Server CLI smoke、`git diff --check` 均通过。当前 uv 环境未提供 `pip` 模块，使用当前环境的 `uv pip check` 验证 Server/Desktop 依赖均无冲突；这只是本地工具验证记录，不改变项目依赖管理器无关原则。
+- 本轮结果：全量测试 `265 passed`；隔离、依赖、workflow 与入口契约专项测试 `24 passed`；三份 workflow YAML 解析、compileall、JavaScript `node --check`、Shell `bash -n`、Server/Core 依赖和标识扫描、Docker/Desktop manifest 扫描、Server CLI smoke、`git diff --check` 均通过。当前 uv 环境未提供 `pip` 模块，使用当前环境的 `uv pip check` 验证 Server/Desktop 依赖均无冲突；这只是本地工具验证记录，不改变项目依赖管理器无关原则。
 - 完成条件：本地回归全部通过，剩余事项只有 GitHub runner、真实 Docker、Windows/macOS 和 H1–H4 明确暂缓项。
 
 #### U9：交付复核与 commit message 重写（已完成，未提交）
