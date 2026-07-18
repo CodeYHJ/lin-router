@@ -221,7 +221,7 @@ def build_installer(source_exe: Path, output_exe: Path, work_dir: Path) -> None:
             "--specpath",
             str(temp_dir),
         ]
-        icon_path = work_dir / "resources" / "win32" / "LinRouter.ico"
+        icon_path = work_dir / "packaging" / "desktop" / "resources" / "win32" / "LinRouter.ico"
         if icon_path.exists():
             args.extend(["--icon", str(icon_path)])
 

@@ -31,13 +31,16 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
+          cache-dependency-path: |
+            requirements/server.txt
+            requirements/test.txt
 
       - name: Install test dependencies
         shell: bash
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt pytest
+          python -m pip install -r requirements/test.txt
 
       - name: Check changed diff whitespace
         shell: bash
@@ -50,9 +53,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python -m compileall -q app.py linrouter_core
-          find static/js -type f -name '*.js' -print0 | xargs -0 -n1 node --check
-          bash -n scripts/build.sh
+          python -m compileall -q linrouter_server linrouter_core linrouter_desktop
+          find web/shared web/desktop -type f -name '*.js' -print0 | xargs -0 -n1 node --check
+          bash -n packaging/desktop/build.sh packaging/docker/entrypoint.sh
 
       - name: Run test suite
         shell: bash
@@ -73,21 +76,26 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
+          cache-dependency-path: |
+            requirements/server.txt
+            requirements/desktop.txt
+            requirements/package.txt
 
       - name: Install build dependencies
         shell: bash
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt pyinstaller
+          python -m pip install -r requirements/package.txt
 
       - name: Build unsigned Windows preview package
         shell: bash
         env:
           LINROUTER_FORCE_SELF_INSTALLER: "1"
+          LINROUTER_DESKTOP_PYTHON: python
         run: |
           set -euo pipefail
-          bash scripts/build.sh \
+          bash packaging/desktop/build.sh \
             --target win32 \
             --installer \
             --version "0.0.0-ci.${{ github.run_number }}"
@@ -99,6 +107,126 @@ jobs:
           if-no-files-found: error
           retention-days: 14
           path: |
-            dist/LinRouter_windows.exe
-            dist/LinRouter-v0.0.0-ci.${{ github.run_number }}-win-x64.zip
-            dist/LinRouter-Setup-v0.0.0-ci.${{ github.run_number }}-win-x64.exe
+            dist/desktop/win32/LinRouter_windows.exe
+            dist/desktop/win32/LinRouter-v0.0.0-ci.${{ github.run_number }}-win-x64.zip
+            dist/desktop/win32/LinRouter-Setup-v0.0.0-ci.${{ github.run_number }}-win-x64.exe
+
+  package_macos_preview:
+    name: Build macOS preview package
+    needs: verify
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements/server.txt
+            requirements/desktop.txt
+            requirements/package.txt
+
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements/package.txt
+
+      - name: Build unsigned macOS preview package
+        shell: bash
+        env:
+          LINROUTER_DESKTOP_PYTHON: python
+        run: |
+          set -euo pipefail
+          bash packaging/desktop/build.sh \
+            --target darwin
+
+      - name: Upload macOS preview artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linrouter-macos-ci-${{ github.run_id }}
+          if-no-files-found: error
+          retention-days: 14
+          path: dist/desktop/darwin/LinRouter.app
+
+  build_docker_smoke:
+    name: Build and smoke-test Docker server
+    needs: verify
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build isolated server image
+        run: docker build -f packaging/docker/Dockerfile -t lin-router:ci .
+
+      - name: Verify image contents and runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(docker run --rm lin-router:ci id -u)" = "10001"
+          docker run --rm lin-router:ci python -c "import linrouter_server, linrouter_core"
+          ! docker run --rm lin-router:ci python -c "import pystray"
+          ! docker run --rm lin-router:ci python -c "import PIL"
+          ! docker run --rm lin-router:ci test -e /app/linrouter_desktop
+          ! docker run --rm lin-router:ci test -e /app/packaging/desktop
+          volume_name="linrouter-data-ci-${GITHUB_RUN_ID}"
+          docker volume create "$volume_name" >/dev/null
+          container_id=""
+          container_id="$(docker run -d -p 18400:18400 -v "$volume_name:/data" lin-router:ci)"
+          trap 'if [ -n "${container_id:-}" ]; then docker rm -f "$container_id" >/dev/null 2>&1 || true; fi; docker volume rm "$volume_name" >/dev/null 2>&1 || true' EXIT
+          for _ in {1..20}; do
+            if docker exec "$container_id" python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:18400/health', timeout=1)"; then
+              break
+            fi
+            sleep 1
+          done
+          docker exec "$container_id" python -c "import urllib.request; assert urllib.request.urlopen('http://127.0.0.1:18400/health').status == 200"
+          docker exec "$container_id" python -c "import json,urllib.request; data=json.load(urllib.request.urlopen('http://127.0.0.1:18400/api/state')); assert 'auto_start' not in data['settings']; assert 'start_minimized' not in data['settings']"
+          docker exec "$container_id" python -c 'import json,urllib.request; req=urllib.request.Request("http://127.0.0.1:18400/api/settings", data=json.dumps({"theme":"dark"}).encode(), headers={"Content-Type":"application/json"}, method="POST"); data=json.load(urllib.request.urlopen(req)); assert data["theme"] == "dark"'
+          docker exec -i "$container_id" python - <<'PY'
+          import json
+          import urllib.error
+          import urllib.request
+
+          request = urllib.request.Request(
+              "http://127.0.0.1:18400/api/settings",
+              data=json.dumps({"auto_start": True}).encode(),
+              headers={"Content-Type": "application/json"},
+              method="POST",
+          )
+          try:
+              urllib.request.urlopen(request)
+          except urllib.error.HTTPError as error:
+              assert error.code == 400
+              assert json.load(error)["error"]["code"] == "unsupported_capability"
+          else:
+              raise AssertionError("Desktop setting must be rejected")
+          PY
+          docker rm -f "$container_id" >/dev/null
+          container_id="$(docker run -d -p 18400:18400 -v "$volume_name:/data" lin-router:ci)"
+          for _ in {1..20}; do
+            if docker exec "$container_id" python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:18400/health', timeout=1)"; then
+              break
+            fi
+            sleep 1
+          done
+          docker exec "$container_id" python -c 'import json,urllib.request; data=json.load(urllib.request.urlopen("http://127.0.0.1:18400/api/settings")); assert data["theme"] == "dark"'
+          docker rm -f "$container_id" >/dev/null
+          container_id="$(docker run -d -e LINROUTER_PORT=18401 -p 18401:18401 -v "$volume_name:/data" lin-router:ci)"
+          for _ in {1..40}; do
+            health_status="$(docker inspect --format '{{.State.Health.Status}}' "$container_id")"
+            if [ "$health_status" = "healthy" ]; then
+              break
+            fi
+            sleep 1
+          done
+          test "$(docker inspect --format '{{.State.Health.Status}}' "$container_id")" = "healthy"
+          docker exec "$container_id" python -c "import urllib.request; assert urllib.request.urlopen('http://127.0.0.1:18401/health').status == 200"

@@ -21,11 +21,11 @@ def run_node(script: str) -> str:
 
 
 def test_batch_api_and_manual_priority_source_contract():
-    api_js = (ROOT / "static/js/api.js").read_text(encoding="utf-8")
-    config_js = (ROOT / "static/js/config-tab.js").read_text(encoding="utf-8")
-    actions_js = (ROOT / "static/js/config-tab-actions.js").read_text(encoding="utf-8")
-    form_js = (ROOT / "static/js/config-tab-form.js").read_text(encoding="utf-8")
-    config_css = (ROOT / "static/css/config-tab.css").read_text(encoding="utf-8")
+    api_js = (ROOT / "web/shared/js/api.js").read_text(encoding="utf-8")
+    config_js = (ROOT / "web/shared/js/config-tab.js").read_text(encoding="utf-8")
+    actions_js = (ROOT / "web/shared/js/config-tab-actions.js").read_text(encoding="utf-8")
+    form_js = (ROOT / "web/shared/js/config-tab-form.js").read_text(encoding="utf-8")
+    config_css = (ROOT / "web/shared/css/config-tab.css").read_text(encoding="utf-8")
 
     assert "createAggregateMembersBatch(aggregateId, data)" in api_js
     assert "/members/batch`" in api_js
@@ -63,7 +63,7 @@ def test_store_counts_addable_existing_and_unavailable_models_by_group():
     script = r'''
 const fs = require('fs');
 const vm = require('vm');
-const source = fs.readFileSync('static/js/store.js', 'utf8') + '\nthis.store = Store;';
+const source = fs.readFileSync('web/shared/js/store.js', 'utf8') + '\nthis.store = Store;';
 const context = { API: {}, Toast: {}, Set };
 vm.runInNewContext(source, context);
 context.store.state = {
@@ -92,7 +92,7 @@ def test_combined_add_ui_uses_one_request_one_refresh_and_selected_model_ids():
     script = r'''
 const fs = require('fs');
 const vm = require('vm');
-const source = fs.readFileSync('static/js/config-tab-actions.js', 'utf8') + '\nthis.actions = ConfigTabActions;';
+const source = fs.readFileSync('web/shared/js/config-tab-actions.js', 'utf8') + '\nthis.actions = ConfigTabActions;';
 const notices = [];
 let mode = 'success';
 const requests = [];
@@ -186,8 +186,8 @@ const controller = { async reloadAfterAggregateMemberChange() { reloads += 1; } 
 
 
 def test_member_sort_ui_uses_full_order_revision_contract_and_surfaces_conflicts():
-    api_js = (ROOT / "static/js/api.js").read_text(encoding="utf-8")
-    actions_js = (ROOT / "static/js/config-tab-actions.js").read_text(encoding="utf-8")
+    api_js = (ROOT / "web/shared/js/api.js").read_text(encoding="utf-8")
+    actions_js = (ROOT / "web/shared/js/config-tab-actions.js").read_text(encoding="utf-8")
 
     assert "getAggregateMembers(aggregateId)" in api_js
     assert "encodeURIComponent(aggregateId)}/members/reorder" in api_js
@@ -203,7 +203,7 @@ def test_member_table_renders_price_groups_without_editing_legacy_manual_price()
     script = r'''
 const fs = require('fs');
 const vm = require('vm');
-const source = fs.readFileSync('static/js/config-tab.js', 'utf8') + '\nthis.config = ConfigTab;';
+const source = fs.readFileSync('web/shared/js/config-tab.js', 'utf8') + '\nthis.config = ConfigTab;';
 const now = Date.now();
 const members = [
   { id: 'am-normal', aggregate_id: 'a1', group_id: 'g1', model_id: 'm-cheap', priority: 1, enabled: true, manual_price: 9 },

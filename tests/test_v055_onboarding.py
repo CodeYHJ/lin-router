@@ -17,7 +17,7 @@ const fs = require('fs');
 const vm = require('vm');
 const state = JSON.parse(process.argv[1]);
 const context = { Store: { state }, URL, Date };
-vm.runInNewContext(fs.readFileSync('static/js/utils.js', 'utf8') + '\\nthis.ConnectionStatus = ConnectionStatus;', context);
+vm.runInNewContext(fs.readFileSync('web/shared/js/utils.js', 'utf8') + '\\nthis.ConnectionStatus = ConnectionStatus;', context);
 console.log(JSON.stringify(context.ConnectionStatus.derive(state)));
 """
     completed = subprocess.run(
@@ -37,7 +37,7 @@ const fs = require('fs');
 const vm = require('vm');
 const group = JSON.parse(process.argv[1]);
 const context = { Store: { state: {} }, URL, Date };
-vm.runInNewContext(fs.readFileSync('static/js/utils.js', 'utf8') + '\\nthis.ConnectionStatus = ConnectionStatus;', context);
+vm.runInNewContext(fs.readFileSync('web/shared/js/utils.js', 'utf8') + '\\nthis.ConnectionStatus = ConnectionStatus;', context);
 console.log(JSON.stringify(context.ConnectionStatus.draftGroup(group)));
 """
     completed = subprocess.run(
@@ -154,15 +154,15 @@ def test_new_config_starts_empty_for_onboarding():
 
 
 def test_v055_frontend_onboarding_contracts():
-    app_js = (ROOT / "static/js/app.js").read_text(encoding="utf-8")
-    utils_js = (ROOT / "static/js/utils.js").read_text(encoding="utf-8")
-    dashboard_js = (ROOT / "static/js/dashboard-tab.js").read_text(encoding="utf-8")
-    config_js = (ROOT / "static/js/config-tab.js").read_text(encoding="utf-8")
-    tree_js = (ROOT / "static/js/tree.js").read_text(encoding="utf-8")
-    layout_css = (ROOT / "static/css/layout.css").read_text(encoding="utf-8")
-    tree_css = (ROOT / "static/css/tree.css").read_text(encoding="utf-8")
-    test_js = (ROOT / "static/js/test-tab.js").read_text(encoding="utf-8")
-    settings_js = (ROOT / "static/js/settings-panel.js").read_text(encoding="utf-8")
+    app_js = (ROOT / "web/shared/js/app.js").read_text(encoding="utf-8")
+    utils_js = (ROOT / "web/shared/js/utils.js").read_text(encoding="utf-8")
+    dashboard_js = (ROOT / "web/shared/js/dashboard-tab.js").read_text(encoding="utf-8")
+    config_js = (ROOT / "web/shared/js/config-tab.js").read_text(encoding="utf-8")
+    tree_js = (ROOT / "web/shared/js/tree.js").read_text(encoding="utf-8")
+    layout_css = (ROOT / "web/shared/css/layout.css").read_text(encoding="utf-8")
+    tree_css = (ROOT / "web/shared/css/tree.css").read_text(encoding="utf-8")
+    test_js = (ROOT / "web/shared/js/test-tab.js").read_text(encoding="utf-8")
+    settings_js = (ROOT / "web/shared/js/settings-panel.js").read_text(encoding="utf-8")
 
     assert "const ConnectionStatus" in utils_js
     assert "ConfigTab.startNewGroup()" in app_js

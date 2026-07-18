@@ -42,12 +42,14 @@ else:
 
 
 def _ensure_icon(target: str, ext: str) -> str | None:
-    """如果平台图标不存在，尝试调用 scripts/generate_icon.py 生成。"""
-    icon_path = Path(f"resources/{target}/LinRouter.{ext}")
+    """缺少源码图标时生成到当前 Desktop build 目录，不回写源码。"""
+    icon_path = DESKTOP_ROOT / "resources" / target / f"LinRouter.{ext}"
     if not icon_path.exists():
+        icon_path = PROJECT_ROOT / "build" / "desktop" / target / "resources" / f"LinRouter.{ext}"
+        icon_path.parent.mkdir(parents=True, exist_ok=True)
         try:
             subprocess.run(
-                [sys.executable, "scripts/generate_icon.py", target, str(icon_path)],
+                [sys.executable, str(DESKTOP_ROOT / "tools" / "generate_icon.py"), target, str(icon_path)],
                 check=True,
             )
         except Exception:
@@ -56,24 +58,33 @@ def _ensure_icon(target: str, ext: str) -> str | None:
     return str(icon_path)
 
 
-datas = [('static', 'static')]
+# PyInstaller executes spec files in a dedicated namespace and exposes
+# ``SPECPATH``; ``__file__`` is intentionally not guaranteed to exist there.
+DESKTOP_ROOT = Path(SPECPATH).resolve()
+PROJECT_ROOT = DESKTOP_ROOT.parents[1]
+datas = [
+    (str(PROJECT_ROOT / "web" / "shared"), "static"),
+    (str(PROJECT_ROOT / "web" / "desktop"), "desktop"),
+]
+if is_win32:
+    datas.append((str(DESKTOP_ROOT / "resources" / "win32"), "resources/win32"))
+elif is_darwin:
+    datas.append((str(DESKTOP_ROOT / "resources" / "darwin"), "resources/darwin"))
 icon = None
 info_plist = None
 argv_emulation = False
 
 if is_win32:
-    datas.append(('resources/win32', 'resources/win32'))
     icon = _ensure_icon('win32', 'ico')
 elif is_darwin:
-    datas.append(('resources/darwin', 'resources/darwin'))
     icon = _ensure_icon('darwin', 'icns')
     info_plist = {'LSUIElement': True}
     argv_emulation = True
 
 hiddenimports = [
-    "settings_store",
-    "upstream_client",
-    "debug_capture",
+    "linrouter_server.settings_store",
+    "linrouter_server.upstream_client",
+    "linrouter_server.debug_capture",
     "certifi",
     "httpx",
     "h2",
@@ -84,8 +95,11 @@ hiddenimports = [
 ] + pystray_submodules
 
 a = Analysis(
-    ['desktop.py'],
-    pathex=[],
+    # Keep the executable entry stable for source and frozen launches. The
+    # root facade imports the real Desktop composition module without putting
+    # linrouter_desktop/platform on sys.path as a top-level package.
+    [str(PROJECT_ROOT / "desktop.py")],
+    pathex=[str(PROJECT_ROOT)],
     binaries=[],
     datas=datas,
     hiddenimports=hiddenimports,

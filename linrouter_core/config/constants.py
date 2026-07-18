@@ -17,6 +17,21 @@ PROVIDER_ARK = "ark"
 PROVIDER_RELAY = "relay"
 PROVIDER_PROXY = "proxy"
 
+# Settings owned by the headless Server runtime. Optional compositions may
+# extend this schema without making the core know their platform-specific keys.
+PUBLIC_SETTINGS_KEYS = (
+    "theme",
+    "auto_refresh_logs",
+    "debug_mode",
+    "upstream_http_client",
+    "upstream_http2",
+    "upstream_keepalive",
+    "debug_capture_enabled",
+    "debug_capture_last_body",
+    "normalize_tools_order",
+    "smart_breaker_enabled",
+)
+
 
 def new_route_key() -> str:
     return f"lr-{uuid.uuid4().hex[:16]}"

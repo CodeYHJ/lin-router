@@ -44,19 +44,35 @@ def create_application_server(
     settings_store_type: Any,
     router_type: Any,
     handler_type: Any,
+    platform: Any | None = None,
+    optional_capabilities: Any | None = None,
+    optional_resource_root: Path | None = None,
+    optional_resource_prefix: str | None = None,
+    optional_runtime_script: str = "",
+    settings_store_instance: Any | None = None,
 ) -> Tuple[ThreadingHTTPServer, int, Path]:
     config_path = Path(config)
     ensure_initial_config(config_path)
     store = store_type(config_path)
     store.refresh_expired_cooldowns()
-    settings_store = settings_store_type(config_path)
-    router = router_type(store, settings_store, log_file=config_path.parent / "lin-router-logs.jsonl")
+    settings_store = settings_store_instance if settings_store_instance is not None else settings_store_type(config_path)
+    router = router_type(
+        store,
+        settings_store,
+        log_file=config_path.parent / "lin-router-logs.jsonl",
+        platform=platform,
+    )
     selected_port = pick_port(port, host, max_port_scan)
 
     server = ThreadingHTTPServer((host, selected_port), handler_type)
     server.store = store  # type: ignore[attr-defined]
     server.router = router  # type: ignore[attr-defined]
     server.settings_store = settings_store  # type: ignore[attr-defined]
+    server.platform = platform  # type: ignore[attr-defined]
+    server.optional_capabilities = optional_capabilities  # type: ignore[attr-defined]
+    server.optional_resource_root = optional_resource_root  # type: ignore[attr-defined]
+    server.optional_resource_prefix = optional_resource_prefix  # type: ignore[attr-defined]
+    server.optional_runtime_script = optional_runtime_script  # type: ignore[attr-defined]
     return server, selected_port, config_path.resolve()
 
 

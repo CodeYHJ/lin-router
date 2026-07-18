@@ -168,14 +168,14 @@ def test_v054_live_diagnose_and_recover_contracts():
 
 def test_v054_frontend_contracts():
     root = Path(__file__).resolve().parent.parent
-    api_js = (root / "static/js/api.js").read_text(encoding="utf-8")
-    app_js = (root / "static/js/app.js").read_text(encoding="utf-8")
-    tree_js = (root / "static/js/tree.js").read_text(encoding="utf-8")
-    dashboard_js = (root / "static/js/dashboard-tab.js").read_text(encoding="utf-8")
-    logs_js = (root / "static/js/logs-tab.js").read_text(encoding="utf-8")
-    config_js = (root / "static/js/config-tab.js").read_text(encoding="utf-8")
-    config_actions_js = (root / "static/js/config-tab-actions.js").read_text(encoding="utf-8")
-    config_runtime_js = (root / "static/js/config-tab-runtime.js").read_text(encoding="utf-8")
+    api_js = (root / "web/shared/js/api.js").read_text(encoding="utf-8")
+    app_js = (root / "web/shared/js/app.js").read_text(encoding="utf-8")
+    tree_js = (root / "web/shared/js/tree.js").read_text(encoding="utf-8")
+    dashboard_js = (root / "web/shared/js/dashboard-tab.js").read_text(encoding="utf-8")
+    logs_js = (root / "web/shared/js/logs-tab.js").read_text(encoding="utf-8")
+    config_js = (root / "web/shared/js/config-tab.js").read_text(encoding="utf-8")
+    config_actions_js = (root / "web/shared/js/config-tab-actions.js").read_text(encoding="utf-8")
+    config_runtime_js = (root / "web/shared/js/config-tab-runtime.js").read_text(encoding="utf-8")
     config_sources = config_js + config_actions_js + config_runtime_js
 
     assert "getLiveRequests" in api_js

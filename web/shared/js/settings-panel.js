@@ -41,19 +41,6 @@ const SettingsPanel = {
         </div>
         <div class="settings-body">
           <section class="settings-section">
-            <h3>启动</h3>
-            <label class="settings-row">
-              <span>开机自启</span>
-              <input id="setting-auto-start" type="checkbox" ${s.auto_start ? 'checked' : ''}>
-            </label>
-            <label class="settings-row">
-              <span>启动后最小化到托盘/状态栏</span>
-              <input id="setting-start-minimized" type="checkbox" ${s.start_minimized ? 'checked' : ''}>
-            </label>
-            <div class="settings-hint">开机自启会写入系统启动项（Windows：注册表；macOS：LaunchAgent）；被系统安全软件拦截属于正常情况。</div>
-          </section>
-
-          <section class="settings-section">
             <h3>外观</h3>
             <div class="settings-row">
               <span>主题</span>
@@ -163,8 +150,6 @@ const SettingsPanel = {
     panel.querySelector('.settings-backdrop')?.addEventListener('click', () => this.close());
     panel.querySelector('#settings-close')?.addEventListener('click', () => this.close());
 
-    panel.querySelector('#setting-auto-start')?.addEventListener('change', e => this.updateCheckboxSetting(e, 'auto_start'));
-    panel.querySelector('#setting-start-minimized')?.addEventListener('change', e => this.updateCheckboxSetting(e, 'start_minimized'));
     panel.querySelector('#setting-auto-refresh-logs')?.addEventListener('change', e => this.updateCheckboxSetting(e, 'auto_refresh_logs'));
     panel.querySelector('#setting-debug-mode')?.addEventListener('change', e => this.updateCheckboxSetting(e, 'debug_mode'));
 
@@ -301,8 +286,6 @@ const SettingsPanel = {
     if (!panel || panel.classList.contains('hidden')) return;
     const s = Store.state.settings || {};
     const controls = {
-      'setting-auto-start': !!s.auto_start,
-      'setting-start-minimized': !!s.start_minimized,
       'setting-auto-refresh-logs': s.auto_refresh_logs !== false,
       'setting-debug-mode': !!s.debug_mode,
       'setting-upstream-http2': !!s.upstream_http2,

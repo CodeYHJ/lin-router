@@ -196,12 +196,12 @@ def test_aggregate_stats_runtime_state_and_delete_preview():
 
 def test_frontend_settings_and_log_detail_contracts():
     root = Path(__file__).resolve().parent.parent
-    store_js = (root / "static/js/store.js").read_text(encoding="utf-8")
-    logs_js = (root / "static/js/logs-tab.js").read_text(encoding="utf-8")
-    utils_js = (root / "static/js/utils.js").read_text(encoding="utf-8")
+    store_js = (root / "web/shared/js/store.js").read_text(encoding="utf-8")
+    logs_js = (root / "web/shared/js/logs-tab.js").read_text(encoding="utf-8")
+    utils_js = (root / "web/shared/js/utils.js").read_text(encoding="utf-8")
 
     assert "API.getState()" in store_js
-    settings_js = (root / "static/js/settings-panel.js").read_text(encoding="utf-8")
+    settings_js = (root / "web/shared/js/settings-panel.js").read_text(encoding="utf-8")
 
     assert "API.getSettings()" in store_js
     assert "settings: settings || data.settings || {}" in store_js

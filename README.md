@@ -8,14 +8,17 @@ Lin Router 是本地 OpenAI 兼容中转站：它接收 Codex、Hermes 和通用
 
 ### 桌面端
 
+在 Windows 或 macOS 上先用任意环境管理工具创建并激活独立的 Desktop 环境，再只安装 Desktop 运行依赖。项目不要求固定的环境目录：
+
 ```bash
-# 方式 1：直接运行源码
+python -m pip install -r requirements/desktop.txt
+python -m pip install -r requirements/test.txt  # 可选：运行测试
 python desktop.py
+```
 
-# 方式 2：以模块方式启动（与 desktop.py 等价）
-python -m linrouter
+启动后仅驻留托盘/状态栏，不自动打开浏览器：
 
-# 启动后仅驻留托盘/状态栏，不自动打开浏览器
+```bash
 python desktop.py --tray
 python -m linrouter --tray
 ```
@@ -23,8 +26,8 @@ python -m linrouter --tray
 ### Windows 产物
 
 ```text
-dist\LinRouter_windows.exe
-dist\LinRouter-Setup-v0.6.0-win-x64.exe
+dist\desktop\win32\LinRouter_windows.exe
+dist\desktop\win32\LinRouter-Setup-v0.6.0-win-x64.exe
 ```
 
 推荐分发安装包 `LinRouter-Setup-v0.6.0-win-x64.exe`；单文件免安装使用时可直接运行 `LinRouter_windows.exe`。
@@ -32,7 +35,7 @@ dist\LinRouter-Setup-v0.6.0-win-x64.exe
 ### macOS 产物
 
 ```text
-dist/LinRouter.app
+dist/desktop/darwin/LinRouter.app
 ```
 
 将 `LinRouter.app` 拖入 `/Applications`，首次启动请使用 **右键 → 打开**（未签名 App 会被 Gatekeeper 拦截）。
@@ -40,8 +43,11 @@ dist/LinRouter.app
 ### 命令行模式
 
 ```bash
-python app.py
+python -m pip install -r requirements/server.txt
+python -m linrouter_server
 ```
+
+以上命令使用当前已激活环境中的 `python`，不要求任何环境管理工具采用特定目录。
 
 默认地址：
 
@@ -151,40 +157,44 @@ Model: 当前选择的已验证模型
 前端和正式服务共用同一份配置文件，便于调试：
 
 ```bash
-python app.py --port 18409 --config lin-router-config.json
+python -m linrouter_server --port 18409 --config lin-router-config.json
 ```
 
-也可以直接双击 `start-preview-18409.bat`（Windows）。
+也可以直接双击 `start-preview-18409.bat`（Windows）。脚本默认使用 PATH 中的 `python`；如需指定解释器，设置 `LINROUTER_SERVER_PYTHON`，脚本不会探测固定虚拟环境目录。
 
 ## 跨平台构建
 
-使用统一构建脚本产出 Windows `.exe` 或 macOS `.app`/`.dmg`：
+使用 Desktop 专用构建脚本产出 Windows `.exe` 或 macOS `.app`/`.dmg`。构建依赖安装在独立的 Desktop 环境中；脚本通过 `LINROUTER_DESKTOP_PYTHON` 选择构建解释器，未设置时使用当前 `python`。
+
+提交验证和跨平台产物的首选入口是 GitHub Actions：`CI` workflow 在 PR/手动触发时构建 Docker Server、Windows preview 和 macOS preview；带版本 tag 或手动指定 tag 时由 `Release package` workflow 构建正式 Windows/macOS 产物。Linux Desktop 暂不作为支持目标。下面的本地命令用于开发调试，产物仍写入 Desktop 专属目录。
 
 ```bash
-# Windows
-scripts/build.sh --target win32
-# -> dist/LinRouter_windows.exe
+# macOS
+python -m pip install -r requirements/package.txt
+LINROUTER_DESKTOP_PYTHON=python bash packaging/desktop/build.sh --target darwin
+# -> dist/desktop/darwin/LinRouter.app
+
+# Windows Git Bash（PowerShell 请改用 $env:LINROUTER_DESKTOP_PYTHON）
+python -m pip install -r requirements/package.txt
+LINROUTER_DESKTOP_PYTHON=python bash packaging/desktop/build.sh --target win32
+# -> dist/desktop/win32/LinRouter_windows.exe
 
 # Windows + 安装包（默认使用内置自举安装器；装了 Inno Setup 6 会优先使用 ISCC）
-scripts/build.sh --target win32 --installer
-# -> dist/LinRouter_windows.exe + dist/LinRouter-v0.6.3-win-x64.zip + dist/LinRouter-Setup-v0.6.3-win-x64.exe
+LINROUTER_DESKTOP_PYTHON=python bash packaging/desktop/build.sh --target win32 --installer
+# -> dist/desktop/win32/LinRouter_windows.exe + dist/desktop/win32/LinRouter-v0.6.3-win-x64.zip + dist/desktop/win32/LinRouter-Setup-v0.6.3-win-x64.exe
 
 # 指定安装包版本号
-scripts/build.sh --target win32 --installer --version 0.6.3
-# -> dist/LinRouter-Setup-v0.6.3-win-x64.exe
-
-# macOS
-scripts/build.sh --target darwin
-# -> dist/LinRouter.app
+LINROUTER_DESKTOP_PYTHON=python bash packaging/desktop/build.sh --target win32 --installer --version 0.6.3
+# -> dist/desktop/win32/LinRouter-Setup-v0.6.3-win-x64.exe
 
 # macOS + DMG
-scripts/build.sh --target darwin --dmg
-# -> dist/LinRouter.app + dist/LinRouter.dmg
+LINROUTER_DESKTOP_PYTHON=python bash packaging/desktop/build.sh --target darwin --dmg
+# -> dist/desktop/darwin/LinRouter.app + dist/desktop/darwin/LinRouter.dmg
 ```
 
 构建前脚本会自动生成对应平台的应用图标（`.ico` / `.icns`）。若直接调用 PyInstaller，spec 文件也会尝试自动生成图标；macOS 上需要 `iconutil` 工具。
 
-Windows 安装包默认通过 `scripts/installer/build_self_installer.py` 生成，未安装 Inno Setup 也可出包；如本机存在 Inno Setup 6 / `ISCC`，则优先使用 `scripts/installer/LinRouter.iss`。安装包默认安装到当前用户的 `%LOCALAPPDATA%\Programs\LinRouter`，不需要管理员权限，默认创建桌面快捷方式；配置和日志写入 `%APPDATA%\LinRouter`。支持静默安装参数 `--silent --desktop --no-desktop --autostart --no-run`。
+Windows 安装包默认通过 `packaging/desktop/installer/build_self_installer.py` 生成，未安装 Inno Setup 也可出包；如本机存在 Inno Setup 6 / `ISCC`，则优先使用 `packaging/desktop/installer/LinRouter.iss`。安装包默认安装到当前用户的 `%LOCALAPPDATA%\Programs\LinRouter`，不需要管理员权限，默认创建桌面快捷方式；配置和日志写入 `%APPDATA%\LinRouter`。支持静默安装参数 `--silent --desktop --no-desktop --autostart --no-run`。
 
 v0.6.0 发布前检查清单见 `scripts/release-checklist-v0.6.0.md`；构建脚本会自动对 zip / setup 产物执行脱敏扫描。
 
@@ -204,23 +214,39 @@ $env:LINROUTER_SIGNTOOL = 'C:\\Program Files (x86)\\Windows Kits\\10\\bin\\<sdk-
 $env:LINROUTER_SIGN_CERT_PATH = 'D:\\secure\\linrouter-release.pfx'
 $env:LINROUTER_SIGN_TIMESTAMP_URL = 'https://<approved-timestamp-service>/timestamp'
 # LINROUTER_SIGN_CERT_PASSWORD 由 CI secret / Credential Manager 注入，不要粘贴到 shell 历史
-bash scripts/build.sh --target win32 --installer --sign --version 0.6.0
+$env:LINROUTER_DESKTOP_PYTHON = 'python'
+bash packaging/desktop/build.sh --target win32 --installer --sign --version 0.6.0
 ```
 
-签名顺序是固定的：PyInstaller 生成 `dist\\LinRouter_windows.exe` 后先签 payload；再用已签名 payload 生成 ZIP 和安装包；最后再签 `LinRouter-Setup-...exe` 安装包本身。自举安装器因此嵌入已签名 payload；Inno Setup 也从同一个已签名 payload 生成外层安装包。ZIP 本身不是 PE 文件，不执行 Authenticode 签名。
+签名顺序是固定的：PyInstaller 生成 `dist\\desktop\\win32\\LinRouter_windows.exe` 后先签 payload；再用已签名 payload 生成 ZIP 和安装包；最后再签 `LinRouter-Setup-...exe` 安装包本身。自举安装器因此嵌入已签名 payload；Inno Setup 也从同一个已签名 payload 生成外层安装包。ZIP 本身不是 PE 文件，不执行 Authenticode 签名。
 
 签名后在 Windows PowerShell 验证签名者、状态和时间戳：
 
 ```powershell
-Get-AuthenticodeSignature .\\dist\\LinRouter_windows.exe | Format-List Status,SignerCertificate,TimeStamperCertificate,Path
-Get-AuthenticodeSignature .\\dist\\LinRouter-Setup-v0.6.0-win-x64.exe | Format-List Status,SignerCertificate,TimeStamperCertificate,Path
+Get-AuthenticodeSignature .\\dist\\desktop\\win32\\LinRouter_windows.exe | Format-List Status,SignerCertificate,TimeStamperCertificate,Path
+Get-AuthenticodeSignature .\\dist\\desktop\\win32\\LinRouter-Setup-v0.6.0-win-x64.exe | Format-List Status,SignerCertificate,TimeStamperCertificate,Path
 ```
 
 必须看到 `Status : Valid`，并检查证书主体、用途和时间戳符合发布要求；`SignerCertificate : null` 或 `SignatureType : 0` 表示未签名。当前开发环境没有可用代码签名证书和已定位的 `signtool.exe`，因此本地只能完成静态校验，不能声称 Smart App Control 已解决。自签名证书仅适合开发机或受控内网测试；它不等于面向公众的正规发布签名，不能据此承诺绕过 Windows Smart App Control。
 
 ```bash
-python -m PyInstaller --noconfirm LinRouter.spec
+python -m PyInstaller --noconfirm \
+  --workpath build/desktop/direct \
+  --distpath dist/desktop/direct \
+  packaging/desktop/LinRouter.spec
 ```
+
+### Docker 服务端
+
+Docker 只构建 `linrouter_server`、`linrouter_core` 和公共 Web 资源，不安装 Desktop extra：
+
+```bash
+docker build -f packaging/docker/Dockerfile -t lin-router:local .
+docker volume create lin-router-data >/dev/null
+docker run --rm -p 18400:18400 -v lin-router-data:/data lin-router:local
+```
+
+配置和日志写入 `/data`；示例使用 named volume，容器内的 UID 10001 可以直接写入，且容器重建后数据仍保留。Desktop 的托盘、平台适配、资源和构建工具不会进入最终镜像。
 
 ## 新手安装说明（Windows）
 

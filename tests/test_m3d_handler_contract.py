@@ -113,7 +113,7 @@ def test_m3d_frozen_methods_and_non_target_post_branches_match_m3c_baseline() ->
     baseline = subprocess.check_output(
         ["git", "show", "2ca4d05:app.py"], cwd=ROOT, text=True, encoding="utf-8"
     )
-    current = (ROOT / "app.py").read_text(encoding="utf-8")
+    current = Path(inspect.getfile(RouterHandler)).read_text(encoding="utf-8")
     assert _methods(baseline, FROZEN_METHODS) == _methods(current, FROZEN_METHODS)
 
 

@@ -11,12 +11,13 @@ import json
 import re
 import uuid
 from dataclasses import asdict
+from pathlib import Path
 from typing import Any, Dict, List
 from urllib.parse import parse_qs, urlparse
 
-from linrouter_platform import get_platform
 from linrouter_core.config.constants import (
     DEFAULT_AUTO_MODEL_NAME,
+    PUBLIC_SETTINGS_KEYS,
     PROVIDER_ARK,
     PROVIDER_PROXY,
     PROVIDER_RELAY,
@@ -34,6 +35,72 @@ from linrouter_core.runtime.handler_runtime import handle_proxy_request
 
 _GROUP_VERIFICATION_FIELDS = ("provider_type", "base_url", "ark_api_key", "api_key")
 _MODEL_VERIFICATION_FIELDS = ("group_id", "ep_id", "upstream_model", "api_key")
+
+
+def _optional_capabilities(handler: Any) -> Any:
+    return getattr(getattr(handler, "server", None), "optional_capabilities", None)
+
+
+def _settings_view(handler: Any, settings: Any | None = None) -> Dict[str, Any]:
+    settings_store = handler.server.settings_store
+    values = dict(settings if settings is not None else settings_store.to_dict())
+    allowed_keys = getattr(settings_store, "allowed_keys", frozenset(PUBLIC_SETTINGS_KEYS))
+    values = {key: value for key, value in values.items() if key in allowed_keys}
+    capabilities = _optional_capabilities(handler)
+    if capabilities is not None:
+        values.update(capabilities.read_settings())
+    return values
+
+
+def _reject_unsupported_settings(handler: Any, values: Dict[str, Any]) -> bool:
+    settings_store = handler.server.settings_store
+    allowed_keys = getattr(settings_store, "allowed_keys", frozenset(PUBLIC_SETTINGS_KEYS))
+    unsupported = sorted(set(values) - set(allowed_keys))
+    if not unsupported:
+        return False
+    handler._send_json({
+        "error": {
+            "message": f"当前运行方式不支持这些设置：{', '.join(unsupported)}",
+            "type": "invalid_request_error",
+            "code": "unsupported_capability",
+        }
+    }, status=400)
+    return True
+
+
+def _apply_optional_settings(handler: Any, values: Dict[str, Any]) -> None:
+    capabilities = _optional_capabilities(handler)
+    if capabilities is None:
+        return
+    optional_keys = set(capabilities.setting_keys())
+    patch = {key: values[key] for key in optional_keys if key in values}
+    if not patch:
+        return
+    capabilities.apply_settings(patch)
+
+
+def _commit_settings(handler: Any, values: Dict[str, Any]) -> Dict[str, Any] | None:
+    """Apply optional settings and persist them as one recoverable operation."""
+    capabilities = _optional_capabilities(handler)
+    snapshot = capabilities.snapshot() if capabilities is not None else None
+    settings_store = handler.server.settings_store  # type: ignore[attr-defined]
+    try:
+        _apply_optional_settings(handler, values)
+        return settings_store.update(values)
+    except Exception as exc:
+        if snapshot is not None:
+            try:
+                capabilities.restore(snapshot)
+            except Exception:
+                pass
+        handler._send_json({
+            "error": {
+                "message": f"设置更新失败：{exc}",
+                "type": "invalid_request_error",
+                "code": "settings_update_failed",
+            }
+        }, status=400)
+        return None
 
 
 def _connectivity_fields_changed(before: Any, after: Any, fields: tuple[str, ...]) -> bool:
@@ -60,7 +127,24 @@ def handle_get(handler: Any) -> None:
         if ".." in rel:
             handler._send_json({"error": {"message": "禁止访问", "type": "invalid_request_error", "code": "forbidden"}}, status=403)
             return
-        file_path = handler._platform().get_resource_path("static", *rel.split("/"))
+        optional_prefix = str(getattr(handler.server, "optional_resource_prefix", "") or "").strip("/")
+        if optional_prefix and (rel == optional_prefix or rel.startswith(optional_prefix + "/")):
+            optional_root = getattr(handler.server, "optional_resource_root", None)
+            if optional_root is None or not optional_prefix:
+                handler._send_json({"error": {"message": "禁止访问", "type": "invalid_request_error", "code": "forbidden"}}, status=403)
+                return
+            file_path = Path(optional_root).joinpath(*rel.split("/")[1:]).resolve()
+            try:
+                file_path.relative_to(Path(optional_root).resolve())
+            except ValueError:
+                handler._send_json({"error": {"message": "禁止访问", "type": "invalid_request_error", "code": "forbidden"}}, status=403)
+                return
+        else:
+            file_path = handler._runtime_paths().get_resource_path("static", *rel.split("/"))
+            if not file_path.exists():
+                source_file_path = handler._runtime_paths().get_resource_path("web", "shared", *rel.split("/"))
+                if source_file_path.exists():
+                    file_path = source_file_path
         handler._send_file(file_path)
         return
     if parsed.path in {"/v1/models", "/models"}:
@@ -101,11 +185,7 @@ def handle_get(handler: Any) -> None:
         handler._send_json({
             "config_file": str(handler.store.path),
             "auto_model_name": DEFAULT_AUTO_MODEL_NAME,
-            "settings": {
-                **settings,
-                # 开机自启以注册表真实状态为准
-                "auto_start": handler._platform().is_autostart_enabled(),
-            },
+            "settings": _settings_view(handler, settings),
             "group_meta": {
                 group.id: {
                     "auto_model_name": handler.router.group_auto_model_name(group),
@@ -200,7 +280,7 @@ def handle_get(handler: Any) -> None:
         return
     if parsed.path == "/api/settings":
         # 返回当前用户设置（开机自启、启动最小化等）
-        handler._send_json(handler.server.settings_store.to_dict())
+        handler._send_json(_settings_view(handler))
         return
     if parsed.path == "/api/debug/capture":
         capture = handler.router.debug_capture.load_capture()
@@ -376,20 +456,26 @@ def handle_post(handler: Any) -> None:
             except Exception as e:
                 handler._send_json({"error": {"message": f"备份文件无效：{e}", "type": "invalid_request_error", "code": "invalid_backup_file"}}, status=400)
                 return
+        backup_settings = payload.get("settings", {}) if isinstance(payload, dict) else {}
+        if isinstance(backup_settings, dict) and _reject_unsupported_settings(handler, backup_settings):
+            return
         try:
-            response, new_settings = import_backup_payload(handler.store, payload)
+            response, new_settings = import_backup_payload(
+                handler.store,
+                payload,
+                settings_keys=handler.server.settings_store.allowed_keys,
+            )
         except ConfigApiError as error:
             handler._send_json(error.response(), status=400)
             return
-        settings_store = handler.server.settings_store  # type: ignore[attr-defined]
-        if "auto_start" in new_settings:
-            handler._platform().set_autostart(bool(new_settings["auto_start"]))
-        updated = settings_store.update(new_settings)
+        updated = _commit_settings(handler, new_settings)
+        if updated is None:
+            return
         if any(key in new_settings for key in ("upstream_http_client", "upstream_http2", "upstream_keepalive")):
             handler.router._refresh_upstream_client()
         handler._send_json({
             **response,
-            "settings": {**updated, "auto_start": handler._platform().is_autostart_enabled()},
+            "settings": _settings_view(handler, updated),
         })
         return
     if parsed.path == "/api/groups":
@@ -835,30 +921,24 @@ def handle_post(handler: Any) -> None:
         handler._send_json({"ok": True})
         return
     if parsed.path == "/api/settings":
-        # 更新用户设置，未知字段会被忽略
+        # 更新当前 composition 支持的设置；非 schema 字段返回稳定错误。
         raw = handler._read_raw_body()
         payload = handler._json_from_raw(raw)
         if not isinstance(payload, dict):
             handler._send_json({"error": {"message": "请求参数无效", "type": "invalid_request_error", "code": "invalid_payload"}}, status=400)
             return
-        allowed = {
-            "auto_start", "start_minimized", "theme", "auto_refresh_logs",
-            "upstream_http_client", "upstream_http2", "upstream_keepalive",
-            "debug_mode", "debug_capture_enabled", "debug_capture_last_body",
-            "normalize_tools_order",
-        }
-        new_settings = {k: v for k, v in payload.items() if k in allowed}
-        # 开机自启需要同步到 Windows 注册表
-        if "auto_start" in new_settings:
-            handler._platform().set_autostart(bool(new_settings["auto_start"]))
-        settings_store = handler.server.settings_store  # type: ignore[attr-defined]
-        updated = settings_store.update(new_settings)
+        new_settings = dict(payload)
+        if _reject_unsupported_settings(handler, new_settings):
+            return
+        updated = _commit_settings(handler, new_settings)
+        if updated is None:
+            return
         # 上游客户端相关设置变更后，立即刷新客户端实例
         if any(k in new_settings for k in ("upstream_http_client", "upstream_http2", "upstream_keepalive")):
             handler.router._refresh_upstream_client()
         handler._send_json({
             **updated,
-            "auto_start": handler._platform().is_autostart_enabled(),
+            **_settings_view(handler, updated),
         })
         return
     # 聚合模型 CRUD（POST /api/aggregates、POST /api/aggregates/{id}/members）

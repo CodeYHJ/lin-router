@@ -1,0 +1,3 @@
+# Test dependencies for the headless Server/Core test suite.
+-r server.txt
+pytest>=8.0.0

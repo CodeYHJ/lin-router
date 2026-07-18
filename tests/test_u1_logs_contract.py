@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 def test_log_tab_diagnosis_and_multiline_summaries() -> None:
-    logs_path = ROOT / "static" / "js" / "logs-tab.js"
+    logs_path = ROOT / "web/shared" / "js" / "logs-tab.js"
     script = r'''
 const fs = require('fs');
 const vm = require('vm');
@@ -74,8 +74,8 @@ assert(!logs.redactDiagnosticEvidence('out_headers=(Authorization=Bearer secret)
 
 
 def test_log_tab_keeps_current_only_pagination_and_multiline_styles() -> None:
-    logs_js = (ROOT / "static" / "js" / "logs-tab.js").read_text(encoding="utf-8")
-    logs_css = (ROOT / "static" / "css" / "logs-tab.css").read_text(encoding="utf-8")
+    logs_js = (ROOT / "web/shared" / "js" / "logs-tab.js").read_text(encoding="utf-8")
+    logs_css = (ROOT / "web/shared" / "css" / "logs-tab.css").read_text(encoding="utf-8")
 
     assert "setCurrentOnly(enabled)" in logs_js
     assert "shouldUseLocalCurrentOnlyPagination()" in logs_js

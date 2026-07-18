@@ -26,6 +26,7 @@ from linrouter_core.runtime.http_api_runtime import handle_delete, handle_get, h
 class FakeSettingsStore:
     def __init__(self, values: dict[str, Any] | None = None) -> None:
         self.values = values or {"theme": "dark", "ignored": "keep"}
+        self.allowed_keys = frozenset({"theme", "debug_mode", "auto_start", "upstream_http2", "upstream_http_client"})
         self.updates: list[dict[str, Any]] = []
 
     def to_dict(self) -> dict[str, Any]:
@@ -50,6 +51,28 @@ class FakePlatform:
         return self.autostart
 
 
+class FakeOptionalCapabilities:
+    def __init__(self, platform: FakePlatform) -> None:
+        self.platform = platform
+
+    def setting_keys(self) -> tuple[str, ...]:
+        return ("auto_start",)
+
+    def read_settings(self) -> dict[str, bool]:
+        return {"auto_start": self.platform.is_autostart_enabled()}
+
+    def snapshot(self) -> dict[str, bool]:
+        return self.read_settings()
+
+    def apply_settings(self, patch: dict[str, object]) -> None:
+        if "auto_start" in patch:
+            self.platform.set_autostart(bool(patch["auto_start"]))
+
+    def restore(self, snapshot: dict[str, bool]) -> None:
+        if "auto_start" in snapshot:
+            self.platform.set_autostart(bool(snapshot["auto_start"]))
+
+
 class FakeRouter:
     def __init__(self) -> None:
         self.refreshes = 0
@@ -59,11 +82,11 @@ class FakeRouter:
 
 
 class FakeHandler:
-    def __init__(self, path: str, store: ConfigStore, router: FakeRouter, settings: FakeSettingsStore, payload: Any) -> None:
+    def __init__(self, path: str, store: ConfigStore, router: FakeRouter, settings: FakeSettingsStore, payload: Any, capabilities: Any = None) -> None:
         self.path = path
         self.store = store
         self.router = router
-        self.server = SimpleNamespace(settings_store=settings)
+        self.server = SimpleNamespace(settings_store=settings, optional_capabilities=capabilities)
         self.payload = payload
         self.wfile = io.BytesIO()
         self.responses: list[int] = []
@@ -75,9 +98,10 @@ class FakeHandler:
     def _read_json(self) -> Any:
         return self.payload
 
-    @staticmethod
-    def _platform() -> Any:
-        return app.get_platform()
+    def _runtime_paths(self) -> Any:
+        return SimpleNamespace(
+            get_resource_path=lambda *parts: Path(*parts),
+        )
 
     def _send_json(self, payload: dict[str, Any], status: int = 200) -> None:
         self.responses.append(status)
@@ -134,7 +158,11 @@ def test_m4b_backup_import_overwrites_and_keeps_settings_whitelist(tmp_path: Pat
 
     restored = ConfigStore(tmp_path / "restored.json")
     import_config_payload(restored, {"groups": [{"id": "old", "name": "old"}], "models": []})
-    response, settings = import_backup_payload(restored, backup)
+    response, settings = import_backup_payload(
+        restored,
+        backup,
+        settings_keys={"theme", "debug_mode", "auto_start", "upstream_http2"},
+    )
 
     assert response == {"ok": True, "groups": 1, "models": 1, "aggregate_models": 1, "aggregate_members": 1}
     assert _snapshot(restored) == _snapshot(store)
@@ -173,10 +201,16 @@ def test_m4b_handler_keeps_download_headers_and_backup_side_effects(tmp_path: Pa
     assert ("Content-Disposition", 'attachment; filename="lin-router-backup.json"') in backup_export.headers
 
     platform = FakePlatform()
-    monkeypatch.setattr(app, "get_platform", lambda: platform)
     backup = export_backup_payload(store, settings)
-    backup["settings"].update({"auto_start": True, "upstream_http_client": "urllib", "unexpected": 1})
-    importer = FakeHandler("/api/backup/import", store, router, settings, backup)
+    backup["settings"].update({"auto_start": True, "upstream_http_client": "urllib"})
+    importer = FakeHandler(
+        "/api/backup/import",
+        store,
+        router,
+        settings,
+        backup,
+        capabilities=FakeOptionalCapabilities(platform),
+    )
     RouterHandler.do_POST(importer)
     response = json.loads(importer.wfile.getvalue())
 

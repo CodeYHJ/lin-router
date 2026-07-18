@@ -49,7 +49,7 @@ class WindowsPlatform(PlatformBase):
         if self.is_frozen:
             # PyInstaller 打包后 exe 位于安装目录的 dist/ 子目录，资源根目录是其父目录。
             return Path(sys.executable).resolve().parent.parent
-        return Path(__file__).resolve().parent.parent
+        return Path(__file__).resolve().parents[2]
 
     def get_user_data_dir(self) -> Path:
         """返回 Windows 用户数据目录，供安装包用户在无本地配置时兜底使用。"""

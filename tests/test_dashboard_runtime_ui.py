@@ -24,8 +24,8 @@ const context = {
   window: { location: { origin: 'http://127.0.0.1:8748' } },
 };
 vm.createContext(context);
-vm.runInContext(fs.readFileSync('static/js/utils.js', 'utf8') + '\nthis.ConnectionStatus = ConnectionStatus; this.Utils = Utils;', context);
-vm.runInContext(fs.readFileSync('static/js/dashboard-tab.js', 'utf8') + '\nthis.DashboardTab = DashboardTab;', context);
+vm.runInContext(fs.readFileSync('web/shared/js/utils.js', 'utf8') + '\nthis.ConnectionStatus = ConnectionStatus; this.Utils = Utils;', context);
+vm.runInContext(fs.readFileSync('web/shared/js/dashboard-tab.js', 'utf8') + '\nthis.DashboardTab = DashboardTab;', context);
 context.DashboardTab._accessFilter = accessFilter;
 const structureBefore = context.DashboardTab.structureSignature(state);
 const runtimeBefore = context.DashboardTab.runtimeSignature(state);
@@ -75,8 +75,8 @@ const context = {
   window: { location: { origin: 'http://127.0.0.1:18400' } },
 };
 vm.createContext(context);
-vm.runInContext(fs.readFileSync('static/js/utils.js', 'utf8') + '\nthis.ConnectionStatus = ConnectionStatus; this.Utils = Utils;', context);
-vm.runInContext(fs.readFileSync('static/js/dashboard-tab.js', 'utf8') + '\nthis.DashboardTab = DashboardTab;', context);
+vm.runInContext(fs.readFileSync('web/shared/js/utils.js', 'utf8') + '\nthis.ConnectionStatus = ConnectionStatus; this.Utils = Utils;', context);
+vm.runInContext(fs.readFileSync('web/shared/js/dashboard-tab.js', 'utf8') + '\nthis.DashboardTab = DashboardTab;', context);
 if (initialSelection) context.DashboardTab._onboardingSelection = initialSelection;
 const flow = context.ConnectionStatus.derive(state);
 const selected = context.DashboardTab.selectedOnboarding(flow);
@@ -384,7 +384,7 @@ def test_v063_onboarding_quick_copy_follows_the_selected_group_and_model():
 
 
 def test_v063_onboarding_stays_information_only_and_readme_matches_contract():
-    dashboard_js = (ROOT / "static/js/dashboard-tab.js").read_text(encoding="utf-8")
+    dashboard_js = (ROOT / "web/shared/js/dashboard-tab.js").read_text(encoding="utf-8")
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     readme_onboarding = readme[readme.index("## 自助接入 Codex / Hermes"):readme.index("## 预览 / 调试")]
     onboarding_start = dashboard_js.index("  onboardingRelayGroups(")
@@ -416,8 +416,8 @@ def test_v063_onboarding_stays_information_only_and_readme_matches_contract():
 
 
 def test_dashboard_runtime_source_uses_stable_slots_and_delegated_events():
-    dashboard_js = (ROOT / "static/js/dashboard-tab.js").read_text(encoding="utf-8")
-    dashboard_css = (ROOT / "static/css/dashboard-tab.css").read_text(encoding="utf-8")
+    dashboard_js = (ROOT / "web/shared/js/dashboard-tab.js").read_text(encoding="utf-8")
+    dashboard_css = (ROOT / "web/shared/css/dashboard-tab.css").read_text(encoding="utf-8")
 
     assert "patchRuntime(panel)" in dashboard_js
     assert "data-dashboard-live-requests" in dashboard_js

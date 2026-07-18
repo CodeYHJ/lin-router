@@ -9,7 +9,7 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-HELPER_PATH = ROOT / "scripts" / "sign_windows_artifact.py"
+HELPER_PATH = ROOT / "packaging" / "desktop" / "tools" / "sign_windows_artifact.py"
 
 
 spec = importlib.util.spec_from_file_location("sign_windows_artifact", HELPER_PATH)
@@ -105,7 +105,7 @@ def test_sign_artifact_redacts_signtool_output(monkeypatch: pytest.MonkeyPatch, 
 
 
 def test_build_script_signs_payload_before_packaging_and_installer_afterwards() -> None:
-    script = (ROOT / "scripts" / "build.sh").read_text(encoding="utf-8")
+    script = (ROOT / "packaging" / "desktop" / "build.sh").read_text(encoding="utf-8")
     payload_anchor = 'sign_windows_artifact "$DIST_DIR/LinRouter_windows.exe"'
     zip_anchor = "build_windows_zip"
     installer_anchor = "build_windows_installer"
@@ -126,7 +126,7 @@ def test_build_script_signs_payload_before_packaging_and_installer_afterwards() 
 
 
 def test_build_script_can_force_self_installer_for_hosted_ci() -> None:
-    script = (ROOT / "scripts" / "build.sh").read_text(encoding="utf-8")
+    script = (ROOT / "packaging" / "desktop" / "build.sh").read_text(encoding="utf-8")
 
     assert '"${LINROUTER_FORCE_SELF_INSTALLER:-}" == "1"' in script
     force_position = script.index('"${LINROUTER_FORCE_SELF_INSTALLER:-}" == "1"')

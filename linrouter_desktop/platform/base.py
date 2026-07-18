@@ -124,7 +124,7 @@ class UnsupportedPlatform(PlatformBase):
     """
 
     def get_project_root(self) -> Path:
-        return Path(__file__).resolve().parent.parent
+        return Path(__file__).resolve().parents[2]
 
     def get_config_path(self, filename: str = "lin-router-config.json") -> Path:
         path = Path.home() / ".config" / self.APP_NAME / filename

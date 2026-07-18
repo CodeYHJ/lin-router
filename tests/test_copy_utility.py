@@ -34,7 +34,7 @@ if (clipboardMode === 'reject') {
   context.navigator = { clipboard: { writeText: async () => { throw new Error('denied'); } } };
 }
 vm.createContext(context);
-vm.runInContext(fs.readFileSync('static/js/utils.js', 'utf8') + '\nthis.Utils = Utils;', context);
+vm.runInContext(fs.readFileSync('web/shared/js/utils.js', 'utf8') + '\nthis.Utils = Utils;', context);
 context.Utils.copy('route-key').then(result => {
   console.log(JSON.stringify({ result, appended: appended.length }));
 });
@@ -63,7 +63,7 @@ def test_copy_reports_failure_when_compatibility_copy_fails():
 
 
 def test_copy_source_has_a_bounded_clipboard_wait():
-    source = (ROOT / "static/js/utils.js").read_text(encoding="utf-8")
+    source = (ROOT / "web/shared/js/utils.js").read_text(encoding="utf-8")
 
     assert "Promise.race" in source
     assert "1200" in source

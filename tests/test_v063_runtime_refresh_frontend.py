@@ -26,7 +26,7 @@ def test_runtime_state_api_preserves_legacy_silent_call_and_serializes_scope_cur
     script = r'''
 const fs = require('fs');
 const vm = require('vm');
-const source = fs.readFileSync('static/js/api.js', 'utf8') + '\nthis.API = API;';
+const source = fs.readFileSync('web/shared/js/api.js', 'utf8') + '\nthis.API = API;';
 const urls = [];
 const context = {
   console,
@@ -54,7 +54,7 @@ def test_app_runtime_scope_merges_incrementally_and_does_not_write_logs_from_con
     script = r'''
 const fs = require('fs');
 const vm = require('vm');
-const source = fs.readFileSync('static/js/app.js', 'utf8') + '\nthis.App = App;';
+const source = fs.readFileSync('web/shared/js/app.js', 'utf8') + '\nthis.App = App;';
 const calls = [];
 const responses = [];
 const Store = {
@@ -156,8 +156,8 @@ def test_config_manual_refresh_and_logs_auto_refresh_are_scope_safe_and_single_f
     script = r'''
 const fs = require('fs');
 const vm = require('vm');
-const runtimeSource = fs.readFileSync('static/js/config-tab-runtime.js', 'utf8') + '\nthis.runtime = ConfigTabRuntimeView;';
-const logsSource = fs.readFileSync('static/js/logs-tab.js', 'utf8') + '\nthis.logs = LogsTab;';
+const runtimeSource = fs.readFileSync('web/shared/js/config-tab-runtime.js', 'utf8') + '\nthis.runtime = ConfigTabRuntimeView;';
+const logsSource = fs.readFileSync('web/shared/js/logs-tab.js', 'utf8') + '\nthis.logs = LogsTab;';
 const runtimeCalls = [];
 const configStore = {
   state: { models: [{ id: 'm1' }], aggregate_members: [], logs: [{ request_id: 'keep' }], live_requests: [] },
@@ -223,7 +223,7 @@ vm.runInNewContext(logsSource, logContext);
 
 
 def test_dashboard_cancel_uses_scope_refresh_instead_of_legacy_runtime_endpoint() -> None:
-    dashboard_js = (ROOT / "static" / "js" / "dashboard-tab.js").read_text(encoding="utf-8")
+    dashboard_js = (ROOT / "web/shared" / "js" / "dashboard-tab.js").read_text(encoding="utf-8")
 
     assert "App.refreshRuntimeState('dashboard', { background: false, silent: true })" in dashboard_js
     assert "API.getRuntimeState({ silent: true }).then" not in dashboard_js

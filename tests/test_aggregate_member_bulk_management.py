@@ -387,10 +387,10 @@ def _run_node(script: str) -> str:
 
 
 def test_frontend_bulk_selection_filter_add_payload_and_drag_handle_contract() -> None:
-    api_js = (ROOT / "static/js/api.js").read_text(encoding="utf-8")
-    config_js = (ROOT / "static/js/config-tab.js").read_text(encoding="utf-8")
-    actions_js = (ROOT / "static/js/config-tab-actions.js").read_text(encoding="utf-8")
-    css = (ROOT / "static/css/config-tab.css").read_text(encoding="utf-8")
+    api_js = (ROOT / "web/shared/js/api.js").read_text(encoding="utf-8")
+    config_js = (ROOT / "web/shared/js/config-tab.js").read_text(encoding="utf-8")
+    actions_js = (ROOT / "web/shared/js/config-tab-actions.js").read_text(encoding="utf-8")
+    css = (ROOT / "web/shared/css/config-tab.css").read_text(encoding="utf-8")
 
     assert "batchUpdateAggregateMembers" in api_js
     assert "batchDeleteAggregateMembersPreview" in api_js
@@ -412,7 +412,7 @@ def test_frontend_bulk_selection_filter_add_payload_and_drag_handle_contract() -
     script = r'''
 const fs = require('fs');
 const vm = require('vm');
-const source = fs.readFileSync('static/js/config-tab.js', 'utf8') + '\nthis.config = ConfigTab;';
+const source = fs.readFileSync('web/shared/js/config-tab.js', 'utf8') + '\nthis.config = ConfigTab;';
 const members = [
   { id: 'am-alpha', aggregate_id: 'a1', group_id: 'g1', model_id: 'm-alpha', priority: 1, enabled: true },
   { id: 'am-beta', aggregate_id: 'a1', group_id: 'g1', model_id: 'm-beta', priority: 2, enabled: false },

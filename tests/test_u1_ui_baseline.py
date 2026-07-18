@@ -11,9 +11,9 @@ def read(relative_path: str) -> str:
 
 
 def test_public_component_layer_loads_before_page_styles():
-    index_html = read("static/index.html")
-    base_css = read("static/css/base.css")
-    components_css = read("static/css/components.css")
+    index_html = read("web/shared/index.html")
+    base_css = read("web/shared/css/base.css")
+    components_css = read("web/shared/css/components.css")
 
     assert index_html.index('css/base.css') < index_html.index('css/components.css')
     assert index_html.index('css/components.css') < index_html.index('css/layout.css')
@@ -26,9 +26,9 @@ def test_public_component_layer_loads_before_page_styles():
 
 
 def test_navigation_exposes_keyboard_and_state_semantics():
-    app_js = read("static/js/app.js")
-    tabs_js = read("static/js/tabs.js")
-    tree_js = read("static/js/tree.js")
+    app_js = read("web/shared/js/app.js")
+    tabs_js = read("web/shared/js/tabs.js")
+    tree_js = read("web/shared/js/tree.js")
 
     assert "tablist" in tabs_js
     assert 'aria-controls="tab-panel-${t.id}"' in tabs_js
@@ -46,9 +46,9 @@ def test_navigation_exposes_keyboard_and_state_semantics():
 
 
 def test_feedback_layers_have_focus_and_live_region_contracts():
-    modal_js = read("static/js/modal.js")
-    settings_js = read("static/js/settings-panel.js")
-    toast_js = read("static/js/toast.js")
+    modal_js = read("web/shared/js/modal.js")
+    settings_js = read("web/shared/js/settings-panel.js")
+    toast_js = read("web/shared/js/toast.js")
 
     assert "_activeCleanup" in modal_js
     assert 'role="dialog"' in modal_js
@@ -62,7 +62,7 @@ def test_feedback_layers_have_focus_and_live_region_contracts():
 
 
 def test_u1_does_not_touch_runtime_dirty_patch_contract():
-    runtime_js = read("static/js/config-tab-runtime.js")
+    runtime_js = read("web/shared/js/config-tab-runtime.js")
 
     assert "controller.render()" not in runtime_js
     assert "panel.innerHTML" not in runtime_js

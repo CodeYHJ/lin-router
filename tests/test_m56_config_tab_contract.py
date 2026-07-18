@@ -22,12 +22,12 @@ def run_node(script):
 
 
 def test_config_tab_module_boundaries_and_script_order():
-    index_html = (ROOT / "static/index.html").read_text(encoding="utf-8")
-    config_js = (ROOT / "static/js/config-tab.js").read_text(encoding="utf-8")
-    form_js = (ROOT / "static/js/config-tab-form.js").read_text(encoding="utf-8")
-    runtime_js = (ROOT / "static/js/config-tab-runtime.js").read_text(encoding="utf-8")
-    actions_js = (ROOT / "static/js/config-tab-actions.js").read_text(encoding="utf-8")
-    tabs_js = (ROOT / "static/js/tabs.js").read_text(encoding="utf-8")
+    index_html = (ROOT / "web/shared/index.html").read_text(encoding="utf-8")
+    config_js = (ROOT / "web/shared/js/config-tab.js").read_text(encoding="utf-8")
+    form_js = (ROOT / "web/shared/js/config-tab-form.js").read_text(encoding="utf-8")
+    runtime_js = (ROOT / "web/shared/js/config-tab-runtime.js").read_text(encoding="utf-8")
+    actions_js = (ROOT / "web/shared/js/config-tab-actions.js").read_text(encoding="utf-8")
+    tabs_js = (ROOT / "web/shared/js/tabs.js").read_text(encoding="utf-8")
 
     assert index_html.index('js/config-tab-form.js') < index_html.index('js/config-tab.js')
     assert index_html.index('js/config-tab-runtime.js') < index_html.index('js/config-tab.js')
@@ -47,7 +47,7 @@ def test_config_tab_module_boundaries_and_script_order():
 
 
 def test_runtime_refresh_is_a_dirty_safe_local_patch():
-    runtime_js = (ROOT / "static/js/config-tab-runtime.js").read_text(encoding="utf-8")
+    runtime_js = (ROOT / "web/shared/js/config-tab-runtime.js").read_text(encoding="utf-8")
 
     assert 'controller.render()' not in runtime_js
     assert 'panel.innerHTML' not in runtime_js
@@ -56,7 +56,7 @@ def test_runtime_refresh_is_a_dirty_safe_local_patch():
     script = r'''
 const fs = require('fs');
 const vm = require('vm');
-const runtimeSource = fs.readFileSync('static/js/config-tab-runtime.js', 'utf8') + '\nthis.runtime = ConfigTabRuntimeView;';
+const runtimeSource = fs.readFileSync('web/shared/js/config-tab-runtime.js', 'utf8') + '\nthis.runtime = ConfigTabRuntimeView;';
 const cell = { innerHTML: '', className: '', textContent: '', title: '' };
 const input = { value: 'dirty https://edited.example/v1', selectionStart: 8, selectionEnd: 8 };
 const document = {
@@ -95,7 +95,7 @@ const controller = {
 
 
 def test_action_orchestration_preserves_existing_api_contracts():
-    actions_js = (ROOT / "static/js/config-tab-actions.js").read_text(encoding="utf-8")
+    actions_js = (ROOT / "web/shared/js/config-tab-actions.js").read_text(encoding="utf-8")
 
     for api_call in [
         "API.saveGroup(id, payload)", "API.createGroup(payload)",
@@ -117,11 +117,11 @@ def test_action_orchestration_preserves_existing_api_contracts():
 
 
 def test_u1_config_draft_provider_and_aggregate_description_contract():
-    config_js = (ROOT / "static/js/config-tab.js").read_text(encoding="utf-8")
-    form_js = (ROOT / "static/js/config-tab-form.js").read_text(encoding="utf-8")
-    actions_js = (ROOT / "static/js/config-tab-actions.js").read_text(encoding="utf-8")
-    tree_js = (ROOT / "static/js/tree.js").read_text(encoding="utf-8")
-    css = (ROOT / "static/css/config-tab.css").read_text(encoding="utf-8")
+    config_js = (ROOT / "web/shared/js/config-tab.js").read_text(encoding="utf-8")
+    form_js = (ROOT / "web/shared/js/config-tab-form.js").read_text(encoding="utf-8")
+    actions_js = (ROOT / "web/shared/js/config-tab-actions.js").read_text(encoding="utf-8")
+    tree_js = (ROOT / "web/shared/js/tree.js").read_text(encoding="utf-8")
+    css = (ROOT / "web/shared/css/config-tab.css").read_text(encoding="utf-8")
 
     assert "_drafts: new Map()" in config_js
     assert "localStorage" not in form_js
@@ -146,7 +146,7 @@ def test_form_global_listener_and_runtime_dispose_are_idempotent():
     script = r'''
 const fs = require('fs');
 const vm = require('vm');
-const source = fs.readFileSync('static/js/config-tab-form.js', 'utf8') + '\nthis.form = ConfigTabForm;' + fs.readFileSync('static/js/config-tab-runtime.js', 'utf8') + '\nthis.runtime = ConfigTabRuntimeView;';
+const source = fs.readFileSync('web/shared/js/config-tab-form.js', 'utf8') + '\nthis.form = ConfigTabForm;' + fs.readFileSync('web/shared/js/config-tab-runtime.js', 'utf8') + '\nthis.runtime = ConfigTabRuntimeView;';
 const listeners = new Map();
 const document = {
   addEventListener(type, handler) { listeners.set(type, handler); },

@@ -81,7 +81,7 @@ class DarwinPlatform(PlatformBase):
     def get_project_root(self) -> Path:
         if self.is_frozen:
             return Path(sys.executable).resolve().parent
-        return Path(__file__).resolve().parent.parent
+        return Path(__file__).resolve().parents[2]
 
     def get_config_path(self, filename: str = "lin-router-config.json") -> Path:
         path = self._app_support_dir / filename

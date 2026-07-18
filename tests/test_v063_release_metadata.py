@@ -7,8 +7,8 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 def test_v063_release_metadata_is_consistent() -> None:
-    build_script = (ROOT / "scripts" / "build.sh").read_text(encoding="utf-8")
-    settings_js = (ROOT / "static" / "js" / "settings-panel.js").read_text(encoding="utf-8")
+    build_script = (ROOT / "packaging" / "desktop" / "build.sh").read_text(encoding="utf-8")
+    settings_js = (ROOT / "web/shared" / "js" / "settings-panel.js").read_text(encoding="utf-8")
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
 
     assert 'APP_VERSION="0.6.3"' in build_script

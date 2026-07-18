@@ -18,8 +18,11 @@ __pycache__/
 # Build artifacts
 build/
 dist/
+.venvs/
+.venvs-server/
+.venvs-desktop/
 *.spec
-!LinRouter.spec
+!packaging/desktop/LinRouter.spec
 *.exe
 *.dmg
 *.app/

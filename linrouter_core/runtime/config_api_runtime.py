@@ -2,9 +2,9 @@
 from __future__ import annotations
 
 from dataclasses import asdict
-from typing import Any, Dict, List
+from typing import Any, Dict, Iterable, List
 
-from linrouter_core.config.constants import PROVIDER_ARK, new_route_key
+from linrouter_core.config.constants import PUBLIC_SETTINGS_KEYS, PROVIDER_ARK, new_route_key
 from linrouter_core.config.models import AggregateMember, AggregateModel, ConnectionGroup, ModelConfig
 
 
@@ -102,7 +102,12 @@ def import_config_payload(store: Any, payload: Any) -> Dict[str, Any]:
     return _import_response(store, aggregate_skip_reasons)
 
 
-def import_backup_payload(store: Any, payload: Any) -> tuple[Dict[str, Any], Dict[str, Any]]:
+def import_backup_payload(
+    store: Any,
+    payload: Any,
+    *,
+    settings_keys: Iterable[str] | None = None,
+) -> tuple[Dict[str, Any], Dict[str, Any]]:
     if not isinstance(payload, dict):
         raise ConfigApiError("备份文件无效：必须是一个 JSON 对象", "invalid_backup_file")
     groups_raw, models_raw, aggregates_raw, members_raw = _config_lists(payload)
@@ -152,12 +157,7 @@ def import_backup_payload(store: Any, payload: Any) -> tuple[Dict[str, Any], Dic
         store.aggregate_models = new_aggregates
         store.aggregate_members = new_members
         store.save()
-    allowed = {
-        "auto_start", "start_minimized", "theme", "auto_refresh_logs",
-        "upstream_http_client", "upstream_http2", "upstream_keepalive",
-        "debug_mode", "debug_capture_enabled", "debug_capture_last_body",
-        "normalize_tools_order",
-    }
+    allowed = set(settings_keys or PUBLIC_SETTINGS_KEYS)
     new_settings = {key: value for key, value in settings_raw.items() if key in allowed}
     return _backup_import_response(store), new_settings
 
