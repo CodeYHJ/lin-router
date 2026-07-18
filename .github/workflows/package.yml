@@ -62,6 +62,7 @@ jobs:
             linrouter_server
             linrouter_desktop
             web/shared
+            scripts/verify_build_isolation.py
           )
           for required_path in "${required_paths[@]}"; do
             if ! git cat-file -e "${tag}:${required_path}" 2>/dev/null; then
@@ -179,6 +180,17 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements/package.txt
 
+      - name: Protect existing Docker outputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build/docker/isolation-guard dist/docker/isolation-guard
+          printf 'docker-build-sentinel\n' > build/docker/isolation-guard/artifact.txt
+          printf 'docker-dist-sentinel\n' > dist/docker/isolation-guard/artifact.txt
+          python scripts/verify_build_isolation.py snapshot \
+            --output "$RUNNER_TEMP/docker-boundary.json" \
+            build/docker dist/docker packaging/docker
+
       - name: Build package
         shell: bash
         env:
@@ -190,6 +202,12 @@ jobs:
             --target "${{ matrix.target }}" \
             ${{ matrix.build_args }} \
             --version "${{ needs.resolve.outputs.version }}"
+
+      - name: Verify Desktop build preserved Docker outputs
+        if: always()
+        run: >-
+          python scripts/verify_build_isolation.py verify
+          --snapshot "$RUNNER_TEMP/docker-boundary.json"
 
       - name: Validate Windows release artifacts
         if: matrix.target == 'win32'

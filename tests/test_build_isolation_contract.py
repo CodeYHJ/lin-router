@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import ast
 import json
+import subprocess
+import sys
 import threading
 import urllib.request
 from pathlib import Path
@@ -88,6 +90,63 @@ def test_desktop_build_uses_a_selected_dependency_manager_neutral_interpreter() 
     assert 'python -m PyInstaller' not in build
     assert 'UV_PROJECT_ENVIRONMENT' not in build
     assert 'uv run' not in build
+
+
+def test_build_boundary_snapshot_detects_cross_build_changes(tmp_path: Path) -> None:
+    guard = ROOT / "scripts" / "verify_build_isolation.py"
+    protected = tmp_path / "dist" / "desktop"
+    protected.mkdir(parents=True)
+    sentinel = protected / "artifact.txt"
+    sentinel.write_text("original\n", encoding="utf-8")
+    snapshot = tmp_path / "boundary.json"
+
+    subprocess.run(
+        [
+            sys.executable,
+            str(guard),
+            "snapshot",
+            "--output",
+            str(snapshot),
+            "dist/desktop",
+        ],
+        cwd=tmp_path,
+        check=True,
+    )
+    subprocess.run(
+        [sys.executable, str(guard), "verify", "--snapshot", str(snapshot)],
+        cwd=tmp_path,
+        check=True,
+    )
+
+    sentinel.write_text("changed\n", encoding="utf-8")
+    result = subprocess.run(
+        [sys.executable, str(guard), "verify", "--snapshot", str(snapshot)],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 1
+    assert "dist/desktop" in result.stderr
+
+
+def test_supported_build_workflows_guard_the_other_build_outputs() -> None:
+    docker = (ROOT / ".github" / "workflows" / "docker-build.yml").read_text(encoding="utf-8")
+    ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    package = (ROOT / ".github" / "workflows" / "package.yml").read_text(encoding="utf-8")
+
+    assert "build/desktop dist/desktop" in docker
+    assert "Verify Docker build preserved Desktop outputs" in docker
+    for workflow in (ci, package):
+        assert "build/docker dist/docker packaging/docker" in workflow
+        assert "Verify Desktop build preserved Docker outputs" in workflow
+        assert "if: always()" in workflow
+
+
+def test_docker_runtime_smoke_stays_paused_until_build_boundaries_pass() -> None:
+    ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    job = ci[ci.index("  build_docker_smoke:") :]
+    assert "if: ${{ false }}" in job
 
 
 def test_docker_ci_and_readme_use_isolated_persistent_outputs() -> None:

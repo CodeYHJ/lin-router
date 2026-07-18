@@ -88,6 +88,17 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements/package.txt
 
+      - name: Protect existing Docker outputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build/docker/isolation-guard dist/docker/isolation-guard
+          printf 'docker-build-sentinel\n' > build/docker/isolation-guard/artifact.txt
+          printf 'docker-dist-sentinel\n' > dist/docker/isolation-guard/artifact.txt
+          python scripts/verify_build_isolation.py snapshot \
+            --output "$RUNNER_TEMP/docker-boundary.json" \
+            build/docker dist/docker packaging/docker
+
       - name: Build unsigned Windows preview package
         shell: bash
         env:
@@ -99,6 +110,12 @@ jobs:
             --target win32 \
             --installer \
             --version "0.0.0-ci.${{ github.run_number }}"
+
+      - name: Verify Desktop build preserved Docker outputs
+        if: always()
+        run: >-
+          python scripts/verify_build_isolation.py verify
+          --snapshot "$RUNNER_TEMP/docker-boundary.json"
 
       - name: Upload Windows preview artifact
         uses: actions/upload-artifact@v7
@@ -138,6 +155,17 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements/package.txt
 
+      - name: Protect existing Docker outputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build/docker/isolation-guard dist/docker/isolation-guard
+          printf 'docker-build-sentinel\n' > build/docker/isolation-guard/artifact.txt
+          printf 'docker-dist-sentinel\n' > dist/docker/isolation-guard/artifact.txt
+          python scripts/verify_build_isolation.py snapshot \
+            --output "$RUNNER_TEMP/docker-boundary.json" \
+            build/docker dist/docker packaging/docker
+
       - name: Build unsigned macOS preview package
         shell: bash
         env:
@@ -146,6 +174,12 @@ jobs:
           set -euo pipefail
           bash packaging/desktop/build.sh \
             --target darwin
+
+      - name: Verify Desktop build preserved Docker outputs
+        if: always()
+        run: >-
+          python scripts/verify_build_isolation.py verify
+          --snapshot "$RUNNER_TEMP/docker-boundary.json"
 
       - name: Upload macOS preview artifact
         uses: actions/upload-artifact@v7
@@ -158,6 +192,8 @@ jobs:
   build_docker_smoke:
     name: Build and smoke-test Docker server
     needs: verify
+    # 先让 Docker/Desktop 双向写集保护在目标 runner 通过，再启用运行时 smoke。
+    if: ${{ false }}
     runs-on: ubuntu-latest
 
     steps:

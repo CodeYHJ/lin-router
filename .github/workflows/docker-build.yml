@@ -10,6 +10,7 @@ on:
       - "linrouter_core/**"
       - "linrouter_server/**"
       - "web/shared/**"
+      - "scripts/verify_build_isolation.py"
 
 permissions:
   contents: read
@@ -27,6 +28,22 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      - name: Setup Python for boundary verification
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Protect existing Desktop outputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build/desktop/isolation-guard dist/desktop/isolation-guard
+          printf 'desktop-build-sentinel\n' > build/desktop/isolation-guard/artifact.txt
+          printf 'desktop-dist-sentinel\n' > dist/desktop/isolation-guard/artifact.txt
+          python scripts/verify_build_isolation.py snapshot \
+            --output "$RUNNER_TEMP/desktop-boundary.json" \
+            build/desktop dist/desktop
+
       - name: Show Docker version
         run: docker version
 
@@ -41,3 +58,9 @@ jobs:
 
       - name: Inspect built image
         run: docker image inspect lin-router:docker-build-test >/dev/null
+
+      - name: Verify Docker build preserved Desktop outputs
+        if: always()
+        run: >-
+          python scripts/verify_build_isolation.py verify
+          --snapshot "$RUNNER_TEMP/desktop-boundary.json"

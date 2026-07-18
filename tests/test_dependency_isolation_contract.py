@@ -97,6 +97,7 @@ def test_docker_build_workflow_only_builds_the_server_image() -> None:
     assert "workflow_dispatch:" in workflow
     assert "packaging/docker/**" in workflow
     assert "requirements/server.txt" in workflow
+    assert "scripts/verify_build_isolation.py" in workflow
     assert "docker build" in workflow
     assert "--file packaging/docker/Dockerfile" in workflow
     assert "docker image inspect" in workflow
@@ -117,6 +118,7 @@ def test_release_tagged_source_verification_is_commented_out() -> None:
         "requirements/desktop.txt",
         "requirements/package.txt",
         "packaging/desktop/build.sh",
+        "scripts/verify_build_isolation.py",
     ):
         assert required_path in package
 
