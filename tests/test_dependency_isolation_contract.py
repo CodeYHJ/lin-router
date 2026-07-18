@@ -72,6 +72,25 @@ def test_github_workflows_use_role_requirements_without_uv() -> None:
     assert "python -m pip install -r requirements/test.txt" in ci
 
 
+def test_github_workflows_use_node24_action_versions() -> None:
+    ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    package = (ROOT / ".github" / "workflows" / "package.yml").read_text(encoding="utf-8")
+    combined = f"{ci}\n{package}"
+    for deprecated in (
+        "actions/checkout@v4",
+        "actions/setup-python@v5",
+        "actions/upload-artifact@v4",
+        "actions/download-artifact@v4",
+        "softprops/action-gh-release@v2",
+    ):
+        assert deprecated not in combined
+    assert "actions/checkout@v6" in combined
+    assert "actions/setup-python@v6" in combined
+    assert "actions/upload-artifact@v7" in combined
+    assert "actions/download-artifact@v8" in package
+    assert "softprops/action-gh-release@v3" in package
+
+
 def test_release_tagged_source_verification_is_commented_out() -> None:
     package = (ROOT / ".github" / "workflows" / "package.yml").read_text(encoding="utf-8")
     assert "\n  verify:\n" not in package
@@ -79,6 +98,14 @@ def test_release_tagged_source_verification_is_commented_out() -> None:
     assert "#   name: Verify tagged source" in package
     assert "github.event.repository.default_branch" not in package
     assert "needs: resolve" in package
+    assert 'git cat-file -e "${tag}:${required_path}"' in package
+    for required_path in (
+        "requirements/server.txt",
+        "requirements/desktop.txt",
+        "requirements/package.txt",
+        "packaging/desktop/build.sh",
+    ):
+        assert required_path in package
 
 
 def test_docker_smoke_python_block_stays_inside_the_yaml_run_block() -> None:

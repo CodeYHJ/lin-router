@@ -28,7 +28,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
           fetch-tags: true
@@ -53,6 +53,23 @@ jobs:
             echo "找不到要构建的 tag：$tag" >&2
             exit 1
           fi
+          required_paths=(
+            requirements/server.txt
+            requirements/desktop.txt
+            requirements/package.txt
+            packaging/desktop/build.sh
+            packaging/desktop/LinRouter.spec
+            linrouter_server
+            linrouter_desktop
+            web/shared
+          )
+          for required_path in "${required_paths[@]}"; do
+            if ! git cat-file -e "${tag}:${required_path}" 2>/dev/null; then
+              echo "发布 tag $tag 缺少当前构建所需文件：$required_path" >&2
+              echo "请在包含 Server/Desktop 拆分结果的 commit 上创建新 tag。" >&2
+              exit 1
+            fi
+          done
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "value=${tag#v}" >> "$GITHUB_OUTPUT"
 
@@ -65,13 +82,13 @@ jobs:
   #
   #   steps:
   #     - name: Checkout tagged source
-  #       uses: actions/checkout@v4
+  #       uses: actions/checkout@v6
   #       with:
   #         ref: ${{ needs.resolve.outputs.tag }}
   #         fetch-depth: 0
   #
   #     - name: Setup Python
-  #       uses: actions/setup-python@v5
+  #       uses: actions/setup-python@v6
   #       with:
   #         python-version: "3.12"
   #         cache: pip
@@ -140,13 +157,13 @@ jobs:
 
     steps:
       - name: Checkout tagged source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ needs.resolve.outputs.tag }}
           fetch-depth: 0
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: pip
@@ -185,7 +202,7 @@ jobs:
 
       - name: Upload Windows artifact
         if: matrix.target == 'win32'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact_name }}-v${{ needs.resolve.outputs.version }}
           if-no-files-found: error
@@ -196,7 +213,7 @@ jobs:
 
       - name: Upload macOS artifact
         if: matrix.target == 'darwin'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact_name }}-v${{ needs.resolve.outputs.version }}
           if-no-files-found: error
@@ -213,19 +230,19 @@ jobs:
 
     steps:
       - name: Download Windows artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: linrouter-windows-v${{ needs.resolve.outputs.version }}
           path: release/windows
 
       - name: Download macOS artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: linrouter-macos-v${{ needs.resolve.outputs.version }}
           path: release/macos
 
       - name: Create draft GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.resolve.outputs.tag }}
           name: LinRouter v${{ needs.resolve.outputs.version }}
