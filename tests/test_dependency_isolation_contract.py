@@ -110,7 +110,8 @@ def test_docker_hub_publish_job_uses_the_server_context_and_shared_secrets() -> 
     assert "refactor/desktop-docker-isolation" not in workflow
     assert "publish:" in workflow
     assert "needs: build" in workflow
-    assert "github.ref == 'refs/heads/main'" in workflow
+    publish_job = workflow[workflow.index("\n  publish:") :]
+    assert "\n    if:" not in publish_job
     assert "docker/login-action@v3" in workflow
     assert "secrets.DOCKER_USERNAME" in workflow
     assert "secrets.DOCKER_TOKEN" in workflow

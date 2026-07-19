@@ -78,7 +78,6 @@ jobs:
   publish:
     name: Build and push Docker Hub image
     needs: build
-    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: read
