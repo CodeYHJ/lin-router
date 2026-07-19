@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""M1 配置域抽取兼容契约：保持 app.py 公共导入与配置持久化语义。"""
+"""M1 配置域抽取契约：保持 Server 公共导入与配置持久化语义。"""
 
 import json
 import tempfile
 from dataclasses import asdict
 from pathlib import Path
 
-from app import AggregateMember, AggregateModel, ConfigStore, ConnectionGroup, ModelConfig
-from debug_capture import DebugCapture
+from linrouter_server.application import AggregateMember, AggregateModel, ConfigStore, ConnectionGroup, ModelConfig
+from linrouter_server.debug_capture import DebugCapture
 
 
 def test_app_reexports_config_domain_types():

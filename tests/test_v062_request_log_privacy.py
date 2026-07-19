@@ -1,6 +1,6 @@
 import json
 
-from app import ArkProxyRouter
+from linrouter_server.application import ArkProxyRouter
 from linrouter_core.config.models import ConnectionGroup
 from linrouter_core.contracts.runtime_types import UpstreamCandidate
 

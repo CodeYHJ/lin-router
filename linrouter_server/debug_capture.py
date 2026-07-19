@@ -30,7 +30,7 @@ class DebugCapture:
         self.router = router
         self.settings_store = settings_store
         # 保留旧的两参数构造兼容：有 Router 时从其注入的诊断依赖恢复原 replay 语义；
-        # app.py 的显式参数仍优先，避免本模块反向 import app。
+        # composition root 的显式参数优先，避免本模块反向导入应用组装层。
         self._browser_user_agent = browser_user_agent or getattr(router, "_debug_capture_browser_user_agent", "")
         self._ssl_context = ssl_context if ssl_context is not None else getattr(router, "_debug_capture_ssl_context", None)
         self._empty_usage = empty_usage or getattr(router, "_empty_usage", None) or (lambda: (0, 0, 0, 0, 0))

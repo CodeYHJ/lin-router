@@ -5,7 +5,7 @@ import inspect
 from pathlib import Path
 from types import SimpleNamespace
 
-from app import ArkProxyRouter
+from linrouter_server.application import ArkProxyRouter
 from linrouter_core.contracts.execution_ports import CandidateErrorClassification, ExecutionPolicyPort
 from linrouter_core.runtime import CandidateRuntime, ExecutionPolicyService
 

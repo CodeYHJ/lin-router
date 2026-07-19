@@ -1,12 +1,12 @@
 # Lin Router v0.6 前端工程
 
-Vue 3/Vite/Pinia 前端重构隔离工程。它在开发期通过 Vite 代理调用既有 Python 服务，**不修改也不覆盖仓库根目录 `static/`**；旧静态前端仍作为回滚资产保留。
+Vue 3/Vite/Pinia 前端重构隔离工程。它在开发期通过 Vite 代理调用现有 Server，**不修改也不覆盖正式资源目录 `web/shared/`**。
 
 ## 运行
 
 ```bash
 # 终端 1：从仓库根目录启动既有服务（可使用隔离配置与端口）
-python app.py --port 18400
+python -m linrouter_server --port 18400
 
 # 终端 2：启动 Vue 开发服务器
 npm --prefix frontend run dev
@@ -25,7 +25,7 @@ npm --prefix frontend run build
 ## 冻结边界
 
 - 不修改 Python 后端、`/api/*` 与 `/v1/*` 契约。
-- 不在开发期覆盖 `static/`，不修改 PyInstaller 打包资源。
+- 不在开发期覆盖 `web/shared/`，不修改 Desktop packaging 资源。
 - 模型编辑、模型测试、聚合、日志、设置等暂未迁移；保留给后续页面批次。
 
 ## 目录

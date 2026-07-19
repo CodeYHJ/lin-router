@@ -5,8 +5,8 @@ from typing import Any
 
 import pytest
 
-import app
-import desktop
+import linrouter_server.application as app
+import linrouter_desktop.tray as desktop
 
 
 class FakeGuard:

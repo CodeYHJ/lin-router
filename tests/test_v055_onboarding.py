@@ -5,7 +5,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from app import ConnectionGroup, DEFAULT_BASE_URL, create_server
+from linrouter_server.application import ConnectionGroup, DEFAULT_BASE_URL, create_server
 
 
 ROOT = Path(__file__).resolve().parent.parent

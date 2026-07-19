@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from app import ArkProxyRouter, ConfigStore
+from linrouter_server.application import ArkProxyRouter, ConfigStore
 from linrouter_core.runtime.http_api_runtime import handle_post
 
 

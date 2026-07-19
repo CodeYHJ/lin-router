@@ -10,7 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app import ArkProxyRouter, ConnectionGroup, create_server
+from linrouter_server.application import ArkProxyRouter, ConnectionGroup, create_server
 
 
 def free_port():

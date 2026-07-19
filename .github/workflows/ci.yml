@@ -95,7 +95,7 @@ jobs:
           mkdir -p build/docker/isolation-guard dist/docker/isolation-guard
           printf 'docker-build-sentinel\n' > build/docker/isolation-guard/artifact.txt
           printf 'docker-dist-sentinel\n' > dist/docker/isolation-guard/artifact.txt
-          python scripts/verify_build_isolation.py snapshot \
+          python scripts/ci/verify_build_isolation.py snapshot \
             --output "$RUNNER_TEMP/docker-boundary.json" \
             build/docker dist/docker packaging/docker
 
@@ -114,7 +114,7 @@ jobs:
       - name: Verify Desktop build preserved Docker outputs
         if: always()
         run: >-
-          python scripts/verify_build_isolation.py verify
+          python scripts/ci/verify_build_isolation.py verify
           --snapshot "$RUNNER_TEMP/docker-boundary.json"
 
       - name: Upload Windows preview artifact
@@ -162,7 +162,7 @@ jobs:
           mkdir -p build/docker/isolation-guard dist/docker/isolation-guard
           printf 'docker-build-sentinel\n' > build/docker/isolation-guard/artifact.txt
           printf 'docker-dist-sentinel\n' > dist/docker/isolation-guard/artifact.txt
-          python scripts/verify_build_isolation.py snapshot \
+          python scripts/ci/verify_build_isolation.py snapshot \
             --output "$RUNNER_TEMP/docker-boundary.json" \
             build/docker dist/docker packaging/docker
 
@@ -178,7 +178,7 @@ jobs:
       - name: Verify Desktop build preserved Docker outputs
         if: always()
         run: >-
-          python scripts/verify_build_isolation.py verify
+          python scripts/ci/verify_build_isolation.py verify
           --snapshot "$RUNNER_TEMP/docker-boundary.json"
 
       - name: Upload macOS preview artifact

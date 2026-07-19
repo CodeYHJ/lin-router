@@ -15,10 +15,10 @@ from urllib.error import HTTPError
 
 import pytest
 
-from app import AllModelsFailedError, ArkProxyRouter, ConfigStore, RouteContext
+from linrouter_server.application import AllModelsFailedError, ArkProxyRouter, ConfigStore, RouteContext
 from linrouter_core.runtime.handler_runtime import handle_proxy_request
 from linrouter_core.runtime.router_runtime import MAX_SSE_FRAME_BYTES
-from upstream_client import UpstreamClient
+from linrouter_server.upstream_client import UpstreamClient
 
 
 def _free_port() -> int:

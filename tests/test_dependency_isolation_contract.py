@@ -97,7 +97,7 @@ def test_docker_build_workflow_only_builds_the_server_image() -> None:
     assert "workflow_dispatch:" in workflow
     assert "packaging/docker/**" in workflow
     assert "requirements/server.txt" in workflow
-    assert "scripts/verify_build_isolation.py" in workflow
+    assert "scripts/ci/verify_build_isolation.py" in workflow
     assert "docker build" in workflow
     assert "--file packaging/docker/Dockerfile" in workflow
     assert "docker image inspect" in workflow
@@ -118,7 +118,8 @@ def test_release_tagged_source_verification_is_commented_out() -> None:
         "requirements/desktop.txt",
         "requirements/package.txt",
         "packaging/desktop/build.sh",
-        "scripts/verify_build_isolation.py",
+        "packaging/desktop/entrypoint.py",
+        "scripts/ci/verify_build_isolation.py",
     ):
         assert required_path in package
 
@@ -132,7 +133,7 @@ def test_docker_smoke_python_block_stays_inside_the_yaml_run_block() -> None:
 
 
 def test_preview_entrypoint_does_not_bind_the_local_environment_layout() -> None:
-    preview = (ROOT / "start-preview-18409.bat").read_text(encoding="utf-8")
+    preview = (ROOT / "scripts" / "server" / "start-preview-18409.bat").read_text(encoding="utf-8")
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     assert "LINROUTER_SERVER_PYTHON" in preview
     assert ".venvs" not in preview

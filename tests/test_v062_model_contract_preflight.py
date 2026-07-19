@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from app import ArkProxyRouter, ConfigStore, RouteContext
+from linrouter_server.application import ArkProxyRouter, ConfigStore, RouteContext
 from tests.test_v053_stats_preview_runtime import write_config
 
 

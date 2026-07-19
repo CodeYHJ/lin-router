@@ -95,10 +95,9 @@ hiddenimports = [
 ] + pystray_submodules
 
 a = Analysis(
-    # Keep the executable entry stable for source and frozen launches. The
-    # root facade imports the real Desktop composition module without putting
-    # linrouter_desktop/platform on sys.path as a top-level package.
-    [str(PROJECT_ROOT / "desktop.py")],
+    # Keep the executable entry inside the Desktop packaging boundary. The
+    # entrypoint forwards to linrouter_desktop without relying on a root facade.
+    [str(DESKTOP_ROOT / "entrypoint.py")],
     pathex=[str(PROJECT_ROOT)],
     binaries=[],
     datas=datas,

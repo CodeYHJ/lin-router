@@ -88,8 +88,7 @@ class WindowsPlatform(PlatformBase):
         if self.is_frozen:
             args = [str(self.get_executable_path()), "--tray"]
         else:
-            # 开发模式下使用 python 启动 desktop.py
-            args = [sys.executable, str(self.get_project_root() / "desktop.py"), "--tray"]
+            args = [sys.executable, "-m", "linrouter_desktop", "--tray"]
         return " ".join(f'"{arg}"' for arg in args)
 
     def set_autostart(self, enabled: bool) -> bool:

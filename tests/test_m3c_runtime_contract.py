@@ -10,7 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from app import ArkProxyRouter, ConfigStore, RouteContext
+from linrouter_server.application import ArkProxyRouter, ConfigStore, RouteContext
 from linrouter_core.runtime import CandidateRuntime, StreamExecutionService
 from test_stream_no_fallback import (
     FirstUpstreamHandler,
@@ -80,7 +80,7 @@ def test_m3c_call_and_http_handlers_remain_frozen_against_m3b_baseline() -> None
     baseline = subprocess.check_output(
         ["git", "show", "2806a5a:app.py"], cwd=ROOT, text=True, encoding="utf-8"
     )
-    current = (ROOT / "app.py").read_text(encoding="utf-8")
+    current = (ROOT / "linrouter_server" / "application.py").read_text(encoding="utf-8")
     assert _methods(baseline, FROZEN_METHODS) == _methods(current, FROZEN_METHODS)
 
 

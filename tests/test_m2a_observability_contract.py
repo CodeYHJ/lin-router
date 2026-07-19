@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from app import ArkProxyRouter
+from linrouter_server.application import ArkProxyRouter
 from linrouter_core.observability.contracts import RequestLog
 
 
@@ -38,7 +38,7 @@ def test_observability_runtime_projection_does_not_mutate_router_runtime(tmp_pat
 
 
 def test_request_log_facade_is_observability_contract() -> None:
-    from app import RequestLog as AppRequestLog
+    from linrouter_server.application import RequestLog as AppRequestLog
 
     assert AppRequestLog is RequestLog
 

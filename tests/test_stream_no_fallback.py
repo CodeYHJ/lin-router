@@ -21,7 +21,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app import ArkProxyRouter as Router, ConfigStore, RouteContext
+from linrouter_server.application import ArkProxyRouter as Router, ConfigStore, RouteContext
 
 fallback_happened = False
 first_chunk_content = b'data: {"choices":[{"delta":{"content":"hello"}}]}\n\n'

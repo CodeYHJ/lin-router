@@ -93,7 +93,7 @@ def test_desktop_build_uses_a_selected_dependency_manager_neutral_interpreter() 
 
 
 def test_build_boundary_snapshot_detects_cross_build_changes(tmp_path: Path) -> None:
-    guard = ROOT / "scripts" / "verify_build_isolation.py"
+    guard = ROOT / "scripts" / "ci" / "verify_build_isolation.py"
     protected = tmp_path / "dist" / "desktop"
     protected.mkdir(parents=True)
     sentinel = protected / "artifact.txt"
@@ -163,12 +163,37 @@ def test_docker_ci_and_readme_use_isolated_persistent_outputs() -> None:
     assert "-v lin-router-data:/data" in readme
 
 
-def test_desktop_spec_uses_pyinstaller_context_and_root_entry() -> None:
+def test_desktop_spec_uses_pyinstaller_context_and_packaging_entry() -> None:
     spec = (ROOT / "packaging" / "desktop" / "LinRouter.spec").read_text(encoding="utf-8")
     assert "SPECPATH" in spec
     assert "Path(__file__)" not in spec
-    assert 'PROJECT_ROOT / "desktop.py"' in spec
+    assert 'DESKTOP_ROOT / "entrypoint.py"' in spec
+    assert 'PROJECT_ROOT / "desktop.py"' not in spec
     assert not (ROOT / "packaging" / "__init__.py").exists()
+
+
+def test_root_tracked_files_do_not_contain_legacy_runtime_entries() -> None:
+    allowed = {
+        ".gitignore",
+        "README.md",
+        "requirements.txt",
+        "lin-router-config.example.json",
+    }
+    candidates = subprocess.check_output(
+        ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
+        cwd=ROOT,
+    ).decode("utf-8").split("\0")
+    root_files = {
+        path
+        for path in candidates
+        if path and "/" not in path and (ROOT / path).is_file()
+    }
+    assert root_files == allowed
+    assert subprocess.run(
+        ["git", "check-ignore", "-q", "lin-router-config.json"],
+        cwd=ROOT,
+        check=False,
+    ).returncode == 0
 
 
 def test_desktop_composition_can_share_one_settings_store(tmp_path: Path) -> None:

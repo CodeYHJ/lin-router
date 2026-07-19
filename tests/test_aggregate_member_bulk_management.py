@@ -11,7 +11,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-from app import ConfigStore, create_server
+from linrouter_server.application import ConfigStore, create_server
 
 
 ROOT = Path(__file__).resolve().parent.parent

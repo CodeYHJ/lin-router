@@ -13,10 +13,10 @@ from urllib.error import URLError
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app import ArkProxyRouter, ConfigStore, RouteContext
+from linrouter_server.application import ArkProxyRouter, ConfigStore, RouteContext
 from linrouter_core.observability import ObservabilityService
 from linrouter_core.runtime.router_runtime import _read_sse_frame
-from settings_store import SettingsStore
+from linrouter_server.settings_store import SettingsStore
 
 
 def get_free_port() -> int:

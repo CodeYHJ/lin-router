@@ -8,9 +8,9 @@ from typing import Any
 
 import pytest
 
-from app import ArkProxyRouter, ConfigStore, RouteContext
+from linrouter_server.application import ArkProxyRouter, ConfigStore, RouteContext
 from linrouter_core.contracts import AllModelsFailedError
-from settings_store import SettingsStore
+from linrouter_server.settings_store import SettingsStore
 
 
 class LocalMockUpstream:

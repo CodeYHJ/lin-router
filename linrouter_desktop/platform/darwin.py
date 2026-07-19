@@ -104,7 +104,7 @@ class DarwinPlatform(PlatformBase):
     def _program_arguments(self) -> list[str]:
         if self.is_frozen:
             return [str(self.get_executable_path()), "--tray"]
-        return [sys.executable, str(self.get_project_root() / "desktop.py"), "--tray"]
+        return [sys.executable, "-m", "linrouter_desktop", "--tray"]
 
     def set_autostart(self, enabled: bool) -> bool:
         try:

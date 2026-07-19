@@ -10,7 +10,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app import AggregateModel, ArkProxyRouter, ConfigStore, RouteContext, create_server
+from linrouter_server.application import AggregateModel, ArkProxyRouter, ConfigStore, RouteContext, create_server
 from tests.test_v053_stats_preview_runtime import write_config
 
 
@@ -61,7 +61,8 @@ def test_aggregate_client_alias_routes_and_lists_models():
 
             context = server.store.find_aggregate_by_route_key("lr-ag1")
             assert context is not None
-            from app import RouteContext
+            from linrouter_server.application import RouteContext
+
             aggregate_context = RouteContext(
                 client_key="lr-ag1", group=None, group_id="__aggregate__ag1",
                 provider_type="aggregate", base_url="", display_name="agg-cheap",

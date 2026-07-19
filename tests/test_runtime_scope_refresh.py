@@ -10,7 +10,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-from app import create_server
+from linrouter_server.application import create_server
 from linrouter_core.observability import ObservabilityService
 
 

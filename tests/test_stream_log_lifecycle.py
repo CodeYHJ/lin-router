@@ -9,7 +9,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app import ConfigStore, ArkProxyRouter, RouteContext
+from linrouter_server.application import ConfigStore, ArkProxyRouter, RouteContext
 from tests.test_v053_stats_preview_runtime import write_config
 
 

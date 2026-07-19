@@ -4,7 +4,7 @@ import threading
 import urllib.error
 import urllib.request
 
-from app import create_server
+from linrouter_server.application import create_server
 from linrouter_core.config.models import AggregateMember, AggregateModel
 from linrouter_core.config.store import ConfigStore
 from linrouter_core.runtime.http_api_runtime import handle_post

@@ -8,7 +8,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from app import create_server
+from linrouter_server.application import create_server
 
 
 def _get_free_port() -> int:

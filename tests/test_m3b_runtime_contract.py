@@ -7,7 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from app import ArkProxyRouter
+from linrouter_server.application import ArkProxyRouter
 from linrouter_core.runtime import CandidateRuntime, NonStreamExecutionService
 from test_cooldown_classification import (
     BadRequest400Handler,

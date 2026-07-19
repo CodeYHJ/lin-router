@@ -11,8 +11,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-import app
-from app import ConfigStore, RouterHandler
+import linrouter_server.application as app
+from linrouter_server.application import ConfigStore, RouterHandler
 from linrouter_core.runtime.config_api_runtime import (
     ConfigApiError,
     export_backup_payload,

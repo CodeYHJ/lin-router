@@ -10,7 +10,8 @@ from pathlib import Path
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app import create_server
+from linrouter_server.application import create_server
+
 
 
 def get_free_port():

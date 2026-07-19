@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 import pytest
 
-from app import ArkProxyRouter, ConnectionGroup
+from linrouter_server.application import ArkProxyRouter, ConnectionGroup
 from linrouter_core.upstream import UpstreamAdapter
 from linrouter_core.upstream import models as upstream_models
 

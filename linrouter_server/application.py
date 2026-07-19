@@ -270,7 +270,7 @@ class ArkProxyRouter:
         # The compatibility facade only composes ports; execution loops are owned by CandidateRuntime.
         self.upstream_adapter = upstream_adapter or UpstreamAdapter(_ssl_context)
         self._upstream_client = self._create_upstream_client()
-        # 供 DebugCapture 的旧两参数构造路径读取；避免 debug_capture.py 反向 import app。
+        # 供 DebugCapture 的旧两参数构造路径读取；避免 capture 模块反向导入应用组装层。
         self._debug_capture_browser_user_agent = BROWSER_UA
         self._debug_capture_ssl_context = _ssl_context
         self.debug_capture = DebugCapture(

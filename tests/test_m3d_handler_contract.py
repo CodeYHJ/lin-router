@@ -11,7 +11,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from app import AllModelsFailedError, ArkProxyRouter, RouterHandler
+from linrouter_server.application import AllModelsFailedError, ArkProxyRouter, RouterHandler
 from linrouter_core.runtime.handler_runtime import handle_proxy_request
 
 

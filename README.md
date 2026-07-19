@@ -13,14 +13,13 @@ Lin Router 是本地 OpenAI 兼容中转站：它接收 Codex、Hermes 和通用
 ```bash
 python -m pip install -r requirements/desktop.txt
 python -m pip install -r requirements/test.txt  # 可选：运行测试
-python desktop.py
+python -m linrouter_desktop
 ```
 
 启动后仅驻留托盘/状态栏，不自动打开浏览器：
 
 ```bash
-python desktop.py --tray
-python -m linrouter --tray
+python -m linrouter_desktop --tray
 ```
 
 ### Windows 产物
@@ -160,7 +159,7 @@ Model: 当前选择的已验证模型
 python -m linrouter_server --port 18409 --config lin-router-config.json
 ```
 
-也可以直接双击 `start-preview-18409.bat`（Windows）。脚本默认使用 PATH 中的 `python`；如需指定解释器，设置 `LINROUTER_SERVER_PYTHON`，脚本不会探测固定虚拟环境目录。
+也可以直接双击 `scripts/server/start-preview-18409.bat`（Windows）。脚本默认使用 PATH 中的 `python`；如需指定解释器，设置 `LINROUTER_SERVER_PYTHON`，脚本不会探测固定虚拟环境目录。
 
 ## 跨平台构建
 
@@ -196,7 +195,7 @@ LINROUTER_DESKTOP_PYTHON=python bash packaging/desktop/build.sh --target darwin 
 
 Windows 安装包默认通过 `packaging/desktop/installer/build_self_installer.py` 生成，未安装 Inno Setup 也可出包；如本机存在 Inno Setup 6 / `ISCC`，则优先使用 `packaging/desktop/installer/LinRouter.iss`。安装包默认安装到当前用户的 `%LOCALAPPDATA%\Programs\LinRouter`，不需要管理员权限，默认创建桌面快捷方式；配置和日志写入 `%APPDATA%\LinRouter`。支持静默安装参数 `--silent --desktop --no-desktop --autostart --no-run`。
 
-v0.6.0 发布前检查清单见 `scripts/release-checklist-v0.6.0.md`；构建脚本会自动对 zip / setup 产物执行脱敏扫描。
+历史 v0.6.0 发布前检查清单归档于 `docs/archive/release-checklists/release-checklist-v0.6.0.md`；当前构建脚本会自动对 zip / setup 产物执行脱敏扫描。
 
 ### Windows 可选代码签名（发布机前置条件）
 

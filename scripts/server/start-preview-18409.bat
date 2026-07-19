@@ -1,5 +1,5 @@
 @echo off
-cd /d "%~dp0"
+cd /d "%~dp0\..\.."
 echo Lin Router preview: http://127.0.0.1:18409
 echo Config: lin-router-config.json
 echo.

@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 
-from app import ArkProxyRouter, ConfigStore, create_server
+from linrouter_server.application import ArkProxyRouter, ConfigStore, create_server
 from linrouter_core.config.models import AggregateMember, AggregateModel, ConnectionGroup, ModelConfig
 
 

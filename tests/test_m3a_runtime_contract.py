@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from app import ArkProxyRouter, ConfigStore
+from linrouter_server.application import ArkProxyRouter, ConfigStore
 from linrouter_core.runtime import SerialProtectionState
 
 

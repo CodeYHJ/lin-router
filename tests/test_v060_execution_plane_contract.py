@@ -4,10 +4,10 @@ from __future__ import annotations
 import inspect
 from pathlib import Path
 
-from app import AllModelsFailedError as AppAllModelsFailedError
-from app import ArkProxyRouter, RouteContext as AppRouteContext
-from app import StreamIdleTimeoutError as AppStreamIdleTimeoutError
-from app import UpstreamCandidate as AppUpstreamCandidate
+from linrouter_server.application import AllModelsFailedError as AppAllModelsFailedError
+from linrouter_server.application import ArkProxyRouter, RouteContext as AppRouteContext
+from linrouter_server.application import StreamIdleTimeoutError as AppStreamIdleTimeoutError
+from linrouter_server.application import UpstreamCandidate as AppUpstreamCandidate
 from linrouter_core.contracts.runtime_types import (
     AllModelsFailedError,
     RouteContext,

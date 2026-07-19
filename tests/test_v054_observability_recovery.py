@@ -10,7 +10,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app import create_server
+from linrouter_server.application import create_server
 from tests.test_v053_stats_preview_runtime import write_config
 
 

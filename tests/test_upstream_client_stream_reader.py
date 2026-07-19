@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from upstream_client import _LineReader
-from app import ArkProxyRouter
+from linrouter_server.upstream_client import _LineReader
+from linrouter_server.application import ArkProxyRouter
 from linrouter_core.runtime.execution_runtime_ports import StreamLifecyclePort
 
 

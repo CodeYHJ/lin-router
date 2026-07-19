@@ -3,8 +3,8 @@ from __future__ import annotations
 import json
 import time
 
-from app import ArkProxyRouter, ConfigStore
-from settings_store import SettingsStore
+from linrouter_server.application import ArkProxyRouter, ConfigStore
+from linrouter_server.settings_store import SettingsStore
 from linrouter_core.runtime import CandidateHealthService
 
 
