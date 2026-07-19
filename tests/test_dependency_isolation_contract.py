@@ -60,23 +60,21 @@ def test_project_does_not_require_uv_manifests() -> None:
 
 def test_github_workflows_use_role_requirements_without_uv() -> None:
     ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
-    package = (ROOT / ".github" / "workflows" / "package.yml").read_text(encoding="utf-8")
-    for workflow in (ci, package):
-        lowered = workflow.lower()
-        assert "astral-sh/setup-uv" not in lowered
-        assert "uv_project_environment" not in lowered
-        assert "uv sync" not in lowered
-        assert "uv run" not in lowered
-        assert "cache: pip" in workflow
-        assert "python -m pip install -r requirements/package.txt" in workflow
+    lowered = ci.lower()
+    assert "astral-sh/setup-uv" not in lowered
+    assert "uv_project_environment" not in lowered
+    assert "uv sync" not in lowered
+    assert "uv run" not in lowered
+    assert "cache: pip" in ci
+    assert "python -m pip install -r requirements/package.txt" in ci
     assert "python -m pip install -r requirements/test.txt" in ci
+    assert not (ROOT / ".github" / "workflows" / "package.yml").exists()
 
 
 def test_github_workflows_use_node24_action_versions() -> None:
     ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
-    package = (ROOT / ".github" / "workflows" / "package.yml").read_text(encoding="utf-8")
     docker = (ROOT / ".github" / "workflows" / "docker-build.yml").read_text(encoding="utf-8")
-    combined = f"{ci}\n{package}\n{docker}"
+    combined = f"{ci}\n{docker}"
     for deprecated in (
         "actions/checkout@v4",
         "actions/setup-python@v5",
@@ -88,13 +86,13 @@ def test_github_workflows_use_node24_action_versions() -> None:
     assert "actions/checkout@v6" in combined
     assert "actions/setup-python@v6" in combined
     assert "actions/upload-artifact@v7" in combined
-    assert "actions/download-artifact@v8" in package
-    assert "softprops/action-gh-release@v3" in package
 
 
 def test_docker_build_workflow_only_builds_the_server_image() -> None:
     workflow = (ROOT / ".github" / "workflows" / "docker-build.yml").read_text(encoding="utf-8")
     assert "workflow_dispatch:" in workflow
+    assert "branches: [main]" in workflow
+    assert "refactor/desktop-docker-isolation" not in workflow
     assert "packaging/docker/**" in workflow
     assert "requirements/server.txt" in workflow
     assert "scripts/ci/verify_build_isolation.py" in workflow
@@ -105,13 +103,14 @@ def test_docker_build_workflow_only_builds_the_server_image() -> None:
     assert "packaging/desktop" not in workflow
 
 
-def test_docker_hub_publish_workflow_uses_the_server_context_and_shared_secrets() -> None:
-    workflow = (ROOT / ".github" / "workflows" / "vibe-coding-docker-push.yml").read_text(encoding="utf-8")
+def test_docker_hub_publish_job_uses_the_server_context_and_shared_secrets() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "docker-build.yml").read_text(encoding="utf-8")
     assert "workflow_dispatch:" in workflow
-    assert 'branches: [main, refactor/desktop-docker-isolation]' in workflow
-    assert "schedule:" not in workflow
-    assert '"packaging/docker/**"' in workflow
-    assert '".github/workflows/vibe-coding-docker-push.yml"' in workflow
+    assert "branches: [main]" in workflow
+    assert "refactor/desktop-docker-isolation" not in workflow
+    assert "publish:" in workflow
+    assert "needs: build" in workflow
+    assert "github.ref == 'refs/heads/main'" in workflow
     assert "docker/login-action@v3" in workflow
     assert "secrets.DOCKER_USERNAME" in workflow
     assert "secrets.DOCKER_TOKEN" in workflow
@@ -119,37 +118,24 @@ def test_docker_hub_publish_workflow_uses_the_server_context_and_shared_secrets(
     assert "context: ." in workflow
     assert "file: ./packaging/docker/Dockerfile" in workflow
     assert "platforms: linux/amd64,linux/arm64" in workflow
-    assert "codeyhj/vibe-coding:latest" in workflow
-    assert "cache-from: type=gha,scope=vibe-coding-dockerfile" in workflow
-    assert "cache-to: type=gha,mode=max,scope=vibe-coding-dockerfile" in workflow
+    assert "codeyhj/agent-router:latest" in workflow
+    assert "cache-from: type=gha,scope=agent-router-dockerfile" in workflow
+    assert "cache-to: type=gha,mode=max,scope=agent-router-dockerfile" in workflow
     assert "packaging/desktop" not in workflow
+    assert {path.name for path in (ROOT / ".github" / "workflows").glob("*.yml")} == {
+        "ci.yml",
+        "docker-build.yml",
+    }
 
 
-def test_release_tagged_source_verification_is_commented_out() -> None:
-    package = (ROOT / ".github" / "workflows" / "package.yml").read_text(encoding="utf-8")
-    assert "\n  verify:\n" not in package
-    assert "\n  # verify:\n" in package
-    assert "#   name: Verify tagged source" in package
-    assert "github.event.repository.default_branch" not in package
-    assert "needs: resolve" in package
-    assert 'git cat-file -e "${tag}:${required_path}"' in package
-    for required_path in (
-        "requirements/server.txt",
-        "requirements/desktop.txt",
-        "requirements/package.txt",
-        "packaging/desktop/build.sh",
-        "packaging/desktop/entrypoint.py",
-        "scripts/ci/verify_build_isolation.py",
-    ):
-        assert required_path in package
+def test_release_workflow_is_removed_instead_of_disabled() -> None:
+    assert not (ROOT / ".github" / "workflows" / "package.yml").exists()
 
 
-def test_docker_smoke_python_block_stays_inside_the_yaml_run_block() -> None:
+def test_ci_does_not_contain_a_docker_runtime_smoke_job() -> None:
     ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
-    assert 'docker exec -i "$container_id" python - <<\'PY\'' in ci
-    assert "\ntry:\n" not in ci
-    assert "\n          try:\n" in ci
-    assert "\n          PY\n" in ci
+    assert "build_docker_smoke:" not in ci
+    assert "docker run" not in ci
 
 
 def test_preview_entrypoint_does_not_bind_the_local_environment_layout() -> None:

@@ -165,7 +165,7 @@ python -m linrouter_server --port 18409 --config lin-router-config.json
 
 使用 Desktop 专用构建脚本产出 Windows `.exe` 或 macOS `.app`/`.dmg`。构建依赖安装在独立的 Desktop 环境中；脚本通过 `LINROUTER_DESKTOP_PYTHON` 选择构建解释器，未设置时使用当前 `python`。
 
-提交验证和跨平台产物的首选入口是 GitHub Actions：`CI` workflow 在 PR/手动触发时构建 Docker Server、Windows preview 和 macOS preview；带版本 tag 或手动指定 tag 时由 `Release package` workflow 构建正式 Windows/macOS 产物。Linux Desktop 暂不作为支持目标。下面的本地命令用于开发调试，产物仍写入 Desktop 专属目录。
+提交验证和跨平台预览产物的入口是 GitHub Actions：`CI` workflow 在 PR/手动触发时构建 Windows preview 和 macOS preview，Docker build/publish 由独立 Docker workflow 负责。仓库不再保留 tag 自动发布 workflow；需要正式 Windows/macOS 产物时，使用下面同一套 Desktop 构建脚本并按发布要求人工验收。Linux Desktop 暂不作为支持目标，产物仍写入 Desktop 专属目录。
 
 ```bash
 # macOS
@@ -246,6 +246,58 @@ docker run --rm -p 18400:18400 -v lin-router-data:/data lin-router:local
 ```
 
 配置和日志写入 `/data`；示例使用 named volume，容器内的 UID 10001 可以直接写入，且容器重建后数据仍保留。Desktop 的托盘、平台适配、资源和构建工具不会进入最终镜像。
+
+### Docker Hub 镜像本地验收
+
+`main` 分支相关 Docker/Server 文件更新后，GitHub Actions 会在 Docker build 和 Desktop 写集保护通过后发布个人镜像。发布完成后，可以在本地拉取并验收启动与应用接口：
+
+```bash
+set -euo pipefail
+docker pull codeyhj/agent-router:latest
+test "$(docker run --rm codeyhj/agent-router:latest id -u)" = "10001"
+docker run --rm codeyhj/agent-router:latest test ! -e /app/linrouter_desktop
+docker run --rm codeyhj/agent-router:latest test ! -e /app/packaging/desktop
+for module in pystray PIL PyInstaller; do
+  if docker run --rm codeyhj/agent-router:latest python -c "import ${module}"; then
+    echo "镜像不应包含 Desktop 依赖或打包工具：${module}" >&2
+    exit 1
+  fi
+done
+
+container_name=agent-router-local
+volume_name=agent-router-data
+cleanup_container() {
+  docker rm -f "$container_name" >/dev/null 2>&1 || true
+}
+trap cleanup_container EXIT
+cleanup_container
+docker volume create "$volume_name" >/dev/null
+docker run -d --name "$container_name" -p 18400:18400 -v "$volume_name:/data" codeyhj/agent-router:latest >/dev/null
+for _ in $(seq 1 30); do
+  if [ "$(docker inspect --format '{{.State.Health.Status}}' "$container_name" 2>/dev/null || true)" = "healthy" ]; then
+    break
+  fi
+  sleep 1
+done
+test "$(docker inspect --format '{{.State.Health.Status}}' "$container_name")" = "healthy"
+docker exec "$container_name" python -c "import urllib.request; assert urllib.request.urlopen('http://127.0.0.1:18400/health').status == 200"
+docker exec "$container_name" python -c "import json,urllib.request; request=urllib.request.Request('http://127.0.0.1:18400/api/settings', data=json.dumps({'theme':'dark'}).encode(), headers={'Content-Type':'application/json'}, method='POST'); assert json.load(urllib.request.urlopen(request))['theme'] == 'dark'"
+
+# 重建容器，确认 named volume 中的设置仍存在
+docker rm -f "$container_name" >/dev/null
+docker run -d --name "$container_name" -p 18400:18400 -v "$volume_name:/data" codeyhj/agent-router:latest >/dev/null
+for _ in $(seq 1 30); do
+  if docker exec "$container_name" python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:18400/health', timeout=1)" 2>/dev/null; then
+    break
+  fi
+  sleep 1
+done
+docker exec "$container_name" python -c "import json,urllib.request; assert json.load(urllib.request.urlopen('http://127.0.0.1:18400/api/settings'))['theme'] == 'dark'"
+
+# 清理容器；named volume 默认保留，确认不再需要数据后再显式执行 docker volume rm。
+cleanup_container
+trap - EXIT
+```
 
 ## 新手安装说明（Windows）
 
