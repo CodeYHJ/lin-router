@@ -1518,3 +1518,11 @@ RC3 ──────┘
 5. Docker runtime smoke 仍按既定 gate 暂停；在上述写集和目标入口验证通过前不得解除 `if: ${{ false }}`。
 
 上述五项是目标环境证据缺口，不是当前已复现的本地代码失败。历史归档文档中的旧命令只描述对应旧版本，不能作为当前执行入口。
+
+### 18.15 Windows runner 边界校验 shell 修复（2026-07-19）
+
+- `v0.6.5` 的 macOS build 已成功；Windows build 已完成产物构建，但边界校验步骤失败。
+- 失败原因是快照步骤使用 Bash 写入 `$RUNNER_TEMP/docker-boundary.json`，校验步骤未声明 shell，Windows 默认 PowerShell 将 `$RUNNER_TEMP` 当作普通变量并展开为空，最终读取了 `\docker-boundary.json`。
+- `ci.yml` 和 `package.yml` 的所有 `Verify Desktop build preserved Docker outputs` 步骤现统一显式使用 `shell: bash`；macOS 行为保持不变，Windows 与快照步骤使用相同的环境变量语义。
+- 构建隔离契约测试会检查 CI 中两个校验步骤和 Release 中一个校验步骤均固定为 Bash，防止再次回退到平台默认 shell。
+- 修复后仍需在 Windows runner 重跑 CI/Release；校验通过后才能将 `v0.6.5` 的 Windows 构建边界验收记为完成。

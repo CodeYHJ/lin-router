@@ -206,6 +206,7 @@ jobs:
 
       - name: Verify Desktop build preserved Docker outputs
         if: always()
+        shell: bash
         run: >-
           python scripts/ci/verify_build_isolation.py verify
           --snapshot "$RUNNER_TEMP/docker-boundary.json"

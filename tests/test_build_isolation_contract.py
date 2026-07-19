@@ -137,10 +137,19 @@ def test_supported_build_workflows_guard_the_other_build_outputs() -> None:
 
     assert "build/desktop dist/desktop" in docker
     assert "Verify Docker build preserved Desktop outputs" in docker
-    for workflow in (ci, package):
+    verify_step = (
+        "      - name: Verify Desktop build preserved Docker outputs\n"
+        "        if: always()\n"
+        "        shell: bash\n"
+        "        run: >-\n"
+    )
+    for workflow, expected_steps in ((ci, 2), (package, 1)):
         assert "build/docker dist/docker packaging/docker" in workflow
         assert "Verify Desktop build preserved Docker outputs" in workflow
         assert "if: always()" in workflow
+        # Windows defaults to PowerShell, where $RUNNER_TEMP does not read an
+        # environment variable. Keep the snapshot and verification in Bash.
+        assert workflow.count(verify_step) == expected_steps
 
 
 def test_docker_runtime_smoke_stays_paused_until_build_boundaries_pass() -> None:
