@@ -105,6 +105,26 @@ def test_docker_build_workflow_only_builds_the_server_image() -> None:
     assert "packaging/desktop" not in workflow
 
 
+def test_docker_hub_publish_workflow_uses_the_server_context_and_shared_secrets() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "vibe-coding-docker-push.yml").read_text(encoding="utf-8")
+    assert "workflow_dispatch:" in workflow
+    assert 'branches: [main]' in workflow
+    assert "schedule:" not in workflow
+    assert '"packaging/docker/**"' in workflow
+    assert '".github/workflows/vibe-coding-docker-push.yml"' in workflow
+    assert "docker/login-action@v3" in workflow
+    assert "secrets.DOCKER_USERNAME" in workflow
+    assert "secrets.DOCKER_TOKEN" in workflow
+    assert "docker/build-push-action@v6" in workflow
+    assert "context: ." in workflow
+    assert "file: ./packaging/docker/Dockerfile" in workflow
+    assert "platforms: linux/amd64,linux/arm64" in workflow
+    assert "codeyhj/vibe-coding:latest" in workflow
+    assert "cache-from: type=gha,scope=vibe-coding-dockerfile" in workflow
+    assert "cache-to: type=gha,mode=max,scope=vibe-coding-dockerfile" in workflow
+    assert "packaging/desktop" not in workflow
+
+
 def test_release_tagged_source_verification_is_commented_out() -> None:
     package = (ROOT / ".github" / "workflows" / "package.yml").read_text(encoding="utf-8")
     assert "\n  verify:\n" not in package
