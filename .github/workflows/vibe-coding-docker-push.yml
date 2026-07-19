@@ -10,7 +10,7 @@ on:
       - "linrouter_server/**"
       - "web/shared/**"
       - ".github/workflows/vibe-coding-docker-push.yml"
-    branches: [main]
+    branches: [main, refactor/desktop-docker-isolation]
 
 jobs:
   build-and-push:

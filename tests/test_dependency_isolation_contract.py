@@ -108,7 +108,7 @@ def test_docker_build_workflow_only_builds_the_server_image() -> None:
 def test_docker_hub_publish_workflow_uses_the_server_context_and_shared_secrets() -> None:
     workflow = (ROOT / ".github" / "workflows" / "vibe-coding-docker-push.yml").read_text(encoding="utf-8")
     assert "workflow_dispatch:" in workflow
-    assert 'branches: [main]' in workflow
+    assert 'branches: [main, refactor/desktop-docker-isolation]' in workflow
     assert "schedule:" not in workflow
     assert '"packaging/docker/**"' in workflow
     assert '".github/workflows/vibe-coding-docker-push.yml"' in workflow
