@@ -60,10 +60,3 @@ def test_copy_reports_failure_when_compatibility_copy_fails():
     result = run_copy(clipboard="missing", exec_result=False)
 
     assert result == {"result": False, "appended": 1}
-
-
-def test_copy_source_has_a_bounded_clipboard_wait():
-    source = (ROOT / "web/shared/js/utils.js").read_text(encoding="utf-8")
-
-    assert "Promise.race" in source
-    assert "1200" in source

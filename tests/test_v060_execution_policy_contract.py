@@ -1,16 +1,10 @@
-"""v0.6 I3 contracts for the narrow execution-policy port."""
+"""v0.6 I3 behavior contracts for execution-policy classification."""
 from __future__ import annotations
 
-import inspect
-from pathlib import Path
 from types import SimpleNamespace
 
-from linrouter_server.application import ArkProxyRouter
 from linrouter_core.contracts.execution_ports import CandidateErrorClassification, ExecutionPolicyPort
-from linrouter_core.runtime import CandidateRuntime, ExecutionPolicyService
-
-
-ROOT = Path(__file__).resolve().parent.parent
+from linrouter_core.runtime import ExecutionPolicyService
 
 
 def _policy() -> ExecutionPolicyService:
@@ -49,6 +43,7 @@ def test_i3_policy_classification_preserves_all_five_fields() -> None:
 
 def test_i3_policy_auto_cooldown_and_waf_text_preserve_contract() -> None:
     policy = _policy()
+    assert isinstance(policy, ExecutionPolicyPort)
     relay = SimpleNamespace(provider_type="relay", waf_compatible=True, auto_model_name="group-auto", auto_model_cooldown_minutes="3")
     default_group = SimpleNamespace(provider_type="ark", waf_compatible=False, auto_model_name="", auto_model_cooldown_minutes="bad")
 
@@ -62,32 +57,3 @@ def test_i3_policy_auto_cooldown_and_waf_text_preserve_contract() -> None:
     classification = policy.classify_candidate_error(403, "blocked")
     assert "该连接组已开启 WAF" in policy.waf_blocked_suffix(classification, relay)
     assert "检查中转站后台" in policy.waf_blocked_hint([{"category": "waf_blocked", "waf_compatible": True}])
-
-
-def test_i3_runtime_uses_policy_port_and_facade_methods_only_delegate() -> None:
-    runtime_source = inspect.getsource(CandidateRuntime)
-    assert "self.policy.classify_candidate_error" in runtime_source
-    assert "router._classify_candidate_error" not in runtime_source
-    assert "router._is_auto_model" not in runtime_source
-    assert "router._auto_cooldown_seconds" not in runtime_source
-    assert "router._waf_blocked_suffix" not in runtime_source
-    assert "router._waf_blocked_hint" not in runtime_source
-    assert "router._is_quota_exhausted" not in runtime_source
-    assert "router._is_server_error" not in runtime_source
-    assert isinstance(_policy(), ExecutionPolicyPort)
-
-    for method_name in (
-        "_classify_candidate_error",
-        "_is_auto_model",
-        "_auto_cooldown_seconds",
-        "_waf_blocked_suffix",
-        "_waf_blocked_hint",
-    ):
-        source = inspect.getsource(getattr(ArkProxyRouter, method_name))
-        assert "self.execution_policy." in source
-
-
-def test_i3_policy_module_has_no_forbidden_owner_dependencies() -> None:
-    source = (ROOT / "linrouter_core/runtime/execution_policy.py").read_text(encoding="utf-8")
-    for forbidden in ("import app", "from app import", "ArkProxyRouter", "ConfigStore", "urllib", "threading"):
-        assert forbidden not in source

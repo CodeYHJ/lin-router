@@ -123,7 +123,11 @@ def test_desktop_isolated_launch_skips_single_instance_guard(monkeypatch: pytest
 
 
 def test_desktop_tray_start_server_forwards_isolated_host_port(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    calls: list[tuple[str, int, Path]] = []
+    calls: list[dict[str, Any]] = []
+
+    class FakeDesktopPlatform:
+        def is_autostart_enabled(self) -> bool:
+            return False
 
     class FakeRouter:
         log_file = tmp_path / "lin-router-logs.jsonl"
@@ -140,20 +144,91 @@ def test_desktop_tray_start_server_forwards_isolated_host_port(monkeypatch: pyte
         def server_close(self) -> None:
             return None
 
-    def fake_create_server(host: str, port: int, config_path: Path) -> tuple[FakeServer, int, Path]:
-        calls.append((host, port, config_path))
+    platform = FakeDesktopPlatform()
+
+    def fake_create_server(
+        host: str,
+        port: int,
+        config_path: Path,
+        *,
+        platform: Any,
+        optional_capabilities: Any,
+        settings_store_instance: Any,
+        optional_resource_root: Path,
+        optional_resource_prefix: str,
+        optional_runtime_script: str,
+    ) -> tuple[FakeServer, int, Path]:
+        calls.append(
+            {
+                "host": host,
+                "port": port,
+                "config_path": config_path,
+                "platform": platform,
+                "optional_capabilities": optional_capabilities,
+                "settings_store_instance": settings_store_instance,
+                "optional_resource_root": optional_resource_root,
+                "optional_resource_prefix": optional_resource_prefix,
+                "optional_runtime_script": optional_runtime_script,
+            }
+        )
         return FakeServer(), port, config_path
 
     monkeypatch.setattr(app, "create_server", fake_create_server)
+    monkeypatch.setattr(desktop, "get_platform", lambda: platform)
 
     config_path = tmp_path / "lin-router-config.json"
     tray = desktop.LinRouterTray(config_path=config_path, host="127.0.0.1", port=18563)
 
     assert tray.start_server() is True
     try:
-        assert calls == [("127.0.0.1", 18563, config_path)]
+        assert len(calls) == 1
+        assert calls[0] == {
+            "host": "127.0.0.1",
+            "port": 18563,
+            "config_path": config_path,
+            "platform": platform,
+            "optional_capabilities": tray.optional_capabilities,
+            "settings_store_instance": tray.settings_store,
+            "optional_resource_root": Path(desktop.__file__).resolve().parents[1] / "web" / "desktop",
+            "optional_resource_prefix": "desktop",
+            "optional_runtime_script": '<script src="desktop/js/settings-startup.js"></script>',
+        }
         assert tray.ui_url == "http://127.0.0.1:18563"
         assert tray.base_url == "http://127.0.0.1:18563/v1"
         assert tray.log_file == tmp_path / "lin-router-logs.jsonl"
     finally:
         tray.stop_server()
+
+
+def test_desktop_tray_create_server_type_error_is_not_retried(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls: list[dict[str, Any]] = []
+
+    class FakeDesktopPlatform:
+        def is_autostart_enabled(self) -> bool:
+            return False
+
+    def fake_create_server(*args: Any, **kwargs: Any) -> tuple[Any, int, Path]:
+        calls.append({"args": args, "kwargs": kwargs})
+        raise TypeError("unexpected keyword argument: optional_capabilities")
+
+    platform = FakeDesktopPlatform()
+    monkeypatch.setattr(app, "create_server", fake_create_server)
+    monkeypatch.setattr(desktop, "get_platform", lambda: platform)
+
+    tray = desktop.LinRouterTray(config_path=tmp_path / "lin-router-config.json", port=18564)
+
+    assert tray.start_server() is False
+    assert len(calls) == 1
+    assert len(calls[0]["args"]) == 3
+    assert set(calls[0]["kwargs"]) == {
+        "platform",
+        "optional_capabilities",
+        "settings_store_instance",
+        "optional_resource_root",
+        "optional_resource_prefix",
+        "optional_runtime_script",
+    }
+    assert tray.server is None
+    assert tray.server_thread is None

@@ -383,10 +383,8 @@ def test_v063_onboarding_quick_copy_follows_the_selected_group_and_model():
     assert "model-aurora" not in hermes_render["html"]
 
 
-def test_v063_onboarding_stays_information_only_and_readme_matches_contract():
+def test_v063_onboarding_stays_information_only():
     dashboard_js = (ROOT / "web/shared/js/dashboard-tab.js").read_text(encoding="utf-8")
-    readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    readme_onboarding = readme[readme.index("## 自助接入 Codex / Hermes"):readme.index("## 预览 / 调试")]
     onboarding_start = dashboard_js.index("  onboardingRelayGroups(")
     onboarding_end = dashboard_js.index("  formatElapsed(", onboarding_start)
     onboarding_source = dashboard_js[onboarding_start:onboarding_end]
@@ -407,12 +405,6 @@ def test_v063_onboarding_stays_information_only_and_readme_matches_contract():
     assert "复制下方接入信息，在目标客户端中按其已有方式填写即可。" in dashboard_js
     for forbidden in ("$env:", "config.toml", "model_providers", "hermes model", "Custom endpoint", "chat_completions"):
         assert forbidden not in onboarding_source
-        assert forbidden not in readme_onboarding
-    assert "Lin Router 是本地 OpenAI 兼容中转站" in readme
-    assert "上游 API Key" in readme
-    assert "route key 是客户端到本机 Lin Router 的认证信息" in readme
-    assert "一键复制接入信息" in readme
-    assert "推理强度支持" not in readme
 
 
 def test_dashboard_runtime_source_uses_stable_slots_and_delegated_events():

@@ -264,58 +264,6 @@ docker compose -f packaging/docker/compose.yml down
 
 `down` 不会删除 `agent-router-data` 数据卷；确认不再需要配置和日志后，才使用 `docker compose -f packaging/docker/compose.yml down -v` 删除数据。
 
-### Docker Hub 镜像本地验收
-
-`main` 分支相关 Docker/Server 文件更新后，GitHub Actions 会在 Docker build 和 Desktop 写集保护通过后发布个人镜像。发布完成后，可以在本地拉取并验收启动与应用接口：
-
-```bash
-set -euo pipefail
-docker pull codeyhj/agent-router:latest
-test "$(docker run --rm codeyhj/agent-router:latest id -u)" = "10001"
-docker run --rm codeyhj/agent-router:latest test ! -e /app/linrouter_desktop
-docker run --rm codeyhj/agent-router:latest test ! -e /app/packaging/desktop
-for module in pystray PIL PyInstaller; do
-  if docker run --rm codeyhj/agent-router:latest python -c "import ${module}"; then
-    echo "镜像不应包含 Desktop 依赖或打包工具：${module}" >&2
-    exit 1
-  fi
-done
-
-container_name=agent-router-local
-volume_name=agent-router-data
-cleanup_container() {
-  docker rm -f "$container_name" >/dev/null 2>&1 || true
-}
-trap cleanup_container EXIT
-cleanup_container
-docker volume create "$volume_name" >/dev/null
-docker run -d --name "$container_name" -p 18400:18400 -v "$volume_name:/data" codeyhj/agent-router:latest >/dev/null
-for _ in $(seq 1 30); do
-  if [ "$(docker inspect --format '{{.State.Health.Status}}' "$container_name" 2>/dev/null || true)" = "healthy" ]; then
-    break
-  fi
-  sleep 1
-done
-test "$(docker inspect --format '{{.State.Health.Status}}' "$container_name")" = "healthy"
-docker exec "$container_name" python -c "import urllib.request; assert urllib.request.urlopen('http://127.0.0.1:18400/health').status == 200"
-docker exec "$container_name" python -c "import json,urllib.request; request=urllib.request.Request('http://127.0.0.1:18400/api/settings', data=json.dumps({'theme':'dark'}).encode(), headers={'Content-Type':'application/json'}, method='POST'); assert json.load(urllib.request.urlopen(request))['theme'] == 'dark'"
-
-# 重建容器，确认 named volume 中的设置仍存在
-docker rm -f "$container_name" >/dev/null
-docker run -d --name "$container_name" -p 18400:18400 -v "$volume_name:/data" codeyhj/agent-router:latest >/dev/null
-for _ in $(seq 1 30); do
-  if docker exec "$container_name" python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:18400/health', timeout=1)" 2>/dev/null; then
-    break
-  fi
-  sleep 1
-done
-docker exec "$container_name" python -c "import json,urllib.request; assert json.load(urllib.request.urlopen('http://127.0.0.1:18400/api/settings'))['theme'] == 'dark'"
-
-# 清理容器；named volume 默认保留，确认不再需要数据后再显式执行 docker volume rm。
-cleanup_container
-trap - EXIT
-```
-
 ## 新手安装说明（Windows）
 
 1. 下载 `LinRouter-Setup-v0.6.0-win-x64.exe`，双击安装；如果 Windows Defender 提示未知发布者，确认来源是本项目发布包后选择“仍要运行”。

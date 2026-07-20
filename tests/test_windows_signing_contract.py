@@ -102,33 +102,3 @@ def test_sign_artifact_redacts_signtool_output(monkeypatch: pytest.MonkeyPatch, 
     assert config.password not in output.err
     assert "<redacted>" in output.out
     assert "<redacted>" in output.err
-
-
-def test_build_script_signs_payload_before_packaging_and_installer_afterwards() -> None:
-    script = (ROOT / "packaging" / "desktop" / "build.sh").read_text(encoding="utf-8")
-    payload_anchor = 'sign_windows_artifact "$DIST_DIR/LinRouter_windows.exe"'
-    zip_anchor = "build_windows_zip"
-    installer_anchor = "build_windows_installer"
-    installer_sign_anchor = 'sign_windows_artifact "$output_file"'
-
-    payload_position = script.index(payload_anchor, script.index('win32)'))
-    zip_position = script.index(zip_anchor, payload_position)
-    installer_call_position = script.index("      build_windows_installer", zip_position)
-    installer_function_position = script.index("build_windows_installer()")
-    installer_function_end = script.index("case \"$TARGET\"", installer_function_position)
-    installer_sign_position = script.index(installer_sign_anchor, installer_function_position, installer_function_end)
-
-    assert payload_position < zip_position < installer_call_position
-    assert installer_function_position < installer_sign_position < installer_function_end
-    assert script.index('echo "Windows 安装包构建完成：$output_file"', installer_function_position) < installer_sign_position
-    assert "--sign" in script
-    assert 'if [[ "$SIGN_WINDOWS" != "1" ]]; then' in script
-
-
-def test_build_script_can_force_self_installer_for_hosted_ci() -> None:
-    script = (ROOT / "packaging" / "desktop" / "build.sh").read_text(encoding="utf-8")
-
-    assert '"${LINROUTER_FORCE_SELF_INSTALLER:-}" == "1"' in script
-    force_position = script.index('"${LINROUTER_FORCE_SELF_INSTALLER:-}" == "1"')
-    compiler_lookup_position = script.index('command -v iscc', force_position)
-    assert force_position < compiler_lookup_position

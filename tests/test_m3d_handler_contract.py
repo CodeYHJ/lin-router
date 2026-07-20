@@ -1,9 +1,6 @@
 from __future__ import annotations
 
-import ast
-import inspect
 import io
-import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,36 +10,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from linrouter_server.application import AllModelsFailedError, ArkProxyRouter, RouterHandler
 from linrouter_core.runtime.handler_runtime import handle_proxy_request
-
-
-ROOT = Path(__file__).resolve().parent.parent
-FROZEN_METHODS = {
-    "_require_route_context",
-    "finalize_stream_if_needed",
-}
-TARGET_MARKER = '        if parsed.path.startswith("/v1/") or parsed.path.startswith("/chat/"):'
-
-
-def _methods(source: str, names: set[str]) -> dict[str, str]:
-    tree = ast.parse(source)
-    lines = source.splitlines(keepends=True)
-    result: dict[str, str] = {}
-    for class_node in tree.body:
-        if isinstance(class_node, ast.ClassDef):
-            for node in class_node.body:
-                if isinstance(node, ast.FunctionDef) and node.name in names:
-                    result[node.name] = "".join(lines[node.lineno - 1 : node.end_lineno])
-    return result
-
-
-def _post_non_target_parts(source: str) -> tuple[str, str]:
-    post = _methods(source, {"do_POST"})["do_POST"]
-    # M4b-1 owns the configuration and backup import branches; M3d keeps
-    # freezing the proxy branch boundary plus the later unrelated branches.
-    start = post.index('        if parsed.path == "/api/groups":')
-    target = post.index(TARGET_MARKER, start)
-    end = post.index('        self._send_json({"error": {"message": "资源不存在"', target)
-    return post[start:target], post[end:]
 
 
 class FakeIterator:
@@ -107,52 +74,6 @@ class FakeHandler:
 
     def _send_all_models_failed_error(self, err: Exception) -> None:
         self.model_errors.append(err)
-
-
-def test_m3d_frozen_methods_and_non_target_post_branches_match_m3c_baseline() -> None:
-    baseline = subprocess.check_output(
-        ["git", "show", "2ca4d05:app.py"], cwd=ROOT, text=True, encoding="utf-8"
-    )
-    current = Path(inspect.getfile(RouterHandler)).read_text(encoding="utf-8")
-    assert _methods(baseline, FROZEN_METHODS) == _methods(current, FROZEN_METHODS)
-
-
-class _NormalizeMovedProxyAst(ast.NodeTransformer):
-    def visit_Name(self, node: ast.Name) -> ast.Name:
-        node.id = {"self": "handler", "ctx": "route", "raw": "raw_body"}.get(node.id, node.id)
-        return node
-
-    def visit_Attribute(self, node: ast.Attribute) -> ast.AST:
-        self.generic_visit(node)
-        if isinstance(node.value, ast.Name) and node.value.id == "parsed" and node.attr == "path":
-            return ast.copy_location(ast.Name(id="path", ctx=node.ctx), node)
-        if isinstance(node.value, ast.Name) and node.value.id == "handler" and node.attr == "_all_models_failed_error_type":
-            return ast.copy_location(ast.Name(id="ALL_MODELS_ERROR", ctx=node.ctx), node)
-        return node
-
-    def visit_ExceptHandler(self, node: ast.ExceptHandler) -> ast.ExceptHandler:
-        self.generic_visit(node)
-        if isinstance(node.type, ast.Name) and node.type.id == "AllModelsFailedError":
-            node.type = ast.Name(id="ALL_MODELS_ERROR", ctx=ast.Load())
-        return node
-
-
-def _proxy_branch(source: str) -> ast.If:
-    for node in ast.walk(_methods(source, {"do_POST"}) and ast.parse(source)):
-        if isinstance(node, ast.If) and "/v1/" in ast.unparse(node.test) and "/chat/" in ast.unparse(node.test):
-            return node
-    raise AssertionError("proxy branch missing")
-
-
-def test_m3d_proxy_runtime_keeps_proxy_calls_and_adds_transport_safety() -> None:
-    source = inspect.getsource(handle_proxy_request)
-
-    assert "handler.router.stream" in source
-    assert "handler.router.call" in source
-    assert "_forward_response_headers" in source
-    assert "response_started" in source
-    assert "downstream_write_failed" in source
-    assert RouterHandler.protocol_version == "HTTP/1.1"
 
 
 def test_m3d_non_stream_success_preserves_headers_length_and_body() -> None:

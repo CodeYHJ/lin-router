@@ -69,28 +69,21 @@ class LinRouterTray:
     def start_server(self) -> bool:
         try:
             from linrouter_server.application import create_server
-            try:
-                self.server, self.port, self.config_path = create_server(
-                    self.host,
-                    self.port,
-                    self.config_path,
-                    platform=get_platform(),
-                    optional_capabilities=self.optional_capabilities,
-                    settings_store_instance=self.settings_store,
-                    optional_resource_root=(
-                        Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[1])) / "desktop"
-                        if getattr(sys, "frozen", False)
-                        else Path(__file__).resolve().parents[1] / "web" / "desktop"
-                    ),
-                    optional_resource_prefix="desktop",
-                    optional_runtime_script='<script src="desktop/js/settings-startup.js"></script>',
-                )
-            except TypeError as exc:
-                # Preserve compatibility with older composition fakes/extensions;
-                # production create_server always accepts the injected arguments.
-                if "unexpected keyword argument" not in str(exc):
-                    raise
-                self.server, self.port, self.config_path = create_server(self.host, self.port, self.config_path)
+            self.server, self.port, self.config_path = create_server(
+                self.host,
+                self.port,
+                self.config_path,
+                platform=get_platform(),
+                optional_capabilities=self.optional_capabilities,
+                settings_store_instance=self.settings_store,
+                optional_resource_root=(
+                    Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[1])) / "desktop"
+                    if getattr(sys, "frozen", False)
+                    else Path(__file__).resolve().parents[1] / "web" / "desktop"
+                ),
+                optional_resource_prefix="desktop",
+                optional_runtime_script='<script src="desktop/js/settings-startup.js"></script>',
+            )
             self.log_file = self.server.router.log_file
         except Exception as exc:
             print(f"启动失败：{exc}")

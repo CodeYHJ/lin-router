@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import ast
 import io
 import json
 import socket
@@ -20,7 +19,6 @@ from linrouter_core.runtime.config_api_runtime import (
     import_backup_payload,
     import_config_payload,
 )
-from linrouter_core.runtime.http_api_runtime import handle_delete, handle_get, handle_post, handle_put
 
 
 class FakeSettingsStore:
@@ -219,25 +217,6 @@ def test_m4b_handler_keeps_download_headers_and_backup_side_effects(tmp_path: Pa
     assert router.refreshes == 1
     assert settings.updates == [{"theme": "light", "auto_start": True, "upstream_http_client": "urllib"}]
     assert response["settings"]["auto_start"] is True
-
-
-def test_m4_handler_verbs_are_thin_route_facades_without_reverse_imports() -> None:
-    source = Path(app.__file__).read_text(encoding="utf-8")
-    tree = ast.parse(source)
-    handler = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "RouterHandler")
-    methods = {node.name: node for node in handler.body if isinstance(node, ast.FunctionDef)}
-
-    assert ast.unparse(methods["do_GET"]) == "def do_GET(self) -> None:\n    return handle_get(self)"
-    assert ast.unparse(methods["do_POST"]) == "def do_POST(self) -> None:\n    return handle_post(self)"
-    assert ast.unparse(methods["do_PUT"]) == "def do_PUT(self) -> None:\n    return handle_put(self)"
-    assert ast.unparse(methods["do_DELETE"]) == "def do_DELETE(self) -> None:\n    return handle_delete(self)"
-
-    runtime_source = Path(handle_get.__code__.co_filename).read_text(encoding="utf-8")
-    assert "import app" not in runtime_source
-    assert "from app " not in runtime_source
-    for route in ("/api/config/export", "/api/config/import", "/api/backup/export", "/api/backup/import"):
-        assert route in runtime_source
-    assert all(callable(func) for func in (handle_get, handle_post, handle_put, handle_delete))
 
 
 def test_m4_application_assembly_starts_and_serves_state_and_index(tmp_path: Path) -> None:

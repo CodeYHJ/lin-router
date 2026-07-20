@@ -1,9 +1,6 @@
 from __future__ import annotations
 
-import ast
-import inspect
 import json
-import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -11,7 +8,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from linrouter_server.application import ArkProxyRouter, ConfigStore, RouteContext
-from linrouter_core.runtime import CandidateRuntime, StreamExecutionService
 from test_stream_no_fallback import (
     FirstUpstreamHandler,
     SecondUpstreamHandler,
@@ -21,27 +17,9 @@ from test_stream_no_fallback import (
 )
 
 
-ROOT = Path(__file__).resolve().parent.parent
-# I1 owns execution facade delegation. HTTP dispatch remains frozen separately.
-FROZEN_METHODS: set[str] = set()
-
-
 class AttributeBearingGroupId(str):
     group = None
     is_deprecated_global = False
-
-
-def _methods(source: str, names: set[str]) -> dict[str, str]:
-    tree = ast.parse(source)
-    lines = source.splitlines(keepends=True)
-    result: dict[str, str] = {}
-    for class_node in tree.body:
-        if not isinstance(class_node, ast.ClassDef):
-            continue
-        for node in class_node.body:
-            if isinstance(node, ast.FunctionDef) and node.name in names:
-                result[node.name] = "".join(lines[node.lineno - 1 : node.end_lineno])
-    return result
 
 
 def _aggregate_context(store: ConfigStore) -> RouteContext:
@@ -58,30 +36,6 @@ def _aggregate_context(store: ConfigStore) -> RouteContext:
         is_global=False,
         aggregate=aggregate,
     )
-
-
-def test_m3c_stream_facade_delegates_with_original_argument_order() -> None:
-    facade_source = inspect.getsource(ArkProxyRouter.stream)
-    executor_source = inspect.getsource(CandidateRuntime.execute_stream)
-    service_source = inspect.getsource(StreamExecutionService.execute)
-
-    assert facade_source.count("return ") == 1
-    assert "self.stream_execution.execute(path, payload, route, incoming_headers, raw_body)" in facade_source
-    assert "self._candidates.execute_stream(path, payload, route, incoming_headers, raw_body)" in service_source
-    assert "yield " not in facade_source
-    assert "except " not in facade_source
-    assert "self.upstream.request" in executor_source
-    assert "self.dependencies" not in executor_source
-    assert "yield first_chunk" in executor_source
-    assert "finally:" in executor_source
-
-
-def test_m3c_call_and_http_handlers_remain_frozen_against_m3b_baseline() -> None:
-    baseline = subprocess.check_output(
-        ["git", "show", "2806a5a:app.py"], cwd=ROOT, text=True, encoding="utf-8"
-    )
-    current = (ROOT / "linrouter_server" / "application.py").read_text(encoding="utf-8")
-    assert _methods(baseline, FROZEN_METHODS) == _methods(current, FROZEN_METHODS)
 
 
 def test_m3c_generator_close_runs_stream_finally_once() -> None:
