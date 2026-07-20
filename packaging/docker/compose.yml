@@ -1,0 +1,24 @@
+services:
+  agent-router:
+    # Docker Hub 发布镜像；更新镜像后先执行 docker compose pull。
+    image: codeyhj/agent-router:latest
+    container_name: agent-router
+    restart: unless-stopped
+    ports:
+      # 宿主机端口:容器端口。若修改容器端口，必须同步修改下方 LINROUTER_PORT。
+      - "18400:18400"
+    environment:
+      # 容器内监听地址。保持 0.0.0.0 才能通过 ports 从宿主机访问。
+      LINROUTER_HOST: 0.0.0.0
+      # Server 在容器内监听的端口，必须与 ports 右侧端口一致。
+      LINROUTER_PORT: "18400"
+      # Server 配置文件路径；应放在 /data 下以随 named volume 持久化。
+      LINROUTER_CONFIG: /data/lin-router-config.json
+    volumes:
+      # 配置、设置和日志均持久化到容器内 /data。
+      - agent-router-data:/data
+
+volumes:
+  agent-router-data:
+    # 固定实际 volume 名，避免随 Compose project 名变化。
+    name: agent-router-data

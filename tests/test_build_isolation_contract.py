@@ -182,6 +182,17 @@ def test_readme_documents_docker_hub_pull_and_local_runtime_acceptance() -> None
     assert "PyInstaller" in readme
 
 
+def test_compose_runs_only_the_published_server_image_with_persistent_data() -> None:
+    compose = (ROOT / "packaging" / "docker" / "compose.yml").read_text(encoding="utf-8")
+    assert "image: codeyhj/agent-router:latest" in compose
+    assert '"18400:18400"' in compose
+    assert "agent-router-data:/data" in compose
+    assert "restart: unless-stopped" in compose
+    assert "build:" not in compose
+    for desktop_only in ("linrouter_desktop", "packaging/desktop", "pystray", "PyInstaller"):
+        assert desktop_only not in compose
+
+
 def test_desktop_spec_uses_pyinstaller_context_and_packaging_entry() -> None:
     spec = (ROOT / "packaging" / "desktop" / "LinRouter.spec").read_text(encoding="utf-8")
     assert "SPECPATH" in spec

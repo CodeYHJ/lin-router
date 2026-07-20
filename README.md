@@ -247,6 +247,23 @@ docker run --rm -p 18400:18400 -v lin-router-data:/data lin-router:local
 
 配置和日志写入 `/data`；示例使用 named volume，容器内的 UID 10001 可以直接写入，且容器重建后数据仍保留。Desktop 的托盘、平台适配、资源和构建工具不会进入最终镜像。
 
+也可以使用仓库中的 Compose 配置直接启动 Docker Hub 镜像：
+
+```bash
+docker compose -f packaging/docker/compose.yml pull
+docker compose -f packaging/docker/compose.yml up -d
+docker compose -f packaging/docker/compose.yml ps
+```
+
+服务地址为 `http://127.0.0.1:18400`。查看日志和停止服务：
+
+```bash
+docker compose -f packaging/docker/compose.yml logs -f agent-router
+docker compose -f packaging/docker/compose.yml down
+```
+
+`down` 不会删除 `agent-router-data` 数据卷；确认不再需要配置和日志后，才使用 `docker compose -f packaging/docker/compose.yml down -v` 删除数据。
+
 ### Docker Hub 镜像本地验收
 
 `main` 分支相关 Docker/Server 文件更新后，GitHub Actions 会在 Docker build 和 Desktop 写集保护通过后发布个人镜像。发布完成后，可以在本地拉取并验收启动与应用接口：
