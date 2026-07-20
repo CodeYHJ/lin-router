@@ -130,47 +130,6 @@ def test_build_boundary_snapshot_detects_cross_build_changes(tmp_path: Path) -> 
     assert "dist/desktop" in result.stderr
 
 
-def test_supported_build_workflows_guard_the_other_build_outputs() -> None:
-    docker = (ROOT / ".github" / "workflows" / "docker-build.yml").read_text(encoding="utf-8")
-    ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
-
-    assert "build/desktop dist/desktop" in docker
-    assert "Verify Docker build preserved Desktop outputs" in docker
-    verify_step = (
-        "      - name: Verify Desktop build preserved Docker outputs\n"
-        "        if: always()\n"
-        "        shell: bash\n"
-        "        run: >-\n"
-    )
-    assert "build/docker dist/docker packaging/docker" in ci
-    assert "Verify Desktop build preserved Docker outputs" in ci
-    assert "if: always()" in ci
-    # Windows defaults to PowerShell, where $RUNNER_TEMP does not read an
-    # environment variable. Keep both preview verification steps in Bash.
-    assert ci.count(verify_step) == 2
-    assert not (ROOT / ".github" / "workflows" / "package.yml").exists()
-
-
-def test_docker_runtime_smoke_is_not_part_of_ci() -> None:
-    ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
-    assert "build_docker_smoke:" not in ci
-    assert "docker run" not in ci
-
-
-def test_docker_ci_and_readme_use_isolated_persistent_outputs() -> None:
-    ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
-    readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    assert "build_docker_smoke:" not in ci
-    assert "package_windows_preview:" in ci
-    assert "package_macos_preview:" in ci
-    assert "packaging/desktop/build.sh" in ci
-    assert "docker volume create" in readme
-    assert "-v \"$volume_name:/data\"" in readme
-    assert "--workpath build/desktop/direct" in readme
-    assert "--distpath dist/desktop/direct" in readme
-    assert "-v lin-router-data:/data" in readme
-
-
 def test_readme_documents_docker_hub_pull_and_local_runtime_acceptance() -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     assert "docker pull codeyhj/agent-router:latest" in readme

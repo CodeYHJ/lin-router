@@ -1548,7 +1548,7 @@ RC3 ──────┘
 #### DP1：收口为唯一 Docker workflow
 
 - 状态：本地实现完成，待 main runner 触发确认。
-- 修改范围：`.github/workflows/docker-build.yml`、删除重复 Docker Hub publish workflow、对应 workflow 契约测试。
+- 修改范围：`.github/workflows/docker-build.yml`、删除重复 Docker Hub publish workflow。
 - 实施要求：
   - `push.branches` 只保留 `main`，删除 `refactor/desktop-docker-isolation`。
   - 保留 `workflow_dispatch`，publish job 不设置 `if` 判断；从任何可选 ref 手动运行时，build 成功后直接发布 `latest`。
@@ -1566,7 +1566,7 @@ RC3 ──────┘
   - build、image inspect 或 Docker→Desktop 写集保护任一失败时，publish 必须跳过。
   - 保持 `linux/amd64,linux/arm64`、Buildx/QEMU、GHA cache 和 `codeyhj/agent-router:latest`。
   - 不得为了减少一次构建而删除现有写集保护；如重构为单次 Buildx 构建，必须提供等价的 image build 和边界失败证据。
-- 验收标准：workflow 契约测试固定 `publish.needs == build`；GitHub run 中 publish 只在 build 成功后开始。
+- 验收标准：以真实 GitHub run 为准，publish 只在 build 成功后开始；本地 pytest 不模拟或断言 GitHub Actions YAML。
 
 #### DP3：删除 CI 中停用的 Docker runtime smoke
 
@@ -1597,7 +1597,7 @@ RC3 ──────┘
 - 状态：本地回归与状态同步完成，待 DP1–DP4 的目标环境证据。
 - 依赖：DP1 至 DP4；DP4 的真实 Docker 结果可由用户补充确认。
 - 验收要求：
-  - 全量测试、Docker/依赖/workflow 契约测试通过。
+  - 全量业务测试、Docker/依赖边界测试通过；GitHub Actions 由真实 runner 结果验收，不纳入 pytest。
   - 所有 workflow YAML 解析、`git diff --check` 通过。
   - 更新第 15 节和 18.12–18.15 中已经被本节覆盖的旧状态；历史快照可以保留，但必须明确标注已被 18.16 覆盖。
   - 不处理 H1–H4，不扩展 Linux Desktop，不提交、推送或创建 tag，除非用户另行授权。
@@ -1623,7 +1623,17 @@ DP1 ──> DP2 ──> DP4 ──> DP5
 - 用户确认 `.github/workflows/package.yml` 不再需要；该 workflow 及其已停用代码直接删除，不保留注释或恒假入口。
 - tag 不再自动构建 Windows/macOS 产物，也不再自动创建 draft release。Windows/macOS preview 继续由 `ci.yml` 在 PR/手动触发时构建；正式产物使用同一 `packaging/desktop/build.sh` 人工构建和验收。
 - 当前 workflow 只剩 `ci.yml` 与 `docker-build.yml`：前者负责源码测试和 Desktop preview，后者负责 Docker build、边界校验和 Docker Hub publish；main 相关更新自动触发，其他 ref 可手动触发。
-- README 已删除自动 Release workflow 说明；契约测试改为要求 `package.yml` 不存在，防止以后以停用或注释形式重新出现。
+- README 已删除自动 Release workflow 说明；`package.yml` 已直接移除，不再用 pytest 对 workflow 文件存在性做文本断言。
 - 本节覆盖本文此前所有把 `package.yml` 或 tag 自动 release 写成当前交付要求的条款；历史过程可以保留原文件名，但不能作为当前入口。
 - 最新本地回归：全量测试 `277 passed`；当前两份 workflow YAML 解析、Python compileall、JavaScript `node --check`、Shell `bash -n` 和 `git diff --check` 均通过。
 - 当前没有已知本地代码不确定性；剩余证据仅为 Docker Hub publish 真实执行，以及发布后由用户本地 `docker pull` 完成容器运行验收。
+
+### 18.18 GitHub Actions 测试职责纠偏（2026-07-20）
+
+- 用户确认 `tests/` 不承担 GitHub Actions 模拟职责；workflow 属于 CI/CD 基础设施，不是业务代码。
+- 已删除所有读取或断言 `.github/workflows/*.yml` 的 pytest，包括 Action 版本、触发分支、job/step 名称、YAML 缩进、workflow 文件数量、publish 条件和已删除 job/file 等文本匹配。
+- pytest 不能模拟 GitHub 托管 runner、Actions runtime、secrets、权限、事件表达式、Windows/macOS shell、artifact 或 Docker Buildx，因此这些字符串断言不能作为 workflow 可运行证据。
+- GitHub Actions 的验收以真实 runner 结果为准；Docker 以真实 build/push/Compose 运行结果为准；Desktop 以 Windows/macOS 构建和运行结果为准。
+- `scripts/ci/verify_build_isolation.py` 仍作为构建过程调用的写集校验工具保留；其自身算法测试不是 GitHub Actions YAML 测试。
+- 业务行为、Server/Desktop schema 隔离、备份和 composition 等程序测试继续保留。
+- 共删除 9 个 GitHub Actions 相关测试；清理后完整业务与代码测试为 `269 passed`，测试目录中不再引用 `.github/workflows`。
